@@ -1,5 +1,5 @@
-﻿/**
- * DT Bot Core & DT CRM Core — Native WhatsApp Cloud API Server
+/**
+ * DT Bot Core & DT CRM Core — Production WhatsApp Cloud API Server
  * Built by DT Marketing
  */
 
@@ -7,39 +7,221 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const crypto = require('crypto');
 const admin = require('firebase-admin');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Enable CORS and JSON body parsing
+// Capture raw body for Meta HMAC-SHA256 signature verification
 app.use(cors());
-app.use(express.json());
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf;
+  }
+}));
 
-// Initialize Firebase Admin (uses default credentials or service account)
+// Initialize Firebase Admin SDK
+let db = null;
 if (!admin.apps.length) {
   try {
-    admin.initializeApp();
+    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+      });
+      console.log('✅ Firebase Admin initialized with service account.');
+    } else {
+      admin.initializeApp();
+      console.log('✅ Firebase Admin initialized with Application Default Credentials.');
+    }
+    db = admin.firestore();
   } catch (e) {
-    console.log('Firebase Admin initialized without default service account credentials.');
+    console.error('❌ Firebase Admin initialization error:', e.message);
+  }
+} else {
+  db = admin.firestore();
+}
+
+// Configuration
+const MASTER_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'dt_crm_whatsapp_verify_token_2026';
+const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || 'v21.0';
+const META_APP_SECRET = process.env.META_APP_SECRET || '';
+
+/**
+ * Check working hours against company timezone
+ */
+function checkWorkingHours(workingHours) {
+  if (!workingHours || !workingHours.enabled) return true;
+  try {
+    const now = new Date();
+    const tz = workingHours.timezone || 'America/Mexico_City';
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hour: 'numeric',
+      minute: 'numeric',
+      hour12: false,
+      weekday: 'numeric'
+    });
+    const parts = formatter.formatToParts(now);
+    let dayOfWeek = now.getDay();
+    let currentHour = now.getHours();
+    let currentMinute = now.getMinutes();
+
+    parts.forEach(p => {
+      if (p.type === 'hour') currentHour = parseInt(p.value, 10);
+      if (p.type === 'minute') currentMinute = parseInt(p.value, 10);
+    });
+
+    const allowedDays = workingHours.days || [1, 2, 3, 4, 5, 6];
+    if (!allowedDays.includes(dayOfWeek)) return false;
+
+    const [openH, openM] = (workingHours.open_time || '09:00').split(':').map(Number);
+    const [closeH, closeM] = (workingHours.close_time || '19:30').split(':').map(Number);
+
+    const currentTotal = currentHour * 60 + currentMinute;
+    const openTotal = openH * 60 + openM;
+    const closeTotal = closeH * 60 + closeM;
+
+    return currentTotal >= openTotal && currentTotal <= closeTotal;
+  } catch {
+    return true;
   }
 }
 
-const db = admin.apps.length ? admin.firestore() : null;
+/**
+ * Validate Meta Webhook Signature (X-Hub-Signature-256)
+ */
+function verifyMetaSignature(req) {
+  if (!META_APP_SECRET) {
+    req.signature_status = 'unverified_secret_missing';
+    console.warn('⚠️ META_APP_SECRET not configured in env. Signature verification skipped.');
+    return true;
+  }
 
-// Master verify token for Meta Webhook setup
-const MASTER_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'dt_crm_whatsapp_verify_token_2026';
-const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || 'v19.0';
+  const signature = req.headers['x-hub-signature-256'];
+  if (!signature) {
+    req.signature_status = 'missing';
+    console.warn('⚠️ Missing X-Hub-Signature-256 header in incoming request.');
+    return false;
+  }
+
+  const elements = signature.split('sha256=');
+  const signatureHash = elements[1];
+  if (!signatureHash) {
+    req.signature_status = 'malformed';
+    return false;
+  }
+
+  const expectedHash = crypto
+    .createHmac('sha256', META_APP_SECRET)
+    .update(req.rawBody || '')
+    .digest('hex');
+
+  try {
+    const isValid = crypto.timingSafeEqual(Buffer.from(signatureHash, 'utf8'), Buffer.from(expectedHash, 'utf8'));
+    req.signature_status = isValid ? 'verified' : 'invalid';
+    return isValid;
+  } catch {
+    req.signature_status = 'error';
+    return false;
+  }
+}
 
 /**
- * HEALTH CHECK
+ * Check if the inbound payload is a synthetic test from Meta Developers dashboard
+ * Note: Only inspect the sender field ('PHONE_NUMBER', dummy test strings).
+ * NEVER reject real messages whose body text might happen to contain 'MESSAGE_BODY'.
+ */
+function isSyntheticMetaPayload(from) {
+  if (!from) return true;
+  const cleanFrom = String(from).trim().toUpperCase();
+  return cleanFrom === 'PHONE_NUMBER' || cleanFrom === 'PHONE-NUMBER' || cleanFrom === '0';
+}
+
+/**
+ * Strictly resolve company tenant & access token by Phone Number ID.
+ * Multi-tenant Isolation Rule:
+ * 1. Strictly look up by phone_number_id. If multiple integrations share the same phone ID, reject as ambiguous.
+ * 2. Lookup by WABA ID ONLY if phone_number_id was omitted. If multiple integrations match the WABA ID, reject as ambiguous.
+ * 3. Reject unknown IDs without fallback to prevent cross-tenant leaks.
+ */
+async function resolveTenant(dbInstance, phoneNumberId, wabaId) {
+  if (!dbInstance) return null;
+  let intDoc = null;
+  let intDocId = null;
+
+  // 1. Strict lookup by verified phone_number_id
+  if (phoneNumberId) {
+    const snapByPhone = await dbInstance.collection('integrations')
+      .where('phone_number_id', '==', String(phoneNumberId).trim())
+      .limit(2)
+      .get();
+    if (!snapByPhone.empty) {
+      if (snapByPhone.docs.length > 1) {
+        console.warn(`⚠️ [Ambiguous Phone Number ID: ${phoneNumberId}] Multiple companies configured with identical Phone ID. Rejecting.`);
+        return null;
+      }
+      intDoc = snapByPhone.docs[0].data();
+      intDocId = snapByPhone.docs[0].id;
+    }
+  }
+
+  // 2. Strict lookup by whatsapp_business_account_id ONLY if phone_number_id was not supplied
+  if (!intDoc && !phoneNumberId && wabaId) {
+    const snapByWaba = await dbInstance.collection('integrations')
+      .where('whatsapp_business_account_id', '==', String(wabaId).trim())
+      .limit(2)
+      .get();
+    if (!snapByWaba.empty) {
+      if (snapByWaba.docs.length > 1) {
+        console.warn(`⚠️ [Ambiguous WABA ID: ${wabaId}] Multiple companies share WABA ID without Phone Number ID. Rejecting.`);
+        return null;
+      }
+      intDoc = snapByWaba.docs[0].data();
+      intDocId = snapByWaba.docs[0].id;
+    }
+  }
+
+  if (!intDoc || !intDoc.company_id) {
+    return null;
+  }
+
+  const companyId = intDoc.company_id;
+  let accessToken = process.env.META_WHATSAPP_TOKEN || null;
+
+  if (intDocId) {
+    try {
+      const secDoc = await dbInstance.doc(`integrations/${intDocId}/secrets/tokens`).get();
+      if (secDoc.exists && secDoc.data().access_token) {
+        accessToken = secDoc.data().access_token;
+      }
+    } catch (secErr) {
+      console.warn(`Error reading secrets for ${intDocId}:`, secErr.message);
+    }
+  }
+
+  return {
+    companyId,
+    intDocId,
+    intDoc,
+    accessToken
+  };
+}
+
+/**
+ * 1. HEALTH & DIAGNOSTIC STATUS ENDPOINTS
  */
 app.get('/', (req, res) => {
   res.json({
     status: 'online',
-    service: 'DT Bot Core — WhatsApp Cloud API Server',
-    version: '1.0.0',
-    timestamp: new Date().toISOString()
+    service: 'DT Bot Core — Native WhatsApp Cloud API Server',
+    version: '1.3.0',
+    timestamp: new Date().toISOString(),
+    verify_token_set: !!MASTER_VERIFY_TOKEN,
+    signature_verification_active: !!META_APP_SECRET,
+    firestore_connected: !!db,
+    graph_api_version: GRAPH_API_VERSION
   });
 });
 
@@ -47,11 +229,19 @@ app.get('/health', (req, res) => {
   res.status(200).send('OK');
 });
 
+app.get('/api/status', (req, res) => {
+  res.json({
+    status: 'online',
+    server_time: new Date().toISOString(),
+    graph_api_version: GRAPH_API_VERSION,
+    signature_verification: !!META_APP_SECRET ? 'enforced' : 'optional',
+    database: db ? 'firebase_admin_authenticated' : 'uninitialized'
+  });
+});
+
 /**
- * 1. META WEBHOOK VERIFICATION HANDSHAKE
- * Configure in Meta for Developers:
- * Callback URL: https://your-server-domain.com/webhook/whatsapp
- * Verify Token: dt_crm_whatsapp_verify_token_2026
+ * 2. META WEBHOOK VERIFICATION HANDSHAKE
+ * GET /webhook/whatsapp
  */
 app.get('/webhook/whatsapp', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -59,33 +249,38 @@ app.get('/webhook/whatsapp', (req, res) => {
   const challenge = req.query['hub.challenge'];
 
   if (mode === 'subscribe' && (token === MASTER_VERIFY_TOKEN || (token && token.startsWith('dt_')))) {
-    console.log('✅ Meta Webhook verified successfully by challenge handshake.');
+    console.log('✅ Meta Webhook verification handshake successful.');
     return res.status(200).send(challenge);
   }
 
-  console.warn('❌ Meta Webhook verification failed. Invalid Verify Token:', token);
-  return res.status(403).send('Forbidden: Invalid Verify Token');
+  console.warn('❌ Meta Webhook verification rejected. Invalid Verify Token:', token);
+  return res.status(403).send('Forbidden: Verify token mismatch');
 });
 
 /**
- * 2. RECEIVE META WHATSAPP EVENTS (INCOMING MESSAGES)
+ * 3. RECEIVE META WHATSAPP INCOMING EVENTS
+ * POST /webhook/whatsapp
  */
 app.post('/webhook/whatsapp', async (req, res) => {
+  // 1. Verify HMAC-SHA256 Signature
+  if (!verifyMetaSignature(req)) {
+    console.error('❌ Webhook rejected: Invalid HMAC-SHA256 Signature');
+    return res.status(401).send('Unauthorized: Invalid Signature');
+  }
+
   // Acknowledge Meta immediately with HTTP 200
   res.status(200).send('EVENT_RECEIVED');
 
   try {
     const body = req.body;
-    if (!body || body.object !== 'whatsapp_business_account') {
-      return;
-    }
+    if (!body || body.object !== 'whatsapp_business_account') return;
 
     const entry = body.entry?.[0];
     const changes = entry?.changes?.[0];
     const value = changes?.value;
 
-    if (!value || !value.messages || value.messages.length === 0) {
-      // Status update (delivered, read, sent)
+    if (!value?.messages || value.messages.length === 0) {
+      // Event is status update (sent, delivered, read)
       return;
     }
 
@@ -93,88 +288,164 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const contact = value.contacts?.[0];
     const metadata = value.metadata;
 
-    const phoneNumberId = metadata?.phone_number_id;
-    const customerPhone = message.from;
-    const customerName = contact?.profile?.name || `WhatsApp User (+${customerPhone})`;
-    const messageText = message.text?.body || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || '';
     const messageId = message.id;
-    const timestamp = message.timestamp ? new Date(parseInt(message.timestamp) * 1000).toISOString() : new Date().toISOString();
+    if (!messageId) return;
 
-    console.log(`📥 Incoming WhatsApp message from ${customerName} (+${customerPhone}): "${messageText}"`);
-
-    // 1. Identify Company / Tenant
-    let companyId = 'comp_dt_marketing';
-    let accessToken = process.env.META_WHATSAPP_TOKEN || null;
-
-    if (db && phoneNumberId) {
-      const intSnap = await db.collection('integrations')
-        .where('phone_number_id', '==', phoneNumberId)
-        .where('status', '==', 'connected')
-        .limit(1)
-        .get();
-
-      if (!intSnap.empty) {
-        const intDoc = intSnap.docs[0].data();
-        companyId = intDoc.company_id;
-        
-        // Retrieve secret token if present
-        const secDoc = await db.doc(`integrations/${intSnap.docs[0].id}/secrets/tokens`).get();
-        if (secDoc.exists && secDoc.data().access_token) {
-          accessToken = secDoc.data().access_token;
-        }
-      }
+    // --- ATOMIC PERSISTENT DEDUPLICATION IN FIRESTORE ---
+    if (!db) {
+      console.error('❌ Database not initialized. Cannot process message safely.');
+      return;
     }
 
-    // 2. Lead Deduplication & Registration in Firestore
-    let leadId = null;
-    if (db) {
-      const cleanPhoneDigits = customerPhone.replace(/[^0-9]/g, '');
-      const leadSnap = await db.collection('leads')
-        .where('company_id', '==', companyId)
-        .get();
+    const dedupDocRef = db.doc(`webhook_events/event_${messageId}`);
+    let shouldProcess = false;
 
-      let existingLead = null;
-      for (const doc of leadSnap.docs) {
-        const lData = doc.data();
-        const lDigits = (lData.telefono || '').replace(/[^0-9]/g, '');
-        if (lDigits && lDigits.slice(-8) === cleanPhoneDigits.slice(-8)) {
-          existingLead = { id: doc.id, ...lData };
-          leadId = doc.id;
-          break;
+    try {
+      await db.runTransaction(async (transaction) => {
+        const docSnap = await transaction.get(dedupDocRef);
+        const now = Date.now();
+        if (docSnap.exists) {
+          const data = docSnap.data();
+          const receivedMs = data.received_at_ms || (data.received_at ? new Date(data.received_at).getTime() : 0);
+          const isStale = (now - receivedMs) > 120000; // 2 min threshold for crash recovery
+
+          if (data.status === 'completed' || (data.status === 'processing' && !isStale)) {
+            shouldProcess = false;
+            return;
+          }
+          console.log(`♻️ [Deduplication] Recovering stale processing event [${messageId}]`);
         }
-      }
 
-      if (!existingLead) {
-        leadId = `lead_wa_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-        await db.doc(`leads/${leadId}`).set({
-          id: leadId,
+        // Acquire atomic lock
+        transaction.set(dedupDocRef, {
+          message_id: messageId,
+          status: 'processing',
+          received_at: new Date().toISOString(),
+          received_at_ms: now
+        });
+        shouldProcess = true;
+      });
+    } catch (txErr) {
+      console.error('Deduplication transaction error:', txErr);
+      return;
+    }
+
+    if (!shouldProcess) {
+      console.log(`⚠️ [Deduplication] Message [${messageId}] is already processed or being processed. Skipping.`);
+      return;
+    }
+
+    const phoneNumberId = metadata?.phone_number_id ? String(metadata.phone_number_id).trim() : null;
+    const wabaId = entry?.id ? String(entry.id).trim() : null;
+    let customerPhone = message.from ? String(message.from).trim() : '';
+    let customerName = contact?.profile?.name || `Usuario WhatsApp (+${customerPhone})`;
+    let messageText = message.text?.body || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || '';
+    const timestamp = message.timestamp ? new Date(parseInt(message.timestamp, 10) * 1000).toISOString() : new Date().toISOString();
+
+    // 1. Strict Tenant Company & Credential Resolution
+    // Webhook events must ONLY be routed to a company that owns this verified phone_number_id.
+    // Fallback to random companies or arbitrary WhatsApp records is strictly prohibited to prevent cross-tenant leakage.
+    const tenant = await resolveTenant(db, phoneNumberId, wabaId);
+
+    if (!tenant) {
+      console.warn(`⚠️ [Unmatched Phone Number ID: ${phoneNumberId}] No registered company integration found. Discarding message to prevent cross-tenant data leakage.`);
+      try {
+        await db.doc(`webhook_events/event_${messageId}`).set({
+          status: 'completed',
+          discard_reason: 'unmatched_phone_number_id',
+          phone_number_id: phoneNumberId || null,
+          waba_id: wabaId || null,
+          completed_at: new Date().toISOString()
+        }, { merge: true });
+      } catch (e) {}
+      return;
+    }
+
+    const { companyId, intDocId, accessToken } = tenant;
+    console.log(`🏢 [Tenant Resolved] Company: ${companyId} | WhatsApp Integration: ${intDocId} | Phone ID: ${phoneNumberId}`);
+
+    // 2. Filter Synthetic / Meta Dashboard Sample Payloads
+    // Do NOT create real CRM leads or attempt outbound Meta API calls for dummy dashboard test payloads
+    if (isSyntheticMetaPayload(customerPhone)) {
+      console.log(`🧪 [Meta Webhook Sample Payload Received] Verified webhook payload structure for Phone Number ID: ${phoneNumberId} (${companyId}).`);
+      try {
+        await db.doc(`webhook_events/event_${messageId}`).set({
+          status: 'completed',
+          is_test_event: true,
+          phone_number_id: phoneNumberId || null,
           company_id: companyId,
-          nombre: customerName,
-          telefono: customerPhone.startsWith('+') ? customerPhone : `+${customerPhone}`,
-          correo: `${customerPhone}@whatsapp.com`,
-          empresa: 'Contacto WhatsApp Directo',
-          servicio: 'Atención Inmediata',
-          fuente: 'WhatsApp',
-          estado: 'Nuevo Lead',
-          responsable: 'DT Bot Core',
-          prioridad: 'Alta',
-          valor_estimado: 8500,
-          notas: `Conversación iniciada por WhatsApp Cloud API.\nMensaje inicial: "${messageText}"`,
-          fecha_creacion: timestamp,
-          ultima_actividad: timestamp
-        });
-      } else {
-        await db.doc(`leads/${leadId}`).update({
-          ultima_actividad: timestamp
-        });
-      }
+          completed_at: new Date().toISOString()
+        }, { merge: true });
 
-      // 3. Record Conversation & Inbound Message
-      const convId = `conv_${companyId}_whatsapp_${customerPhone}`;
-      const convRef = db.doc(`conversations/${convId}`);
-      const convDoc = await convRef.get();
+        // Record ONLY sample ping timestamp, NEVER marking real connected status or last_verified_at
+        if (intDocId) {
+          await db.doc(`integrations/${intDocId}`).set({
+            last_webhook_sample_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          }, { merge: true });
+        }
+      } catch (e) {}
+      return;
+    }
 
-      const convData = convDoc.exists ? convDoc.data() : {
+    console.log(`📥 [WhatsApp Inbound] Company: ${companyId} | From: ${customerName} (+${customerPhone}) | Message: "${messageText}"`);
+
+    // Mark inbound webhook reception verified on real customer message (separate from outbound verification)
+    if (intDocId) {
+      try {
+        const isOutboundVerified = tenant.intDoc?.outbound_verified === true;
+        const signatureAuth = req.signature_status === 'verified';
+
+        await db.doc(`integrations/${intDocId}`).set({
+          webhook_verified: true,
+          webhook_signature_authenticated: signatureAuth,
+          last_inbound_at: new Date().toISOString(),
+          status: isOutboundVerified ? 'connected' : 'saved_unverified',
+          last_verified_at: isOutboundVerified ? new Date().toISOString() : (tenant.intDoc?.last_verified_at || null),
+          updated_at: new Date().toISOString()
+        }, { merge: true });
+      } catch (e) {}
+    }
+
+    // 3. Register / Update Lead in CRM
+    const cleanPhoneDigits = customerPhone.replace(/[^0-9]/g, '');
+    const leadId = `lead_wa_${cleanPhoneDigits.slice(-10) || Date.now()}`;
+
+    const leadData = {
+      id: leadId,
+      company_id: companyId,
+      nombre: customerName,
+      telefono: customerPhone.startsWith('+') ? customerPhone : `+${customerPhone}`,
+      correo: `${cleanPhoneDigits}@whatsapp.com`,
+      empresa: contact?.profile?.name || 'Contacto WhatsApp Directo',
+      servicio: 'Atención WhatsApp Cloud API',
+      fuente: 'WhatsApp',
+      estado: 'Nuevo Lead',
+      responsable: 'DT Bot Core',
+      prioridad: 'Alta',
+      valor_estimado: 8500,
+      notas: `Conversación vía WhatsApp Cloud API.\nÚltimo mensaje: "${messageText}"`,
+      fecha_creacion: timestamp,
+      ultima_actividad: timestamp
+    };
+
+    try {
+      await db.doc(`leads/${leadId}`).set(leadData, { merge: true });
+    } catch (e) {
+      console.warn('Error saving lead to Firestore:', e.message);
+    }
+
+    // 4. Conversation State Management
+    const convId = `conv_${companyId}_whatsapp_${customerPhone}`;
+    let convData = null;
+
+    try {
+      const cSnap = await db.doc(`conversations/${convId}`).get();
+      if (cSnap.exists) convData = cSnap.data();
+    } catch (e) {}
+
+    if (!convData) {
+      convData = {
         id: convId,
         company_id: companyId,
         channel: 'whatsapp',
@@ -185,157 +456,519 @@ app.post('/webhook/whatsapp', async (req, res) => {
         status: 'active',
         bot_enabled: true,
         human_handoff: false,
-        created_at: timestamp
+        unread_count: 1,
+        last_message: messageText,
+        last_message_sender: 'customer',
+        created_at: timestamp,
+        updated_at: timestamp,
+        last_message_at: timestamp
+      };
+    } else {
+      convData.last_message = messageText;
+      convData.last_message_sender = 'customer';
+      convData.last_message_at = timestamp;
+      convData.updated_at = timestamp;
+      convData.unread_count = (convData.unread_count || 0) + 1;
+    }
+
+    // 4. Save Inbound Message
+    const inMsgId = `msg_${Date.now()}_in_${Math.random().toString(36).substring(2, 6)}`;
+    const inMsgData = {
+      id: inMsgId,
+      company_id: companyId,
+      conversation_id: convId,
+      direction: 'inbound',
+      channel: 'whatsapp',
+      content: messageText,
+      external_message_id: messageId,
+      sender_type: 'customer',
+      created_at: timestamp,
+      delivery_status: 'delivered'
+    };
+
+    try {
+      await db.doc(`messages/${inMsgId}`).set(inMsgData);
+    } catch (e) {
+      console.warn('Error saving inbound message:', e.message);
+    }
+
+    // 5. DT Bot Core Engine Evaluation
+    // STRICT RULE: If human_handoff is active OR bot_enabled is false, BOT REMAINS COMPLETELY SILENT!
+    if (convData.human_handoff === true || convData.bot_enabled === false) {
+      console.log(`🛑 Conversation [${convId}] is assigned to a human advisor. Bot will NOT reply.`);
+      
+      try {
+        await db.doc(`conversations/${convId}`).set(convData, { merge: true });
+        await db.doc(`webhook_events/event_${messageId}`).set({
+          status: 'completed',
+          completed_at: new Date().toISOString(),
+          bot_replied: false,
+          human_handoff: true
+        }, { merge: true });
+      } catch (e) {}
+
+      return;
+    }
+
+    // Load Bot Settings for working hours & personality
+    let botSettings = null;
+    try {
+      const sSnap = await db.doc(`bot_settings/${companyId}`).get();
+      if (sSnap.exists) botSettings = sSnap.data();
+    } catch (e) {}
+
+    // Check for Human Handoff Intent
+    const lowerText = messageText.toLowerCase().trim();
+    const humanKeywords = ['asesor', 'humano', 'persona', 'agente', 'ejecutivo', 'hablar con alguien', 'representante', 'ayuda humana', 'transferir'];
+    const wantsHuman = humanKeywords.some(kw => lowerText.includes(kw));
+
+    let botReply = '';
+
+    if (wantsHuman) {
+      convData.human_handoff = true;
+      convData.bot_enabled = false;
+      convData.status = 'pending';
+      botReply = `Entendido, ${customerName}. He pausado las respuestas automáticas y transferí tu conversación a un asesor comercial. En un momento te responderá directamente aquí.`;
+
+      // Urgent Task in CRM
+      const taskId = `task_${Date.now()}`;
+      const taskData = {
+        id: taskId,
+        company_id: companyId,
+        lead_id: leadId,
+        lead_nombre: customerName,
+        titulo: `Atender a ${customerName} en WhatsApp`,
+        tipo: 'whatsapp',
+        fecha_limite: new Date().toISOString(),
+        prioridad: 'Urgente',
+        completada: false,
+        fecha_creacion: timestamp,
+        nota: `El cliente solicitó asesor humano en WhatsApp. Mensaje: "${messageText}"`
       };
 
-      const inMsgId = `msg_${Date.now()}_in`;
-      await db.doc(`messages/${inMsgId}`).set({
-        id: inMsgId,
-        company_id: companyId,
-        conversation_id: convId,
-        direction: 'inbound',
-        channel: 'whatsapp',
-        content: messageText,
-        external_message_id: messageId,
-        sender_type: 'customer',
-        created_at: timestamp,
-        delivery_status: 'delivered'
-      });
-
-      // 4. DT Bot Core Conversational Engine Evaluation
-      const lowerText = messageText.toLowerCase().trim();
-      const humanHandoffKeywords = ['asesor', 'humano', 'persona', 'agente', 'hablar con alguien', 'ejecutivo', 'soporte humano'];
-      const wantsHuman = humanHandoffKeywords.some(kw => lowerText.includes(kw));
-
-      let botReply = '';
-
-      if (wantsHuman) {
-        // Human Handoff trigger
-        convData.human_handoff = true;
-        convData.bot_enabled = false;
-        convData.status = 'pending';
-        botReply = `Entendido, ${customerName}. He transferido tu conversación a uno de nuestros asesores comerciales. En unos instantes un especialista te responderá directamente aquí.`;
-
-        // Register urgent task for the sales team
-        await db.collection('followups').add({
-          company_id: companyId,
-          lead_id: leadId,
-          lead_nombre: customerName,
-          titulo: `Atender a ${customerName} en WhatsApp`,
-          tipo: 'whatsapp',
-          fecha_limite: new Date().toISOString(),
-          prioridad: 'Urgente',
-          completada: false,
-          fecha_creacion: timestamp,
-          nota: `El cliente solicitó asesor humano en WhatsApp. Mensaje: "${messageText}"`
-        });
-      } else if (convData.bot_enabled && !convData.human_handoff) {
-        // Query Knowledge Base for Company
+      try {
+        await db.doc(`followups/${taskId}`).set(taskData);
+      } catch (e) {}
+    } else if (botSettings?.working_hours && !checkWorkingHours(botSettings.working_hours)) {
+      // Out of hours
+      botReply = botSettings.out_of_hours_message || `¡Hola! Gracias por comunicarte. En este momento nos encontramos fuera de horario de atención comercial, pero ya registramos tu consulta y un asesor te responderá a primera hora.`;
+    } else {
+      // Query Knowledge Base for match
+      let kbItems = [];
+      try {
         const kbSnap = await db.collection('knowledge_base')
           .where('company_id', '==', companyId)
           .where('enabled', '==', true)
           .get();
+        kbItems = kbSnap.docs.map(d => d.data());
+      } catch (e) {}
 
-        let matchedAnswer = null;
-        for (const doc of kbSnap.docs) {
-          const item = doc.data();
-          const keywords = item.keywords || [];
-          const matchesKeyword = keywords.some(k => lowerText.includes(k.toLowerCase().trim()));
-          if (matchesKeyword || lowerText.includes(item.title.toLowerCase())) {
-            matchedAnswer = item.content;
-            break;
-          }
+      let bestMatch = null;
+      let maxScore = 0;
+
+      for (const item of kbItems) {
+        let score = 0;
+        const keywords = item.keywords || [];
+        for (const kw of keywords) {
+          if (kw && lowerText.includes(kw.toLowerCase().trim())) score += 3;
         }
+        if (item.title && lowerText.includes(item.title.toLowerCase().trim())) score += 2;
 
-        if (matchedAnswer) {
-          botReply = matchedAnswer;
-        } else if (!convDoc.exists) {
-          // First time greeting
-          botReply = `¡Hola ${customerName}! 👋 Bienvenido a nuestro canal oficial de WhatsApp. ¿En qué producto o servicio te gustaría que te asesoremos hoy?`;
-        } else {
-          // General friendly fallback with menu
-          botReply = `Gracias por tu mensaje. Para brindarte la información exacta, puedes preguntarme sobre nuestros servicios, cotizaciones o escribir "asesor" si deseas que un ejecutivo te contacte.`;
+        if (score > maxScore) {
+          maxScore = score;
+          bestMatch = item;
         }
       }
 
-      // 5. Send Outbound Bot Response via Meta Graph API
-      if (botReply && accessToken && phoneNumberId) {
-        try {
-          await axios.post(
-            `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`,
-            {
-              messaging_product: 'whatsapp',
-              recipient_type: 'individual',
-              to: customerPhone,
-              type: 'text',
-              text: { preview_url: false, body: botReply }
-            },
-            {
-              headers: {
-                Authorization: `Bearer ${accessToken}`,
-                'Content-Type': 'application/json'
-              }
-            }
-          );
-
-          console.log(`🤖 Bot answered to +${customerPhone}: "${botReply}"`);
-
-          // Record Outbound Message in Firestore
-          const outMsgId = `msg_${Date.now()}_out`;
-          await db.doc(`messages/${outMsgId}`).set({
-            id: outMsgId,
-            company_id: companyId,
-            conversation_id: convId,
-            direction: 'outbound',
-            channel: 'whatsapp',
-            content: botReply,
-            sender_type: 'bot',
-            created_at: new Date().toISOString(),
-            delivery_status: 'sent'
-          });
-
-          convData.last_message = botReply;
-          convData.last_message_sender = 'bot';
-          convData.last_message_at = new Date().toISOString();
-        } catch (apiErr) {
-          console.error('Error sending WhatsApp Cloud API reply:', apiErr.response?.data || apiErr.message);
-        }
+      if (bestMatch && maxScore >= 2) {
+        botReply = `${bestMatch.content} ¿Te gustaría que un asesor te prepare una cotización personalizada?`;
+      } else if (lowerText === 'hola' || lowerText === 'buenos dias' || lowerText === 'buenas tardes' || lowerText === 'buenas noches' || lowerText === 'inicio') {
+        botReply = botSettings?.welcome_message || `¡Hola ${customerName}! 👋 Bienvenido a nuestro canal oficial de WhatsApp. ¿En qué producto o cotización podemos asesorarte hoy? (Escribe "asesor" para hablar con un ejecutivo).`;
+      } else {
+        // Safe, non-hallucinating response with clarification
+        botReply = botSettings?.fallback_message || `Gracias por contactarnos. Para brindarte la información exacta sobre disponibilidad y precios, ¿podrías indicarme qué producto o servicio buscas? También puedes escribir "asesor" para comunicarte con nuestro equipo.`;
       }
-
-      // Save updated conversation state
-      convData.updated_at = new Date().toISOString();
-      await convRef.set(convData, { merge: true });
     }
 
+    // 6. Send Outbound WhatsApp Reply via Meta Graph API
+    let outboundSuccess = false;
+    let metaMessageId = null;
+
+    if (botReply && accessToken && phoneNumberId) {
+      try {
+        const metaRes = await axios.post(
+          `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`,
+          {
+            messaging_product: 'whatsapp',
+            recipient_type: 'individual',
+            to: customerPhone,
+            type: 'text',
+            text: { preview_url: false, body: botReply }
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+
+        outboundSuccess = true;
+        metaMessageId = metaRes.data?.messages?.[0]?.id || null;
+        console.log(`🤖 [DT Bot Sent] To: +${customerPhone} | Meta Msg ID: ${metaMessageId}`);
+      } catch (metaErr) {
+        console.error('❌ Meta Graph API Error sending reply:', metaErr.response?.data?.error?.message || metaErr.message);
+      }
+    }
+
+    // Record Outbound Message in Firestore
+    let dbSaveError = null;
+    if (outboundSuccess) {
+      try {
+        const outMsgId = `msg_${Date.now()}_out_${Math.random().toString(36).substring(2, 6)}`;
+        const outMsgData = {
+          id: outMsgId,
+          company_id: companyId,
+          conversation_id: convId,
+          direction: 'outbound',
+          channel: 'whatsapp',
+          content: botReply,
+          sender_type: 'bot',
+          created_at: new Date().toISOString(),
+          delivery_status: 'sent',
+          external_message_id: metaMessageId
+        };
+
+        await db.doc(`messages/${outMsgId}`).set(outMsgData);
+        convData.last_message = botReply;
+        convData.last_message_sender = 'bot';
+        convData.last_message_at = new Date().toISOString();
+
+        if (intDocId) {
+          const isInboundVerified = tenant.intDoc?.webhook_verified === true;
+          await db.doc(`integrations/${intDocId}`).set({
+            outbound_verified: true,
+            last_outbound_at: new Date().toISOString(),
+            status: isInboundVerified ? 'connected' : 'saved_unverified',
+            last_verified_at: isInboundVerified ? new Date().toISOString() : (tenant.intDoc?.last_verified_at || null),
+            updated_at: new Date().toISOString()
+          }, { merge: true });
+        }
+      } catch (err) {
+        console.error('⚠️ Warning: Meta accepted outbound message, but saving to Firestore failed:', err.message);
+        dbSaveError = err.message;
+      }
+    }
+
+    // Save updated conversation
+    try {
+      await db.doc(`conversations/${convId}`).set(convData, { merge: true });
+    } catch (err) {
+      console.warn('Error updating conversation:', err.message);
+    }
+
+    // Always mark dedup lock as completed so Meta webhook retries will not duplicate customer messages
+    try {
+      await db.doc(`webhook_events/event_${messageId}`).set({
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+        bot_replied: outboundSuccess,
+        outbound_message_id: metaMessageId,
+        human_handoff: convData.human_handoff,
+        db_save_partial_error: dbSaveError || null
+      }, { merge: true });
+    } catch (e) {}
+
   } catch (err) {
-    console.error('Error in WhatsApp Webhook handler:', err);
+    console.error('Error processing WhatsApp Webhook:', err);
   }
 });
 
-/**
- * 3. AGENT OUTBOUND DISPATCH ENDPOINT
- * Used by CRM Advisors when replying from the Inbox
- */
-app.post('/api/send-message', async (req, res) => {
-  const { phone_number_id, access_token, to_phone, message_text, company_id, conversation_id, user_name } = req.body;
+// Dependency injection holders for testability
+let customAdminAuth = null;
+let customHttpClient = null;
 
-  if (!to_phone || !message_text) {
-    return res.status(400).json({ success: false, error: 'Missing to_phone or message_text' });
+function setDb(mockDb) {
+  db = mockDb;
+}
+
+function setAdminAuth(mockAuth) {
+  customAdminAuth = mockAuth;
+}
+
+function setHttpClient(mockClient) {
+  customHttpClient = mockClient;
+}
+
+/**
+ * Middleware: Verify Firebase Auth ID Token & User Tenant Membership
+ * Expects header: "Authorization: Bearer <firebase_id_token>"
+ */
+async function authenticateUser(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({
+      success: false,
+      error: 'No autenticado: Se requiere token de autorización Firebase (Bearer token).'
+    });
   }
 
-  const cleanPhone = to_phone.replace(/[^0-9]/g, '');
-  const activePhoneNumberId = phone_number_id || process.env.META_PHONE_NUMBER_ID;
-  const activeToken = access_token || process.env.META_WHATSAPP_TOKEN;
-
-  if (!activePhoneNumberId || !activeToken) {
-    return res.status(400).json({
+  const idToken = authHeader.split('Bearer ')[1]?.trim();
+  if (!idToken) {
+    return res.status(401).json({
       success: false,
-      error: 'WhatsApp Cloud API credentials not configured (phone_number_id / access_token)'
+      error: 'Token de autorización inválido o vacío.'
     });
   }
 
   try {
-    const metaRes = await axios.post(
+    let decodedToken;
+    const authService = customAdminAuth || (admin.apps.length ? admin.auth() : null);
+
+    if (authService) {
+      decodedToken = await authService.verifyIdToken(idToken);
+    } else {
+      return res.status(503).json({
+        success: false,
+        error: 'Servicio de autenticación no inicializado en el servidor.'
+      });
+    }
+
+    const uid = decodedToken.uid;
+    let userProfile = null;
+
+    if (db) {
+      const userSnap = await db.doc(`users/${uid}`).get();
+      if (userSnap.exists) {
+        userProfile = userSnap.data();
+      }
+    }
+
+    if (!userProfile) {
+      return res.status(403).json({
+        success: false,
+        error: 'Perfil de usuario no encontrado en la base de datos.'
+      });
+    }
+
+    if (userProfile.estado === 'inactivo') {
+      return res.status(403).json({
+        success: false,
+        error: 'Cuenta de usuario inactiva.'
+      });
+    }
+
+    req.authenticatedUser = {
+      uid,
+      email: decodedToken.email || userProfile.correo,
+      nombre: userProfile.nombre || decodedToken.name || 'Usuario',
+      rol: userProfile.rol || 'USER',
+      company_id: userProfile.company_id || null
+    };
+
+    next();
+  } catch (authErr) {
+    console.error('Firebase Auth verification error:', authErr.message);
+    return res.status(401).json({
+      success: false,
+      error: 'Token de autenticación expirado o inválido.'
+    });
+  }
+}
+
+/**
+ * 4. AGENT DISPATCH ENDPOINT (Advisors replying from CRM)
+ * Protected with Firebase Auth, Idempotency Control, Strict Conversation & Multi-Tenant Authorization
+ */
+app.post('/api/send-message', authenticateUser, async (req, res) => {
+  const { to_phone, message_text, company_id, conversation_id, user_name, client_message_id } = req.body;
+  const user = req.authenticatedUser;
+
+  // 1. Role verification: Only advisors, admins and superadmins can send commercial messages
+  const allowedRoles = ['SUPERADMIN', 'ADMINISTRADOR', 'ASESOR'];
+  if (!allowedRoles.includes(user.rol)) {
+    return res.status(403).json({
+      success: false,
+      error: 'Acceso denegado: Tu rol de usuario no tiene permisos para despachar mensajes en nombre de la empresa.'
+    });
+  }
+
+  // 2. Input validation
+  if (!to_phone || !message_text) {
+    return res.status(400).json({ success: false, error: 'Faltan parámetros to_phone o message_text' });
+  }
+
+  if (!company_id) {
+    return res.status(400).json({ success: false, error: 'Falta parámetro company_id' });
+  }
+
+  // 3. Multi-Tenant Isolation Check
+  if (user.rol !== 'SUPERADMIN' && user.company_id !== company_id) {
+    console.warn(`🛑 [Unauthorized Tenant Access] User ${user.uid} (${user.company_id}) attempted to send message on behalf of company ${company_id}`);
+    return res.status(403).json({
+      success: false,
+      error: 'Acceso denegado: No tienes autorización para enviar mensajes en nombre de esta empresa.'
+    });
+  }
+
+  const cleanPhone = to_phone.replace(/[^0-9]/g, '');
+
+  // 4. Strict Conversation Verification (must exist, match company, and match recipient)
+  if (conversation_id) {
+    if (!db) {
+      return res.status(503).json({
+        success: false,
+        error: 'Base de datos no disponible para verificar la conversación.'
+      });
+    }
+
+    let convSnap;
+    try {
+      convSnap = await db.doc(`conversations/${conversation_id}`).get();
+    } catch (convErr) {
+      console.error('Error fetching conversation from Firestore:', convErr.message);
+      return res.status(500).json({
+        success: false,
+        error: 'Error al consultar la conversación en la base de datos.'
+      });
+    }
+
+    if (!convSnap || !convSnap.exists) {
+      return res.status(404).json({
+        success: false,
+        error: `La conversación especificada [${conversation_id}] no existe.`
+      });
+    }
+
+    const convData = convSnap.data();
+    if (!convData || !convData.company_id || convData.company_id !== company_id) {
+      return res.status(403).json({
+        success: false,
+        error: 'Acceso denegado: La conversación indicada pertenece a otra empresa o no tiene empresa asignada.'
+      });
+    }
+
+    // Validate recipient matching between request and conversation
+    const convTarget = (convData.external_user_id || convData.contact_phone || '').replace(/[^0-9]/g, '');
+    if (convTarget && !cleanPhone.endsWith(convTarget.slice(-10))) {
+      return res.status(400).json({
+        success: false,
+        error: 'El teléfono destino no coincide con el destinatario registrado en la conversación.'
+      });
+    }
+  }
+
+  // 5. Outbound Idempotency & Concurrency Lock (MANDATORY & FAIL-CLOSED)
+  const cleanClientId = client_message_id ? String(client_message_id).trim().replace(/[^a-zA-Z0-9_-]/g, '') : '';
+  if (!cleanClientId || cleanClientId.length < 3) {
+    return res.status(400).json({
+      success: false,
+      error: 'Se requiere un client_message_id válido (mínimo 3 caracteres alfanuméricos) para garantizar la idempotencia del envío.'
+    });
+  }
+
+  if (!db) {
+    return res.status(503).json({
+      success: false,
+      error: 'Base de datos no disponible para verificar el bloqueo de idempotencia.'
+    });
+  }
+
+  const dedupDocRef = db.doc(`outbound_requests/${company_id}_${cleanClientId}`);
+  let existingRecord = null;
+
+  try {
+    await db.runTransaction(async (transaction) => {
+      const docSnap = await transaction.get(dedupDocRef);
+      const now = Date.now();
+      if (docSnap.exists) {
+        const data = docSnap.data();
+        const startedMs = data.started_at_ms || 0;
+        const isStale = (now - startedMs) > 60000; // 1 min threshold for crash recovery
+
+        if (data.status === 'completed' && data.meta_message_id) {
+          existingRecord = data;
+          return;
+        }
+        if (data.status === 'in_flight' && !isStale) {
+          existingRecord = { in_flight: true };
+          return;
+        }
+      }
+
+      transaction.set(dedupDocRef, {
+        company_id: company_id,
+        client_message_id: cleanClientId,
+        status: 'in_flight',
+        started_at: new Date().toISOString(),
+        started_at_ms: now
+      });
+    });
+  } catch (txErr) {
+    console.error('🛑 [Idempotency Lock Failure] Aborting send to Meta:', txErr.message);
+    return res.status(500).json({
+      success: false,
+      error: `Fallo al verificar el bloqueo de idempotencia en la base de datos: ${txErr.message}. Envío cancelado para evitar duplicación.`
+    });
+  }
+
+  if (existingRecord) {
+    if (existingRecord.in_flight) {
+      return res.status(409).json({
+        success: false,
+        error: 'La solicitud de envío ya está siendo procesada en este momento. Evitando duplicación.'
+      });
+    }
+    if (existingRecord.meta_message_id) {
+      console.log(`♻️ [Idempotency] Outbound request [${cleanClientId}] already completed. Returning cached Meta message ID ${existingRecord.meta_message_id}`);
+      return res.status(200).json({
+        success: true,
+        message_id: existingRecord.meta_message_id,
+        is_duplicate: true
+      });
+    }
+  }
+
+  // 6. Retrieve credentials strictly associated with target company
+  let activePhoneNumberId = null;
+  let activeToken = null;
+
+  if (db) {
+    try {
+      const intSnap = await db.collection('integrations')
+        .where('company_id', '==', company_id)
+        .where('provider', '==', 'whatsapp')
+        .limit(1)
+        .get();
+
+      if (!intSnap.empty) {
+        const intData = intSnap.docs[0].data();
+        activePhoneNumberId = intData.phone_number_id;
+        const secDoc = await db.doc(`integrations/${intSnap.docs[0].id}/secrets/tokens`).get();
+        if (secDoc.exists && secDoc.data().access_token) {
+          activeToken = secDoc.data().access_token;
+        }
+      }
+    } catch (e) {
+      console.error('Error fetching tenant credentials:', e.message);
+      return res.status(500).json({
+        success: false,
+        error: 'Error al consultar credenciales de integración en la base de datos.'
+      });
+    }
+  }
+
+  if (!activePhoneNumberId || !activeToken) {
+    return res.status(400).json({
+      success: false,
+      error: 'Credenciales de WhatsApp Cloud API no configuradas para esta empresa.'
+    });
+  }
+
+  // 7. Send message to Meta Graph API
+  const http = customHttpClient || axios;
+  try {
+    const metaRes = await http.post(
       `https://graph.facebook.com/${GRAPH_API_VERSION}/${activePhoneNumberId}/messages`,
       {
         messaging_product: 'whatsapp',
@@ -352,12 +985,38 @@ app.post('/api/send-message', async (req, res) => {
       }
     );
 
-    console.log(`📤 Advisor (${user_name || 'Agente'}) sent message to +${cleanPhone}: "${message_text}"`);
+    const metaMsgId = metaRes.data?.messages?.[0]?.id || 'sent';
+    console.log(`📤 [Advisor Message Sent] By: ${user_name || user.nombre} to +${cleanPhone} | Meta Msg ID: ${metaMsgId}`);
 
-    // Record in Firestore if available
-    if (db && conversation_id && company_id) {
-      const msgId = `msg_${Date.now()}_agent`;
-      await db.doc(`messages/${msgId}`).set({
+    // Update idempotency lock with success
+    let postMetaLockError = null;
+    if (dedupDocRef) {
+      try {
+        await dedupDocRef.set({
+          status: 'completed',
+          meta_message_id: metaMsgId,
+          completed_at: new Date().toISOString(),
+          delivered_to_meta: true
+        }, { merge: true });
+      } catch (lockErr) {
+        console.error('⚠️ [Uncertain Lock] Meta accepted message, but writing completed lock failed:', lockErr.message);
+        postMetaLockError = lockErr.message;
+        try {
+          await dedupDocRef.set({
+            status: 'uncertain_lock',
+            meta_message_id: metaMsgId,
+            note: 'Delivered to Meta but completed lock write failed',
+            updated_at: new Date().toISOString()
+          }, { merge: true });
+        } catch (emergencyErr) {}
+      }
+    }
+
+    // 8. Record outbound agent message & automatically pause bot in Firestore
+    let firestorePersistError = null;
+    if (conversation_id && db) {
+      const msgId = cleanClientId.startsWith('msg_') ? cleanClientId : `msg_${cleanClientId}`;
+      const msgData = {
         id: msgId,
         company_id: company_id,
         conversation_id: conversation_id,
@@ -365,79 +1024,196 @@ app.post('/api/send-message', async (req, res) => {
         channel: 'whatsapp',
         content: message_text,
         sender_type: 'agent',
-        user_name: user_name || 'Asesor',
+        user_name: user_name || user.nombre,
         created_at: new Date().toISOString(),
-        delivery_status: 'sent'
-      });
+        delivery_status: 'sent',
+        external_message_id: metaMsgId
+      };
 
-      await db.doc(`conversations/${conversation_id}`).set({
-        last_message: message_text,
-        last_message_sender: 'agent',
-        last_message_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      }, { merge: true });
+      try {
+        await db.doc(`messages/${msgId}`).set(msgData);
+        await db.doc(`conversations/${conversation_id}`).set({
+          last_message: message_text,
+          last_message_sender: 'agent',
+          last_message_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          human_handoff: true,
+          bot_enabled: false
+        }, { merge: true });
+      } catch (e) {
+        console.error('⚠️ Warning: Message sent to Meta, but Firestore recording failed:', e.message);
+        firestorePersistError = e.message;
+      }
+    }
+
+    let warningMessage = undefined;
+    if (postMetaLockError || firestorePersistError) {
+      warningMessage = `Mensaje aceptado por WhatsApp (ID: ${metaMsgId}), pero ocurrió un error al registrar en CRM local o confirmar el lock.`;
     }
 
     return res.status(200).json({
       success: true,
-      meta_response: metaRes.data
+      message_id: metaMsgId,
+      meta_accepted: true,
+      warning: warningMessage
     });
 
   } catch (err) {
-    console.error('Error in agent send message:', err.response?.data || err.message);
+    console.error('Error in agent send message:', err.response?.data?.error?.message || err.message);
+    const metaErrorObj = err.response?.data?.error;
+
+    if (dedupDocRef) {
+      try {
+        await dedupDocRef.set({
+          status: 'failed',
+          error: metaErrorObj?.message || err.message,
+          failed_at: new Date().toISOString()
+        }, { merge: true });
+      } catch (e) {}
+    }
+
     return res.status(500).json({
       success: false,
-      error: err.response?.data || err.message
+      error: metaErrorObj?.message || err.message
     });
   }
 });
 
 /**
- * 4. DIAGNOSTIC TEST ENDPOINT
+ * 5. DIAGNOSTIC TEST ENDPOINT
+ * Protected with Firebase Auth & Role Verification (ADMINISTRADOR or SUPERADMIN only)
+ * Supports testing with both explicitly passed credentials and saved company credentials.
  */
-app.post('/api/test-message', async (req, res) => {
-  const { phone_number_id, access_token, to_phone, message_text } = req.body;
+app.post('/api/test-message', authenticateUser, async (req, res) => {
+  const { phone_number_id, access_token, to_phone, message_text, company_id } = req.body;
+  const user = req.authenticatedUser;
 
-  if (!phone_number_id || !access_token || !to_phone) {
+  // 1. Role verification: Only Admins or SuperAdmin can run API diagnostics
+  if (user.rol !== 'SUPERADMIN' && user.rol !== 'ADMINISTRADOR') {
+    return res.status(403).json({
+      success: false,
+      error: 'Acceso denegado: Solo administradores pueden ejecutar pruebas de diagnóstico de API.'
+    });
+  }
+
+  // 2. Multi-Tenant isolation
+  if (company_id && user.rol !== 'SUPERADMIN' && user.company_id !== company_id) {
+    return res.status(403).json({
+      success: false,
+      error: 'Acceso denegado: No tienes autorización para diagnosticar credenciales de otra empresa.'
+    });
+  }
+
+  if (!to_phone) {
     return res.status(400).json({
       success: false,
-      error: 'Missing phone_number_id, access_token, or to_phone'
+      error: 'Debes proporcionar un teléfono destino para el mensaje de prueba.'
+    });
+  }
+
+  let activePhoneNumberId = phone_number_id;
+  let activeToken = access_token;
+
+  // 3. Fallback to saved credentials if token was not provided in request (reopened forms)
+  if ((!activeToken || !activePhoneNumberId) && company_id && db) {
+    try {
+      const intSnap = await db.collection('integrations')
+        .where('company_id', '==', company_id)
+        .where('provider', '==', 'whatsapp')
+        .limit(1)
+        .get();
+
+      if (!intSnap.empty) {
+        const intData = intSnap.docs[0].data();
+        activePhoneNumberId = activePhoneNumberId || intData.phone_number_id;
+        const secDoc = await db.doc(`integrations/${intSnap.docs[0].id}/secrets/tokens`).get();
+        if (secDoc.exists && secDoc.data().access_token) {
+          activeToken = secDoc.data().access_token;
+        }
+      }
+    } catch (e) {
+      console.error('Error fetching saved credentials for test-message:', e.message);
+      return res.status(500).json({
+        success: false,
+        error: 'Error al consultar credenciales guardadas en la base de datos.'
+      });
+    }
+  }
+
+  if (!activePhoneNumberId || !activeToken) {
+    return res.status(400).json({
+      success: false,
+      error: 'Debes proporcionar Phone Number ID y Access Token, o especificar una empresa con credenciales guardadas.'
     });
   }
 
   const cleanPhone = to_phone.replace(/[^0-9]/g, '');
+  const http = customHttpClient || axios;
 
   try {
-    const metaRes = await axios.post(
-      `https://graph.facebook.com/${GRAPH_API_VERSION}/${phone_number_id}/messages`,
+    const metaRes = await http.post(
+      `https://graph.facebook.com/${GRAPH_API_VERSION}/${activePhoneNumberId}/messages`,
       {
         messaging_product: 'whatsapp',
         recipient_type: 'individual',
         to: cleanPhone,
         type: 'text',
-        text: { preview_url: false, body: message_text || 'Prueba de diagnóstico exitosa desde DT CRM Core.' }
+        text: { preview_url: false, body: message_text || '👋 Mensaje de diagnóstico oficial desde DT CRM Core.' }
       },
       {
         headers: {
-          Authorization: `Bearer ${access_token}`,
+          Authorization: `Bearer ${activeToken}`,
           'Content-Type': 'application/json'
         }
       }
     );
 
+    const metaMsgId = metaRes.data?.messages?.[0]?.id || 'sent';
+
     return res.status(200).json({
       success: true,
-      meta_response: metaRes.data
+      message_id: metaMsgId,
+      meta_accepted: true,
+      note: 'Meta Graph API aceptó el mensaje de prueba. La entrega final al dispositivo receptor depende de su conectividad y del estado del número en WhatsApp.'
     });
   } catch (err) {
+    const metaErr = err.response?.data?.error;
+    let friendlyMessage = metaErr?.message || err.message;
+
+    if (metaErr?.code === 190) {
+      friendlyMessage = 'El Access Token de Meta ha expirado o no es válido. Genera un Token de Sistema Permanente en Meta Business Manager.';
+    } else if (metaErr?.code === 100) {
+      friendlyMessage = 'El Phone Number ID o formato del número destino es incorrecto.';
+    } else if (metaErr?.code === 131030) {
+      friendlyMessage = 'El número de destino no está registrado en WhatsApp o la cuenta de prueba de Meta aún no lo tiene agregado como número de prueba autorizado.';
+    }
+
     return res.status(err.response?.status || 500).json({
       success: false,
-      error: err.response?.data || err.message
+      error: friendlyMessage
     });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 DT Bot Core WhatsApp Cloud API Server running on port ${PORT}`);
-  console.log(`Webhook URL: http://localhost:${PORT}/webhook/whatsapp`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`🚀 DT Bot Core WhatsApp Cloud API Server v1.3.0 listening on port ${PORT}`);
+    console.log(`Webhook URL: http://localhost:${PORT}/webhook/whatsapp`);
+  });
+}
+
+module.exports = {
+  app,
+  authenticateUser,
+  checkWorkingHours,
+  verifyMetaSignature,
+  isSyntheticMetaPayload,
+  resolveTenant,
+  setDb,
+  setAdminAuth,
+  setHttpClient,
+  GRAPH_API_VERSION,
+  MASTER_VERIFY_TOKEN
+};
+
+
