@@ -1159,10 +1159,12 @@ app.post('/api/test-message', authenticateUser, async (req, res) => {
       `https://graph.facebook.com/${GRAPH_API_VERSION}/${activePhoneNumberId}/messages`,
       {
         messaging_product: 'whatsapp',
-        recipient_type: 'individual',
         to: cleanPhone,
-        type: 'text',
-        text: { preview_url: false, body: message_text || '👋 Mensaje de diagnóstico oficial desde DT CRM Core.' }
+        type: 'template',
+        template: {
+          name: 'hello_world',
+          language: { code: 'en_US' }
+        }
       },
       {
         headers: {
@@ -1178,7 +1180,7 @@ app.post('/api/test-message', authenticateUser, async (req, res) => {
       success: true,
       message_id: metaMsgId,
       meta_accepted: true,
-      note: 'Meta Graph API aceptó el mensaje de prueba. La entrega final al dispositivo receptor depende de su conectividad y del estado del número en WhatsApp.'
+      note: 'Meta aceptó la plantilla oficial hello_world para abrir la conversación. Responde al mensaje recibido y luego podrás probar textos libres durante 24 horas.'
     });
   } catch (err) {
     const metaErr = err.response?.data?.error;
