@@ -1184,6 +1184,40 @@ app.post('/api/test-message', authenticateUser, async (req, res) => {
     const metaErr = err.response?.data?.error;
     let friendlyMessage = metaErr?.message || err.message;
 
+    if (metaErr?.code === 131047) {
+      try {
+        const templateRes = await http.post(
+          `https://graph.facebook.com/${GRAPH_API_VERSION}/${activePhoneNumberId}/messages`,
+          {
+            messaging_product: 'whatsapp',
+            to: cleanPhone,
+            type: 'template',
+            template: {
+              name: 'hello_world',
+              language: { code: 'en_US' }
+            }
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${activeToken}`,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+        const templateMsgId = templateRes.data?.messages?.[0]?.id || 'sent';
+        return res.status(200).json({
+          success: true,
+          message_id: templateMsgId,
+          meta_accepted: true,
+          template_fallback: true,
+          note: 'Meta requirió una plantilla porque no había una conversación activa. Se envió la plantilla oficial hello_world; responde a ese mensaje para abrir la ventana de 24 horas y poder probar texto libre.'
+        });
+      } catch (templateErr) {
+        const templateMetaErr = templateErr.response?.data?.error;
+        friendlyMessage = templateMetaErr?.message || templateErr.message;
+      }
+    }
+
     if (metaErr?.code === 190) {
       friendlyMessage = 'El Access Token de Meta ha expirado o no es válido. Genera un Token de Sistema Permanente en Meta Business Manager.';
     } else if (metaErr?.code === 100) {
