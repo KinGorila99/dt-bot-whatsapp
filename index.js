@@ -600,7 +600,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
       if (bestMatch && maxScore >= 2) {
         botReply = `${bestMatch.content} ¿Te gustaría que un asesor te prepare una cotización personalizada?`;
-      } else if (lowerText === 'hola' || lowerText === 'buenos dias' || lowerText === 'buenas tardes' || lowerText === 'buenas noches' || lowerText === 'inicio') {
+      } else if (['ya', 'si', 'sí', 'ok', 'okay', 'listo', 'recibido'].includes(lowerText)) { botReply = `Perfecto, ${customerName}. ¿Qué producto o servicio te interesa? Si prefieres hablar con un asesor, escribe "asesor".`; } else if (lowerText === 'hola' || lowerText === 'buenos dias' || lowerText === 'buenas tardes' || lowerText === 'buenas noches' || lowerText === 'inicio') {
         botReply = botSettings?.welcome_message || `¡Hola ${customerName}! 👋 Bienvenido a nuestro canal oficial de WhatsApp. ¿En qué producto o cotización podemos asesorarte hoy? (Escribe "asesor" para hablar con un ejecutivo).`;
       } else {
         // Safe, non-hallucinating response with clarification
