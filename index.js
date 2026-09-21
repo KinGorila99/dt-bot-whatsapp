@@ -159,15 +159,26 @@ async function resolveTenant(dbInstance, phoneNumberId, wabaId) {
   if (phoneNumberId) {
     const snapByPhone = await dbInstance.collection('integrations')
       .where('phone_number_id', '==', String(phoneNumberId).trim())
-      .limit(2)
       .get();
     if (!snapByPhone.empty) {
-      if (snapByPhone.docs.length > 1) {
-        console.warn(`⚠️ [Ambiguous Phone Number ID: ${phoneNumberId}] Multiple companies configured with identical Phone ID. Rejecting.`);
-        return null;
+      let candidateDocs = snapByPhone.docs;
+      if (candidateDocs.length > 1) {
+        candidateDocs = [...candidateDocs].sort((a, b) => {
+          const ad = a.data();
+          const bd = b.data();
+          const score = d => (d.status === 'connected' ? 4 : 0) + (d.outbound_verified === true ? 2 : 0) + (d.webhook_verified === true ? 1 : 0);
+          const scoreDiff = score(bd) - score(ad);
+          if (scoreDiff) return scoreDiff;
+          const bDate = String(bd.updated_at || bd.last_sync_at || bd.created_at || '');
+          const aDate = String(ad.updated_at || ad.last_sync_at || ad.created_at || '');
+          return bDate.localeCompare(aDate);
+        });
+        const selected = candidateDocs[0];
+        console.warn(`⚠️ [Duplicate Phone Number ID: ${phoneNumberId}] ${candidateDocs.length} integrations found; selecting ${selected.id} (${selected.data().company_id}) by active status and recency.`);
       }
-      intDoc = snapByPhone.docs[0].data();
-      intDocId = snapByPhone.docs[0].id;
+      const selectedDoc = candidateDocs[0];
+      intDoc = selectedDoc.data();
+      intDocId = selectedDoc.id;
     }
   }
 
