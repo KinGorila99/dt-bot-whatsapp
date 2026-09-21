@@ -1115,11 +1115,11 @@ app.post('/api/test-message', authenticateUser, async (req, res) => {
     });
   }
 
-  let activePhoneNumberId = phone_number_id;
+  let activePhoneNumberId = phone_number_id; let activeWabaId = null;
   let activeToken = access_token;
 
   // 3. Fallback to saved credentials if token was not provided in request (reopened forms)
-  if ((!activeToken || !activePhoneNumberId) && company_id && db) {
+  if (company_id && db) {
     try {
       const intSnap = await db.collection('integrations')
         .where('company_id', '==', company_id)
@@ -1129,7 +1129,7 @@ app.post('/api/test-message', authenticateUser, async (req, res) => {
 
       if (!intSnap.empty) {
         const intData = intSnap.docs[0].data();
-        activePhoneNumberId = activePhoneNumberId || intData.phone_number_id;
+        activePhoneNumberId = activePhoneNumberId || intData.phone_number_id; activeWabaId = activeWabaId || intData.whatsapp_business_account_id;
         const secDoc = await db.doc(`integrations/${intSnap.docs[0].id}/secrets/tokens`).get();
         if (secDoc.exists && secDoc.data().access_token) {
           activeToken = secDoc.data().access_token;
@@ -1174,7 +1174,7 @@ app.post('/api/test-message', authenticateUser, async (req, res) => {
       }
     );
 
-    const metaMsgId = metaRes.data?.messages?.[0]?.id || 'sent';
+    const metaMsgId = metaRes.data?.messages?.[0]?.id || 'sent'; if (company_id && activeWabaId && activeToken) { try { await http.post(`https://graph.facebook.com/${GRAPH_API_VERSION}/${activeWabaId}/subscribed_apps`, {}, { headers: { Authorization: `Bearer ${activeToken}` } }); console.log(`✅ WhatsApp WABA subscription ensured: ${activeWabaId}`); } catch (subErr) { console.warn('⚠️ WABA subscription could not be ensured:', subErr.response?.data?.error?.message || subErr.message); } }
 
     return res.status(200).json({
       success: true,
