@@ -353,6 +353,9 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const phoneNumberId = metadata?.phone_number_id ? String(metadata.phone_number_id).trim() : null;
     const wabaId = entry?.id ? String(entry.id).trim() : null;
     let customerPhone = message.from ? String(message.from).trim() : '';
+    // Meta may include Mexico's legacy WhatsApp routing digit (521XXXXXXXXXX).
+    // Graph API recipient addressing requires the canonical 52XXXXXXXXXX form.
+    if (/^521\d{10}$/.test(customerPhone)) customerPhone = `52${customerPhone.slice(3)}`;
     let customerName = contact?.profile?.name || `Usuario WhatsApp (+${customerPhone})`;
     let messageText = message.text?.body || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || '';
     const timestamp = message.timestamp ? new Date(parseInt(message.timestamp, 10) * 1000).toISOString() : new Date().toISOString();
