@@ -678,7 +678,17 @@ Incluye:
         botReply = crmReply;
       } else if (bestMatch && maxScore >= 2) {        
         botReply = `${bestMatch.content} ¿Te gustaría que un asesor te prepare una cotización personalizada?`;
-      } else if (['ya', 'si', 'sí', 'ok', 'okay', 'listo', 'recibido'].includes(lowerText)) { botReply = `Perfecto, ${customerName}. ¿Qué producto o servicio te interesa? Si prefieres hablar con un asesor, escribe "asesor".`; } else if (lowerText === 'hola' || lowerText === 'buenos dias' || lowerText === 'buenas tardes' || lowerText === 'buenas noches' || lowerText === 'inicio') {
+      } else if (['si', 'yes', 'claro', 'por favor', 'adelante', 'me interesa', 'me interesa la demo'].includes(lowerText)) {
+  botReply = `¡Excelente! 🙌 Con gusto te mostramos una demo de DT Marketing.
+
+Un asesor te contactará por este medio para conocer tu negocio y enseñarte el DT CRM Core + API Chat Bot de WhatsApp.
+
+Si quieres atención inmediata, escribe *asesor*`;
+} else if (['no', 'nop', 'ahorita no', 'por ahora no'].includes(lowerText)) {
+  botReply = `Entendido 👍 Si después quieres conocer nuestros servicios, escribe *CRM*, *WhatsApp* o *paquete*`;
+} else if (['ya', 'ok', 'okay', 'listo', 'recibido'].includes(lowerText)) {
+  botReply = `Perfecto, ${customerName}. ¿Qué producto o servicio te interesa? También puedes escribir *asesor* para hablar con nuestro equipo.`;
+} else if (lowerText === 'hola' || lowerText === 'buenos dias' || lowerText === 'buenas tardes' || lowerText === 'buenas noches' || lowerText === 'inicio') {
         botReply = convData.welcome_sent_at ? '¡Hola de nuevo! 👋 ¿Qué información necesitas?' : (convData.welcome_sent_at = new Date().toISOString(), `¡Hola ${customerName}! 👋
 
 Gracias por escribir a DT Marketing.
