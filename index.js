@@ -611,7 +611,72 @@ app.post('/webhook/whatsapp', async (req, res) => {
         }
       }
 
-      if (lowerText.includes('paquete completo')) {        botReply = 'El Paquete Completo de DT Marketing cuesta $2,499 MXN mensuales más activación e incluye DT CRM Core y API Chat Bot de WhatsApp.';      } else if ((lowerText.includes('chat bot') || lowerText.includes('whatsapp')) && (lowerText.includes('cuanto') || lowerText.includes('precio') || lowerText.includes('costo') || lowerText.includes('acceso'))) {        botReply = 'La API Chat Bot de WhatsApp cuesta $1,799 MXN al mes e incluye un número de WhatsApp, respuestas automáticas 24/7, menú de atención, captación de prospectos y transferencia a un asesor.';      } else if (lowerText.includes('crm') && (lowerText.includes('cuanto') || lowerText.includes('precio') || lowerText.includes('costo') || lowerText.includes('acceso'))) {        botReply = 'DT CRM Core cuesta $599 MXN al mes e incluye hasta 3 usuarios, leads, clientes, embudo de ventas, seguimientos, actividades, recordatorios, dashboard, métricas, soporte y actualizaciones. Cada usuario adicional cuesta $109 MXN al mes.';      } else if (bestMatch && maxScore >= 2) {
+            const asksPrice = ['precio', 'cuanto', 'cuesta', 'costo', 'mensual', 'vale', 'tarifa', 'pago', 'acceso'].some(term => lowerText.includes(term));
+      const asksPackage = lowerText.includes('paquete') || lowerText.includes('completo') || lowerText.includes('ambos') || lowerText.includes('los dos') || lowerText.includes('crm y bot') || lowerText.includes('bot y crm');
+      const asksCrm = lowerText.includes('crm');
+      const asksBot = lowerText.includes('bot') || lowerText.includes('chatbot') || lowerText.includes('chat bot') || lowerText.includes('whatsapp') || lowerText.includes('api chat');
+
+      const crmReply = `📊 *DT CRM Core*
+
+💰 *$599 MXN al mes*
+
+Incluye:
+👥 Hasta 3 usuarios
+🎯 Registro y organización de prospectos
+🤝 Administración de clientes
+📈 Embudo y seguimiento de ventas
+📝 Actividades y recordatorios
+📊 Dashboard y métricas
+🛠️ Soporte y actualizaciones
+
+➕ Usuario adicional: *$109 MXN al mes*
+
+¿Quieres conocer el paquete completo o prefieres hablar con un asesor?`;
+
+      const botReplyText = `🤖 *API Chat Bot de WhatsApp*
+
+💰 *$1,799 MXN al mes*
+
+Incluye:
+📱 Un número de WhatsApp
+⚡ Respuestas automáticas 24/7
+🧭 Menú de atención
+🎯 Captación y calificación de prospectos
+👨‍💼 Transferencia con un asesor
+🔀 Flujos personalizados básicos
+🛠️ Soporte y ajustes mensuales
+
+¿Quieres conocer el paquete completo o hablar con un asesor?`;
+
+      const packageReply = `🚀 *Paquete Completo DT Marketing*
+
+💰 *$2,499 MXN mensuales + activación*
+
+Incluye:
+
+📊 *DT CRM Core*
+• Prospectos, clientes y seguimientos
+• Embudo de ventas
+• Actividades, recordatorios y métricas
+
+🤖 *API Chat Bot de WhatsApp*
+• Atención automática 24/7
+• Menús y flujos personalizados
+• Captación de prospectos y transferencia a un asesor
+
+🇲🇽 Tecnología desarrollada en México para organizar tu negocio, automatizar la atención y convertir más conversaciones en ventas.
+
+ℹ️ Los cargos por mensajes de WhatsApp API de Meta y consumos adicionales se cotizan por separado.
+
+¿Te gustaría solicitar una demostración?`;
+
+      if (asksPackage) {
+        botReply = packageReply;
+      } else if (asksBot && (asksPrice || lowerText.includes('y el') || lowerText.includes('incluye') || lowerText.includes('funciona') || lowerText.includes('informacion') || lowerText.includes('información') || lowerText.includes('servicio'))) {
+        botReply = botReplyText;
+      } else if (asksCrm && (asksPrice || lowerText.includes('incluye') || lowerText.includes('funciona') || lowerText.includes('informacion') || lowerText.includes('información') || lowerText.includes('servicio'))) {
+        botReply = crmReply;
+      } else if (bestMatch && maxScore >= 2) {        
         botReply = `${bestMatch.content} ¿Te gustaría que un asesor te prepare una cotización personalizada?`;
       } else if (['ya', 'si', 'sí', 'ok', 'okay', 'listo', 'recibido'].includes(lowerText)) { botReply = `Perfecto, ${customerName}. ¿Qué producto o servicio te interesa? Si prefieres hablar con un asesor, escribe "asesor".`; } else if (lowerText === 'hola' || lowerText === 'buenos dias' || lowerText === 'buenas tardes' || lowerText === 'buenas noches' || lowerText === 'inicio') {
         botReply = convData.welcome_sent_at ? '¡Hola de nuevo! 👋 ¿Qué información necesitas?' : (convData.welcome_sent_at = new Date().toISOString(), `¡Hola ${customerName}! 👋
@@ -626,7 +691,16 @@ Soy el asistente virtual. Puedo ayudarte con:
 Escribe "CRM", "WhatsApp", "paquete" o "asesor" para continuar.`) || `¡Hola ${customerName}! 👋 Bienvenido a nuestro canal oficial de WhatsApp. ¿En qué producto o cotización podemos asesorarte hoy? (Escribe "asesor" para hablar con un ejecutivo).`;
       } else {
         // Safe, non-hallucinating response with clarification
-        botReply = botSettings?.fallback_message || `Gracias por contactarnos. Para brindarte la información exacta sobre disponibilidad y precios, ¿podrías indicarme qué producto o servicio buscas? También puedes escribir "asesor" para comunicarte con nuestro equipo.`;
+                const configuredFallback = String(botSettings?.fallback_message || '').trim();
+        botReply = configuredFallback && !/no tengo suficiente información|no tengo suficiente informacion/i.test(configuredFallback) ? configuredFallback : `🤔 *Quiero ayudarte mejor.*
+
+¿Buscas información sobre:
+
+📊 *DT CRM Core*
+🤖 *API Chat Bot de WhatsApp*
+🚀 *Paquete completo*
+
+Escribe el nombre del servicio o pon *asesor* y te comunicamos con nuestro equipo.`;
       }
     }
 
