@@ -445,7 +445,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
       company_id: companyId,
       nombre: customerName,
       telefono: customerPhone.startsWith('+') ? customerPhone : `+${customerPhone}`,
-      correo: `null`,
+      correo: null,
       empresa: contact?.profile?.name || 'Contacto WhatsApp Directo',
       servicio: 'Atención WhatsApp Cloud API',
       fuente: 'WhatsApp',
