@@ -52,6 +52,17 @@ const MASTER_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'dt_crm_whatsap
 const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || 'v21.0';
 const META_APP_SECRET = process.env.META_APP_SECRET || '';
 
+function normalizeBotText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+
 /**
  * Check working hours against company timezone
  */
@@ -475,6 +486,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
         bot_enabled: true,
         human_handoff: false,
         unread_count: 1,
+                welcome_sent_at: null,
+
         last_message: messageText,
         last_message_sender: 'customer',
         created_at: timestamp,
@@ -536,7 +549,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
     } catch (e) {}
 
     // Check for Human Handoff Intent
-    const lowerText = messageText.toLowerCase().trim();
+    const lowerText = normalizeBotText(messageText);
     const humanKeywords = ['asesor', 'humano', 'persona', 'agente', 'ejecutivo', 'hablar con alguien', 'representante', 'ayuda humana', 'transferir'];
     const wantsHuman = humanKeywords.some(kw => lowerText.includes(kw));
 
@@ -588,9 +601,9 @@ app.post('/webhook/whatsapp', async (req, res) => {
         let score = 0;
         const keywords = item.keywords || [];
         for (const kw of keywords) {
-          if (kw && lowerText.includes(kw.toLowerCase().trim())) score += 3;
+          if (kw && normalizeBotText(kw).split(' ').some(token => token.length > 2 && lowerText.includes(token))) score += 3;
         }
-        if (item.title && lowerText.includes(item.title.toLowerCase().trim())) score += 2;
+        if (item.title && normalizeBotText(item.title).split(' ').some(token => token.length > 2 && lowerText.includes(token))) score += 2;
 
         if (score > maxScore) {
           maxScore = score;
@@ -598,10 +611,19 @@ app.post('/webhook/whatsapp', async (req, res) => {
         }
       }
 
-      if (bestMatch && maxScore >= 2) {
+      if (lowerText.includes('paquete completo')) {        botReply = 'El Paquete Completo de DT Marketing cuesta $2,499 MXN mensuales más activación e incluye DT CRM Core y API Chat Bot de WhatsApp.';      } else if ((lowerText.includes('chat bot') || lowerText.includes('whatsapp')) && (lowerText.includes('cuanto') || lowerText.includes('precio') || lowerText.includes('costo') || lowerText.includes('acceso'))) {        botReply = 'La API Chat Bot de WhatsApp cuesta $1,799 MXN al mes e incluye un número de WhatsApp, respuestas automáticas 24/7, menú de atención, captación de prospectos y transferencia a un asesor.';      } else if (lowerText.includes('crm') && (lowerText.includes('cuanto') || lowerText.includes('precio') || lowerText.includes('costo') || lowerText.includes('acceso'))) {        botReply = 'DT CRM Core cuesta $599 MXN al mes e incluye hasta 3 usuarios, leads, clientes, embudo de ventas, seguimientos, actividades, recordatorios, dashboard, métricas, soporte y actualizaciones. Cada usuario adicional cuesta $109 MXN al mes.';      } else if (bestMatch && maxScore >= 2) {
         botReply = `${bestMatch.content} ¿Te gustaría que un asesor te prepare una cotización personalizada?`;
       } else if (['ya', 'si', 'sí', 'ok', 'okay', 'listo', 'recibido'].includes(lowerText)) { botReply = `Perfecto, ${customerName}. ¿Qué producto o servicio te interesa? Si prefieres hablar con un asesor, escribe "asesor".`; } else if (lowerText === 'hola' || lowerText === 'buenos dias' || lowerText === 'buenas tardes' || lowerText === 'buenas noches' || lowerText === 'inicio') {
-        botReply = botSettings?.welcome_message || `¡Hola ${customerName}! 👋 Bienvenido a nuestro canal oficial de WhatsApp. ¿En qué producto o cotización podemos asesorarte hoy? (Escribe "asesor" para hablar con un ejecutivo).`;
+        botReply = convData.welcome_sent_at ? '¡Hola de nuevo! 👋 ¿Qué información necesitas?' : (convData.welcome_sent_at = new Date().toISOString(), `¡Hola ${customerName}! 👋
+
+Gracias por escribir a DT Marketing.
+
+Soy el asistente virtual. Puedo ayudarte con:
+• DT CRM Core
+• API Chat Bot de WhatsApp
+• Paquete completo
+
+Escribe "CRM", "WhatsApp", "paquete" o "asesor" para continuar.`) || `¡Hola ${customerName}! 👋 Bienvenido a nuestro canal oficial de WhatsApp. ¿En qué producto o cotización podemos asesorarte hoy? (Escribe "asesor" para hablar con un ejecutivo).`;
       } else {
         // Safe, non-hallucinating response with clarification
         botReply = botSettings?.fallback_message || `Gracias por contactarnos. Para brindarte la información exacta sobre disponibilidad y precios, ¿podrías indicarme qué producto o servicio buscas? También puedes escribir "asesor" para comunicarte con nuestro equipo.`;
