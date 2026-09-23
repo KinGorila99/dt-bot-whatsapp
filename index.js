@@ -1451,7 +1451,7 @@ app.post('/api/meta/embedded-signup/complete', authenticateUser, async (req, res
   const http = customHttpClient || axios;
   try {
     const exchanged = await http.get(`https://graph.facebook.com/${GRAPH_API_VERSION}/oauth/access_token`, {
-      params: { client_id: META_ESU_APP_ID, client_secret: appSecret, code: String(body.code) }
+            params: { client_id: META_ESU_APP_ID, client_secret: appSecret, code: String(body.code), redirect_uri: 'https://dt-crm-core.web.app/index.html' }
     });
     const accessToken = exchanged.data?.access_token;
     if (!accessToken) throw new Error('Meta no devolvió un token de acceso.');
