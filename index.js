@@ -1469,9 +1469,10 @@ app.post('/api/meta/embedded-signup/complete', authenticateUser, async (req, res
     }
     if (phoneId) {
       try {
-        const phone = await http.get(`https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneId}`, { params: { fields: 'id,display_phone_number,verified_name', access_token: accessToken } });
+        const phone = await http.get(`https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneId}`, { params: { fields: 'id,display_phone_number,verified_name,whatsapp_business_account_id', access_token: accessToken } });
         displayPhone = displayPhone || phone.data?.display_phone_number || '';
         verifiedName = verifiedName || phone.data?.verified_name || '';
+        wabaId = phone.data?.whatsapp_business_account_id || wabaId;
       } catch (_) {}
     } else if (wabaId) {
       const phones = await http.get(`https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}/phone_numbers`, { params: { fields: 'id,display_phone_number,verified_name', limit: 10, access_token: accessToken } });
