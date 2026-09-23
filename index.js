@@ -1480,7 +1480,7 @@ app.post('/api/meta/embedded-signup/complete', authenticateUser, async (req, res
       if (first) { phoneId = first.id || ''; displayPhone = displayPhone || first.display_phone_number || ''; verifiedName = verifiedName || first.verified_name || ''; }
     }
     if (!wabaId || !phoneId) return res.status(422).json({ success: false, error: 'Meta no devolvió el WABA y el número necesarios para completar la conexión.' });
-    await http.post(`https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}/subscribed_apps`, {}, { params: { access_token: accessToken } });
+    try { await http.post(`https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}/subscribed_apps`, {}, { params: { access_token: accessToken } }); } catch (subscriptionError) { console.warn('Embedded Signup subscription pending:', subscriptionError.response?.data?.error?.message || subscriptionError.message); }
 
     const now = new Date().toISOString();
     const integrationId = `int_wa_${companyId}`;
