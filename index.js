@@ -1418,3 +1418,87 @@ module.exports = {
   GRAPH_API_VERSION,
   MASTER_VERIFY_TOKEN
 };
+
+
+// Embedded Signup endpoints (append to the Render backend)
+const META_ESU_APP_ID = process.env.META_APP_ID || '1617679830370323';
+const META_ESU_CONFIG_ID = process.env.META_EMBEDDED_SIGNUP_CONFIG_ID || '';
+const META_ESU_VERSION = process.env.META_EMBEDDED_SIGNUP_VERSION || '3';
+
+app.get('/api/meta/embedded-signup/config', authenticateUser, (req, res) => {
+  res.json({
+    enabled: Boolean(META_ESU_APP_ID && META_ESU_CONFIG_ID),
+    app_id: META_ESU_APP_ID,
+    config_id: META_ESU_CONFIG_ID || null,
+    version: META_ESU_VERSION,
+    graph_api_version: GRAPH_API_VERSION
+  });
+});
+
+app.post('/api/meta/embedded-signup/complete', authenticateUser, async (req, res) => {
+  const body = req.body || {};
+  const user = req.authenticatedUser || {};
+  const companyId = String(body.company_id || user.company_id || '').trim();
+  if (!companyId) return res.status(400).json({ success: false, error: 'No se pudo identificar la empresa activa del CRM.' });
+  if (user.rol !== 'SUPERADMIN' && user.company_id !== companyId) {
+    return res.status(403).json({ success: false, error: 'No tienes autorización para conectar WhatsApp en esta empresa.' });
+  }
+  const appSecret = process.env.META_APP_SECRET || '';
+  if (!body.code || !appSecret) {
+    return res.status(400).json({ success: false, error: appSecret ? 'Meta no devolvió el código temporal de autorización.' : 'Falta configurar META_APP_SECRET en Render.' });
+  }
+  if (!db) return res.status(503).json({ success: false, error: 'La base de datos no está disponible para guardar la conexión.' });
+  const http = customHttpClient || axios;
+  try {
+    const exchanged = await http.get(`https://graph.facebook.com/${GRAPH_API_VERSION}/oauth/access_token`, {
+      params: { client_id: META_ESU_APP_ID, client_secret: appSecret, code: String(body.code) }
+    });
+    const accessToken = exchanged.data?.access_token;
+    if (!accessToken) throw new Error('Meta no devolvió un token de acceso.');
+
+    let wabaId = String(body.waba_id || '').trim();
+    let phoneId = String(body.phone_number_id || '').trim();
+    let displayPhone = String(body.display_phone_number || '').trim();
+    let verifiedName = String(body.verified_name || '').trim();
+    let businessName = '';
+    if (wabaId) {
+      try {
+        const waba = await http.get(`https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}`, { params: { fields: 'id,name', access_token: accessToken } });
+        businessName = waba.data?.name || '';
+      } catch (_) {}
+    }
+    if (phoneId) {
+      try {
+        const phone = await http.get(`https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneId}`, { params: { fields: 'id,display_phone_number,verified_name', access_token: accessToken } });
+        displayPhone = displayPhone || phone.data?.display_phone_number || '';
+        verifiedName = verifiedName || phone.data?.verified_name || '';
+      } catch (_) {}
+    } else if (wabaId) {
+      const phones = await http.get(`https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}/phone_numbers`, { params: { fields: 'id,display_phone_number,verified_name', limit: 10, access_token: accessToken } });
+      const first = phones.data?.data?.[0];
+      if (first) { phoneId = first.id || ''; displayPhone = displayPhone || first.display_phone_number || ''; verifiedName = verifiedName || first.verified_name || ''; }
+    }
+    if (!wabaId || !phoneId) return res.status(422).json({ success: false, error: 'Meta no devolvió el WABA y el número necesarios para completar la conexión.' });
+    await http.post(`https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}/subscribed_apps`, {}, { params: { access_token: accessToken } });
+
+    const now = new Date().toISOString();
+    const integrationId = `int_wa_${companyId}`;
+    const integration = {
+      id: integrationId, company_id: companyId, provider: 'whatsapp', status: 'connected',
+      onboarding_method: 'embedded_signup', display_phone_number: displayPhone, phone_number_id: phoneId,
+      whatsapp_business_account_id: wabaId, verified_name: verifiedName || businessName || 'WhatsApp Business',
+      has_token: true, webhook_verified: true, outbound_verified: false,
+      meta_business_id: String(body.meta_business_id || '').trim(), last_verified_at: now, last_sync_at: now,
+      updated_at: now, created_at: now, created_by_user_id: user.uid, created_by_user_name: user.nombre || 'Administrador'
+    };
+    const batch = db.batch();
+    batch.set(db.doc(`integrations/${integrationId}`), integration, { merge: true });
+    batch.set(db.doc(`integrations/${integrationId}/secrets/tokens`), { access_token: accessToken, has_token: true, source: 'embedded_signup', updated_at: now, company_id: companyId }, { merge: true });
+    await batch.commit();
+    res.json({ success: true, company_id: companyId, waba_id: wabaId, phone_number_id: phoneId, display_phone_number: displayPhone, verified_name: verifiedName || businessName, status: 'connected' });
+  } catch (err) {
+    const metaError = err.response?.data?.error;
+    console.error('Embedded Signup completion error:', metaError?.message || err.message);
+    res.status(502).json({ success: false, error: metaError?.message || 'Meta no pudo completar la conexión de WhatsApp.' });
+  }
+});
