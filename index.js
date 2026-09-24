@@ -49,7 +49,7 @@ if (!admin.apps.length) {
 
 // Configuration
 const MASTER_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'dt_crm_whatsapp_verify_token_2026';
-const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || 'v21.0';
+const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || 'v26.0';
 const META_APP_SECRET = process.env.META_APP_SECRET || '';
 // Auto-reactivate the bot after an advisor has been idle.
 const HUMAN_HANDOFF_IDLE_MINUTES = Math.max(5, Number(process.env.HUMAN_HANDOFF_IDLE_MINUTES || 30));
@@ -1451,7 +1451,7 @@ app.post('/api/meta/embedded-signup/complete', authenticateUser, async (req, res
   const http = customHttpClient || axios;
   try {
     const exchanged = await http.get(`https://graph.facebook.com/${GRAPH_API_VERSION}/oauth/access_token`, {
-            params: { client_id: META_ESU_APP_ID, client_secret: appSecret, code: String(body.code), redirect_uri: 'https://dt-crm-core.web.app/index.html' }
+            params: { client_id: META_ESU_APP_ID, client_secret: appSecret, code: String(body.code) }
     });
     const accessToken = exchanged.data?.access_token;
     if (!accessToken) throw new Error('Meta no devolvió un token de acceso.');
@@ -1461,6 +1461,9 @@ app.post('/api/meta/embedded-signup/complete', authenticateUser, async (req, res
     let displayPhone = String(body.display_phone_number || '').trim();
     let verifiedName = String(body.verified_name || '').trim();
     let businessName = '';
+    if (!wabaId || !phoneId) {
+      return res.status(422).json({ success: false, error: 'Meta no devolvió la cuenta de WhatsApp y el número seleccionados. No se modificó la conexión existente.' });
+    }
     if (wabaId) {
       try {
         const waba = await http.get(`https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}`, { params: { fields: 'id,name', access_token: accessToken } });
@@ -1474,13 +1477,9 @@ app.post('/api/meta/embedded-signup/complete', authenticateUser, async (req, res
         verifiedName = verifiedName || phone.data?.verified_name || '';
         wabaId = phone.data?.whatsapp_business_account_id || wabaId;
       } catch (_) {}
-    } else if (wabaId) {
-      const phones = await http.get(`https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}/phone_numbers`, { params: { fields: 'id,display_phone_number,verified_name', limit: 10, access_token: accessToken } });
-      const first = phones.data?.data?.[0];
-      if (first) { phoneId = first.id || ''; displayPhone = displayPhone || first.display_phone_number || ''; verifiedName = verifiedName || first.verified_name || ''; }
     }
     if (!wabaId || !phoneId) return res.status(422).json({ success: false, error: 'Meta no devolvió el WABA y el número necesarios para completar la conexión.' });
-    try { await http.post(`https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}/subscribed_apps`, {}, { params: { access_token: accessToken } }); } catch (subscriptionError) { console.warn('Embedded Signup subscription pending:', subscriptionError.response?.data?.error?.message || subscriptionError.message); }
+    try { await http.post(`https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}/subscribed_apps`, {}, { params: { access_token: accessToken } }); } catch (subscriptionError) { const message = subscriptionError.response?.data?.error?.message || subscriptionError.message; return res.status(502).json({ success: false, error: `Meta no autorizó la suscripción del webhook: ${message}` }); }
 
     const now = new Date().toISOString();
     const integrationId = `int_wa_${companyId}`;
