@@ -800,7 +800,7 @@ Escribe el nombre del servicio o pon *asesor* y te comunicamos con nuestro equip
     }
 
     // 6. Send Outbound WhatsApp Reply via Meta Graph API
-    let outboundSuccess = false;
+    const botIdentity = `${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase(); const isDtMarketingTenant = /\bdt\s*(marketing|crm)\b/.test(botIdentity); const tenantBotName = String(botSettings?.bot_name || 'nuestro asistente').trim(); const crossTenantContent = /(dt marketing|dt crm core|api chat bot|paquete completo|escribe \*crm\*, \*whatsapp\* o \*paquete\*)/i; if (!isDtMarketingTenant && crossTenantContent.test(botReply)) { const asksLocation = /\b(ubicacion|ubicados|donde estan|direccion|sucursal)\b/.test(lowerText); console.error(`[Cross-Tenant Content Blocked] Company: ${companyId} | Phone ID: ${phoneNumberId}`); botReply = asksLocation ? `📍 Para confirmarte la ubicación y la cobertura exactas, compártenos tu ciudad o código postal. Un asesor de *${tenantBotName}* te apoyará enseguida.` : `🤔 *Quiero ayudarte mejor.* Para orientarte sobre *${tenantBotName}*, ¿buscas una cotización, una pieza o servicio, información de envío, garantía o hablar con un asesor?`; } let outboundSuccess = false;
     let metaMessageId = null;
 
     if (botReply && accessToken && phoneNumberId) {
