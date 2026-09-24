@@ -324,10 +324,56 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const changes = entry?.changes?.[0];
     const value = changes?.value;
 
-    if (!value?.messages || value.messages.length === 0) {
-      // Event is status update (sent, delivered, read)
+    // Meta sends delivery/read/failure updates in a separate webhook event.
+    // Persist them immediately so the CRM never presents an accepted request as delivered.
+    const statuses = Array.isArray(value?.statuses) ? value.statuses : [];
+    if (statuses.length > 0) {
+      if (!db) return;
+      for (const statusEvent of statuses) {
+        const externalId = String(statusEvent.id || '').trim();
+        const rawStatus = String(statusEvent.status || '').trim().toLowerCase();
+        if (!externalId || !rawStatus) continue;
+        const deliveryStatus = ['sent', 'delivered', 'read', 'failed'].includes(rawStatus) ? rawStatus : 'accepted';
+        const updatedAt = statusEvent.timestamp
+          ? new Date(Number(statusEvent.timestamp) * 1000).toISOString()
+          : new Date().toISOString();
+        const firstError = Array.isArray(statusEvent.errors) ? statusEvent.errors[0] : null;
+        const errorMessage = firstError
+          ? [firstError.title, firstError.message, firstError.details].filter(Boolean).join(': ')
+          : null;
+        const deliveryPatch = {
+          delivery_status: deliveryStatus,
+          whatsapp_status: rawStatus,
+          delivery_status_updated_at: updatedAt,
+          ...(errorMessage ? { error_message: errorMessage, whatsapp_error_code: firstError.code || null } : {})
+        };
+        try {
+          const messageSnap = await db.collection('messages')
+            .where('external_message_id', '==', externalId)
+            .limit(10)
+            .get();
+          if (!messageSnap.empty) {
+            const batch = db.batch();
+            messageSnap.docs.forEach(messageDoc => batch.set(messageDoc.ref, deliveryPatch, { merge: true }));
+            await batch.commit();
+          }
+          // Keep a short-lived status record as a race buffer when Meta's webhook
+          // arrives before the CRM finishes writing the outbound message.
+          await db.doc('whatsapp_delivery_status/' + externalId).set({
+            external_message_id: externalId,
+            phone_number_id: value?.metadata?.phone_number_id || null,
+            ...deliveryPatch,
+            updated_at: new Date().toISOString()
+          }, { merge: true });
+          console.log('📬 [WhatsApp Delivery] ' + externalId + ': ' + deliveryStatus + (errorMessage ? ' — ' + errorMessage : ''));
+        } catch (statusError) {
+          console.error('Error persisting WhatsApp delivery status for ' + externalId + ':', statusError.message);
+        }
+      }
       return;
     }
+
+    if (!value?.messages || value.messages.length === 0) return;
 
     const message = value.messages[0];
     const contact = value.contacts?.[0];
@@ -776,9 +822,12 @@ Escribe el nombre del servicio o pon *asesor* y te comunicamos con nuestro equip
           }
         );
 
-        outboundSuccess = true;
         metaMessageId = metaRes.data?.messages?.[0]?.id || null;
-        console.log(`🤖 [DT Bot Sent] To: +${customerPhone} | Meta Msg ID: ${metaMessageId}`);
+        if (!metaMessageId) {
+          throw new Error('Meta respondió sin un ID de mensaje. El CRM no marcará el envío como aceptado.');
+        }
+        outboundSuccess = true;
+        console.log(`🤖 [DT Bot Accepted] To: +${customerPhone} | Meta Msg ID: ${metaMessageId}`);
       } catch (metaErr) {
         console.error('❌ Meta Graph API Error sending reply:', metaErr.response?.data?.error?.message || metaErr.message);
       }
@@ -798,7 +847,7 @@ Escribe el nombre del servicio o pon *asesor* y te comunicamos con nuestro equip
           content: botReply,
           sender_type: 'bot',
           created_at: new Date().toISOString(),
-          delivery_status: 'sent',
+          delivery_status: 'accepted',
           external_message_id: metaMessageId
         };
 
@@ -1148,8 +1197,11 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
       }
     );
 
-    const metaMsgId = metaRes.data?.messages?.[0]?.id || 'sent';
-    console.log(`📤 [Advisor Message Sent] By: ${user_name || user.nombre} to +${cleanPhone} | Meta Msg ID: ${metaMsgId}`);
+    const metaMsgId = metaRes.data?.messages?.[0]?.id || null;
+    if (!metaMsgId) {
+      throw new Error('Meta respondió sin un ID de mensaje. El CRM no marcará el envío como aceptado.');
+    }
+    console.log(`📤 [Advisor Message Accepted] By: ${user_name || user.nombre} to +${cleanPhone} | Meta Msg ID: ${metaMsgId}`);
 
     // Update idempotency lock with success
     let postMetaLockError = null;
@@ -1190,7 +1242,7 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
         sender_type: 'agent',
         user_name: user_name || user.nombre,
         created_at: agentTimestamp,
-        delivery_status: 'sent',
+        delivery_status: 'accepted',
         external_message_id: metaMsgId
       };
 
@@ -1222,6 +1274,8 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
       success: true,
       message_id: metaMsgId,
       meta_accepted: true,
+      delivery_status: 'accepted',
+      note: 'WhatsApp aceptó el mensaje; la entrega se confirmará mediante el webhook.',
       warning: warningMessage
     });
 
@@ -1337,7 +1391,9 @@ app.post('/api/test-message', authenticateUser, async (req, res) => {
       }
     );
 
-    const metaMsgId = metaRes.data?.messages?.[0]?.id || 'sent'; if (company_id && activeWabaId && activeToken) { try { await http.post(`https://graph.facebook.com/${GRAPH_API_VERSION}/${activeWabaId}/subscribed_apps`, {}, { headers: { Authorization: `Bearer ${activeToken}` } }); console.log(`✅ WhatsApp WABA subscription ensured: ${activeWabaId}`); } catch (subErr) { console.warn('⚠️ WABA subscription could not be ensured:', subErr.response?.data?.error?.message || subErr.message); } }
+    const metaMsgId = metaRes.data?.messages?.[0]?.id || null;
+    if (!metaMsgId) throw new Error('Meta respondió sin un ID de mensaje. La prueba no se marcará como exitosa.');
+    if (company_id && activeWabaId && activeToken) { try { await http.post(`https://graph.facebook.com/${GRAPH_API_VERSION}/${activeWabaId}/subscribed_apps`, {}, { headers: { Authorization: `Bearer ${activeToken}` } }); console.log(`✅ WhatsApp WABA subscription ensured: ${activeWabaId}`); } catch (subErr) { console.warn('⚠️ WABA subscription could not be ensured:', subErr.response?.data?.error?.message || subErr.message); } }
 
     return res.status(200).json({
       success: true,
@@ -1369,7 +1425,8 @@ app.post('/api/test-message', authenticateUser, async (req, res) => {
             }
           }
         );
-        const templateMsgId = templateRes.data?.messages?.[0]?.id || 'sent';
+        const templateMsgId = templateRes.data?.messages?.[0]?.id || null;
+        if (!templateMsgId) throw new Error('Meta respondió sin un ID de mensaje para la plantilla.');
         return res.status(200).json({
           success: true,
           message_id: templateMsgId,
