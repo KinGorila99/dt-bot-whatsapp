@@ -173,32 +173,39 @@ function normalizeSprProduct(product) {
   const currentPrice = parseSprMoney(variant.price ?? product?.price);
   const compareAtPrice = parseSprMoney(variant.compare_at_price ?? product?.compare_at_price);
   const regularPrice = compareAtPrice > currentPrice ? compareAtPrice : currentPrice;
+  const title = String(product?.title || '').trim();
+  const vendor = String(product?.vendor || 'SPR ENGINE SERIES').trim();
+  const productType = String(product?.product_type || '').trim();
+  const tags = Array.isArray(product?.tags) ? product.tags.join(' ') : String(product?.tags || '');
+  const classificationText = normalizeBotText([title, productType, tags, vendor].filter(Boolean).join(' '));
+  const isHeadOrCylinder = /\b(cabeza(?:s)?|culata(?:s)?)\b/.test(classificationText);
+  const isEngineSeries = /\bengine\s+series\b/.test(classificationText);
+  const hasMotorKeyword = /\bmotor(?:es)?\b/.test(classificationText);
+  const isAccessoryOrMount = /\b(soporte(?:s)?|base(?:s)?|taco(?:s)?|montura(?:s)?|mount(?:s)?|sensor(?:es)?|refaccion(?:es)?|accesorio(?:s)?)\b/.test(classificationText);
+  const discountEligible = isEngineSeries || isHeadOrCylinder || (hasMotorKeyword && !isAccessoryOrMount);
   const september = isSeptemberInMexico();
   const calculatedSeptemberPrice = regularPrice > 0
     ? Math.round(regularPrice * (1 - SPR_SEPTEMBER_DISCOUNT_PERCENT / 100) * 100) / 100
     : 0;
-  const offerPrice = september && currentPrice > 0 && currentPrice < regularPrice
-    ? currentPrice
-    : september
-      ? calculatedSeptemberPrice
-      : currentPrice;
-  const hasSeptemberOffer = september && offerPrice > 0 && regularPrice > offerPrice;
+  const offerPrice = discountEligible && september ? calculatedSeptemberPrice : currentPrice;
+  const hasSeptemberOffer = discountEligible && september && offerPrice > 0 && regularPrice > offerPrice;
   const available = variants.length > 0
     ? variants.some(item => item.available !== false)
     : product?.available !== false;
   const handle = String(product?.handle || '').trim();
   return {
     id: product?.id || handle,
-    title: String(product?.title || '').trim(),
-    normalizedTitle: normalizeBotText(product?.title || ''),
-    vendor: String(product?.vendor || 'SPR ENGINE SERIES').trim(),
-    productType: String(product?.product_type || '').trim(),
-    tags: Array.isArray(product?.tags) ? product.tags.join(' ') : String(product?.tags || ''),
+    title,
+    normalizedTitle: normalizeBotText(title),
+    vendor,
+    productType,
+    tags,
     description: stripSprHtml(product?.body_html),
     available,
     regularPrice,
     offerPrice: hasSeptemberOffer ? offerPrice : currentPrice,
     hasSeptemberOffer,
+    discountEligible,
     url: handle ? 'https://sprautopartes.mx/products/' + handle : 'https://sprautopartes.mx/collections/spr-engine-series'
   };
 }
