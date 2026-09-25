@@ -107,8 +107,37 @@ function decorateWhatsAppKeywordLine(line) {
 function formatWhatsAppReply(value) {
   let text = String(value || '').replace(/\r/g, '').trim();
   if (!text) return '';
-  text = text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
-  const lines = text.split('\n').map(decorateWhatsAppKeywordLine);
+
+  // Keep each idea readable in WhatsApp instead of sending one flat paragraph.
+  text = text
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/([.!?])\s+(?=[A-ZÁÉÍÓÚÑ¿¡])/g, '$1\n')
+    .replace(/([.!?])\s+(?=[📍🚚✅🕑🧑🏻‍💻])/gu, '$1\n')
+    .replace(/\n{3,}/g, '\n\n');
+
+  // Emphasize useful keywords without bolding the whole response.
+  const inlinePatterns = [
+    /\b(Lunes\s+a\s+S[áa]bado)\b/gi,
+    /\b(24\s+horas)\b/gi,
+    /\b(\d{1,2}:\d{2}\s*(?:a\.?\s*m\.?|p\.?\s*m\.?))\b/gi,
+    /\b(Precio\s+(?:normal|vigente)|Precio\s+especial\s+exclusivo\s+de\s+septiembre)\b/gi,
+    /\b(Querétaro,\s+México)\b/gi
+  ];
+  for (const pattern of inlinePatterns) {
+    text = text.replace(pattern, (match, _group, offset, source) => {
+      const before = source.slice(Math.max(0, offset - 1), offset);
+      const after = source.slice(offset + match.length, offset + match.length + 1);
+      return before === '*' || after === '*' ? match : '*' + match + '*';
+    });
+  }
+
+  const lines = text.split('\n').map(line => {
+    let formatted = decorateWhatsAppKeywordLine(line.trim());
+    if (/^Atendemos de\b/i.test(formatted) && !formatted.includes('✅')) formatted += ' ✅';
+    if (/^Nuestro canal de WhatsApp y redes sociales/i.test(formatted) && !formatted.includes('🕑')) formatted += ' 🕑';
+    if (/^¿Te gustaría que un asesor/i.test(formatted) && !formatted.includes('🧑🏻‍💻')) formatted += ' 🧑🏻‍💻';
+    return formatted;
+  });
   if (lines[0] && !lines[0].includes('*') && lines[0].trim().length <= 80) {
     lines[0] = '*' + lines[0].trim() + '*';
   }
