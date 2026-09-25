@@ -219,27 +219,82 @@ async function getSprEngineCatalog() {
 
 function findSprEngineMatches(items, lowerText) {
   const normalizedQuery = normalizeBotText(lowerText);
-  const stopWords = new Set(['quiero', 'busco', 'necesito', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo', 'producto', 'productos', 'catalogo', 'catalog', 'refaccion', 'refacciones', 'pieza', 'piezas', 'stock', 'completo', 'completa', 'todo', 'toda', 'todos', 'todas', 'ver', 'muestrame', 'muéstrame', 'informacion', 'información', 'que', 'qué']);
+  const stopWords = new Set(['quiero', 'busco', 'necesito', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo', 'producto', 'productos', 'catalogo', 'catalog', 'refaccion', 'refacciones', 'pieza', 'piezas', 'stock', 'completo', 'completa', 'todo', 'toda', 'todos', 'todas', 'ver', 'muestrame', 'muéstrame', 'informacion', 'información', 'que', 'qué', 'delantero', 'delantera', 'trasero', 'trasera', 'izquierdo', 'izquierda', 'derecho', 'derecha', 'lado']);
   const tokens = normalizedQuery.split(' ').filter(token => token.length >= 3 && !stopWords.has(token));
+  const categoryRules = [
+    { key: 'motor', pattern: /\bmotor(?:es)?\b/ },
+    { key: 'cabeza', pattern: /\b(cabeza|culata)\b/ },
+    { key: 'amortiguador', pattern: /\bamortiguador(?:es)?\b/ },
+    { key: 'suspension', pattern: /\bsuspension\b/ },
+    { key: 'freno', pattern: /\b(freno(?:s)?|balata(?:s)?|pastilla(?:s)?)\b/ },
+    { key: 'aceite', pattern: /\b(aceite(?:s)?|lubricante(?:s)?|motul|valvoline|pentosin)\b/ },
+    { key: 'direccion', pattern: /\b(direccion|terminal|rotula|caja de direccion)\b/ },
+    { key: 'radiador', pattern: /\b(radiador(?:es)?|enfriamiento|cooling)\b/ },
+    { key: 'bomba', pattern: /\bbomba(?:s)?\b/ },
+    { key: 'turbo', pattern: /\bturbo\b/ },
+    { key: 'embrague', pattern: /\b(embrague|clutch)\b/ },
+    { key: 'soporte', pattern: /\bsoporte(?:s)?\b/ }
+  ];
+  const requestedCategory = categoryRules.find(rule => rule.pattern.test(normalizedQuery));
   const wantsHead = /\b(cabeza|cabezas|culata)\b/.test(normalizedQuery);
   const wantsMotor = /\bmotor(?:es)?\b/.test(normalizedQuery) && !wantsHead;
   const scored = items.map(item => {
     let score = 0;
     const haystack = [item.normalizedTitle, normalizeBotText(item.vendor), normalizeBotText(item.productType), normalizeBotText(item.tags)].join(' ');
+    const matchedTokens = [];
     for (const token of tokens) {
-      if (haystack.includes(token)) score += item.normalizedTitle.includes(token) ? 5 : 2;
+      if (haystack.includes(token)) {
+        matchedTokens.push(token);
+        score += item.normalizedTitle.includes(token) ? 5 : 2;
+      }
     }
-    if (wantsHead) score += /\b(cabeza|culata)\b/.test(item.normalizedTitle) ? 12 : -4;
-    if (wantsMotor) score += /\bmotor\b/.test(item.normalizedTitle) ? 5 : -2;
-    return { item, score };
+    if (requestedCategory && requestedCategory.pattern.test(haystack)) score += 14;
+    if (wantsHead) score += /\b(cabeza|culata)\b/.test(haystack) ? 12 : -8;
+    if (wantsMotor) score += /\bmotor\b/.test(haystack) ? 5 : -3;
+    return { item, score, haystack, matchedTokens };
   }).sort((a, b) => b.score - a.score || a.item.title.localeCompare(b.item.title));
-  const meaningful = tokens.length > 0 ? scored.filter(row => row.score > 0) : scored;
-  return meaningful.slice(0, 3).map(row => row.item);
+
+  if (!tokens.length) return scored.slice(0, 3).map(row => row.item);
+
+  let relevant = scored.filter(row => row.score > 0);
+  if (requestedCategory) {
+    const categoryMatches = relevant.filter(row => requestedCategory.pattern.test(row.haystack));
+    if (!categoryMatches.length) return [];
+    relevant = categoryMatches;
+  }
+
+  // Vehicle/model words must also appear; orientation or year alone cannot create a match.
+  const categoryWords = new Set(categoryRules.flatMap(rule => rule.key.split(' ')));
+  const vehicleTokens = tokens.filter(token => !categoryRules.some(rule => rule.pattern.test(token)) && !/^\d{4}$/.test(token));
+  if (vehicleTokens.length && !relevant.some(row => vehicleTokens.some(token => row.haystack.includes(token)))) return [];
+
+  return relevant.slice(0, 3).map(row => row.item);
 }
 
-function buildSprCatalogReply(matches, lowerText) {
+function isGenericSprCatalogRequest(lowerText) {
+  const query = normalizeBotText(lowerText);
+  const asksGeneral = /\b(que productos|que tienen|que hay|catalogo|catalog|refacciones|productos|todo|completo)\b/.test(query);
+  const asksSpecific = /\b(motor(?:es)?|cabeza(?:s)?|culata|amortiguador(?:es)?|suspension|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite(?:s)?|refaccion(?:es)?|pieza(?:s)?|direccion|radiador(?:es)?|bomba(?:s)?|turbo(?:s)?|embrague(?:s)?|clutch|soporte(?:s)?|terminal(?:es)?|rotula(?:s)?)\b/.test(query);
+  return asksGeneral && !asksSpecific;
+}
+
+function buildSprCatalogReply(matches, lowerText, catalogItems = []) {
+  if (isGenericSprCatalogRequest(lowerText)) {
+    const categoryRules = [
+      ['Motores y cabezas de motor', /\b(motor|cabeza|culata)\b/],
+      ['Amortiguadores y suspensión', /\b(amortiguador|suspension)\b/],
+      ['Frenos y balatas', /\b(freno(?:s)?|balata(?:s)?|pastilla(?:s)?)\b/],
+      ['Aceites y fluidos', /\b(aceite(?:s)?|lubricante(?:s)?|motul|valvoline|pentosin)\b/],
+      ['Dirección y tren delantero', /\b(direccion|terminal|rotula|caja de direccion)\b/],
+      ['Radiadores y enfriamiento', /\b(radiador(?:es)?|enfriamiento|cooling)\b/],
+      ['Bombas, turbos y embragues', /\b(bomba(?:s)?|turbo(?:s)?|embrague(?:s)?|clutch)\b/]
+    ];
+    const availableCategories = categoryRules.filter(([, pattern]) => catalogItems.some(item => pattern.test([item.normalizedTitle, normalizeBotText(item.productType), normalizeBotText(item.tags)].join(' ')))).map(([label]) => label);
+    const categoryLines = (availableCategories.length ? availableCategories : categoryRules.map(([label]) => label)).map(label => '🔧 ' + label).join('\n');
+    return '🛠️ *Catálogo de SPR Autopartes*\n\nContamos con refacciones para diferentes marcas y modelos:\n\n' + categoryLines + '\n\nPara revisar una pieza exacta, envíame:\n🚗 Marca y modelo\n📅 Año\n🔧 Pieza o sistema que necesitas\n\nEjemplo: *amortiguador Versa delantero izquierdo 2015* o *aceite Motul 5W-30*. 📦';
+  }
   if (!matches.length) {
-    return '🛠️ *Catálogo de SPR Autopartes*\n\nPuedo revisar disponibilidad y precio en el catálogo completo de SPR en tiempo real. 📦\n\nPara encontrar la pieza exacta, compárteme:\n🚗 Marca y modelo\n📅 Año\n🔧 Motor, versión o tipo de refacción\n\nEjemplo: *motor Hilux 2.7 2012*, *amortiguador Elantra 2020* o *aceite Motul 5W-30*.';
+    return '🛠️ *Catálogo de SPR Autopartes*\n\nNo encontré una coincidencia exacta para esa pieza. ⚠️\n\nCompárteme la marca, modelo, año y pieza solicitada para revisar compatibilidad, disponibilidad y precio en tiempo real.\n\nEjemplo: *amortiguador Versa delantero izquierdo 2015* o *aceite Motul 5W-30*.';
   }
   const lines = ['🛠️ *Catálogo de SPR Autopartes*', '', 'Encontré estas opciones relacionadas:'];
   for (const item of matches) {
@@ -936,7 +991,7 @@ Incluye:
       if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
           const sprCatalog = await getSprEngineCatalog();
-          sprCatalogReply = buildSprCatalogReply(findSprEngineMatches(sprCatalog, lowerText), lowerText);
+          sprCatalogReply = buildSprCatalogReply(findSprEngineMatches(sprCatalog, lowerText), lowerText, sprCatalog);
         } catch (catalogError) {
           console.warn('⚠️ SPR live catalog lookup failed:', catalogError.message);
         }
