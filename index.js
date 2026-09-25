@@ -97,6 +97,118 @@ function formatWhatsAppReply(value) {
 }
 
 
+const SPR_ENGINE_COLLECTION_URL = process.env.SPR_ENGINE_COLLECTION_URL || 'https://sprautopartes.mx/collections/spr-engine-series/products.json?limit=250';
+const SPR_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_CATALOG_TTL_MS || 60000));
+const SPR_SEPTEMBER_DISCOUNT_PERCENT = Math.max(0, Math.min(90, Number(process.env.SPR_SEPTEMBER_DISCOUNT_PERCENT || 15)));
+let sprCatalogCache = { fetchedAt: 0, items: [] };
+
+function parseSprMoney(value) {
+  const parsed = Number(String(value ?? '').replace(/[^0-9.-]/g, ''));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function formatSprMoney(value) {
+  return new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN', minimumFractionDigits: 2 }).format(value);
+}
+
+function stripSprHtml(value) {
+  return String(value || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/\s+/g, ' ').trim();
+}
+
+function isSeptemberInMexico() {
+  return Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Mexico_City', month: 'numeric' }).format(new Date())) === 9;
+}
+
+function normalizeSprProduct(product) {
+  const variants = Array.isArray(product?.variants) ? product.variants : [];
+  const variant = variants[0] || {};
+  const currentPrice = parseSprMoney(variant.price ?? product?.price);
+  const compareAtPrice = parseSprMoney(variant.compare_at_price ?? product?.compare_at_price);
+  const regularPrice = compareAtPrice > currentPrice ? compareAtPrice : currentPrice;
+  const september = isSeptemberInMexico();
+  const calculatedSeptemberPrice = regularPrice > 0
+    ? Math.round(regularPrice * (1 - SPR_SEPTEMBER_DISCOUNT_PERCENT / 100) * 100) / 100
+    : 0;
+  const offerPrice = september && currentPrice > 0 && currentPrice < regularPrice
+    ? currentPrice
+    : september
+      ? calculatedSeptemberPrice
+      : currentPrice;
+  const hasSeptemberOffer = september && offerPrice > 0 && regularPrice > offerPrice;
+  const available = variants.length > 0
+    ? variants.some(item => item.available !== false)
+    : product?.available !== false;
+  const handle = String(product?.handle || '').trim();
+  return {
+    id: product?.id || handle,
+    title: String(product?.title || '').trim(),
+    normalizedTitle: normalizeBotText(product?.title || ''),
+    vendor: String(product?.vendor || 'SPR ENGINE SERIES').trim(),
+    productType: String(product?.product_type || '').trim(),
+    tags: Array.isArray(product?.tags) ? product.tags.join(' ') : String(product?.tags || ''),
+    description: stripSprHtml(product?.body_html),
+    available,
+    regularPrice,
+    offerPrice: hasSeptemberOffer ? offerPrice : currentPrice,
+    hasSeptemberOffer,
+    url: handle ? 'https://sprautopartes.mx/products/' + handle : 'https://sprautopartes.mx/collections/spr-engine-series'
+  };
+}
+
+async function getSprEngineCatalog() {
+  const now = Date.now();
+  if (sprCatalogCache.items.length > 0 && now - sprCatalogCache.fetchedAt < SPR_CATALOG_TTL_MS) return sprCatalogCache.items;
+  const response = await axios.get(SPR_ENGINE_COLLECTION_URL, {
+    timeout: 9000,
+    headers: { 'User-Agent': 'DT Bot Core / SPR catalog sync' }
+  });
+  const products = Array.isArray(response.data?.products) ? response.data.products : [];
+  if (!products.length) throw new Error('SPR catalog returned no products');
+  const items = products.map(normalizeSprProduct).filter(item => item.title && item.regularPrice > 0);
+  sprCatalogCache = { fetchedAt: now, items };
+  return items;
+}
+
+function findSprEngineMatches(items, lowerText) {
+  const normalizedQuery = normalizeBotText(lowerText);
+  const stopWords = new Set(['quiero', 'busco', 'necesito', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo']);
+  const tokens = normalizedQuery.split(' ').filter(token => token.length >= 3 && !stopWords.has(token));
+  const wantsHead = /\b(cabeza|cabezas|culata)\b/.test(normalizedQuery);
+  const wantsMotor = /\bmotor(?:es)?\b/.test(normalizedQuery) && !wantsHead;
+  const scored = items.map(item => {
+    let score = 0;
+    const haystack = [item.normalizedTitle, normalizeBotText(item.vendor), normalizeBotText(item.productType), normalizeBotText(item.tags)].join(' ');
+    for (const token of tokens) {
+      if (haystack.includes(token)) score += item.normalizedTitle.includes(token) ? 5 : 2;
+    }
+    if (wantsHead) score += /\b(cabeza|culata)\b/.test(item.normalizedTitle) ? 12 : -4;
+    if (wantsMotor) score += /\bmotor\b/.test(item.normalizedTitle) ? 5 : -2;
+    return { item, score };
+  }).sort((a, b) => b.score - a.score || a.item.title.localeCompare(b.item.title));
+  const meaningful = tokens.length > 0 ? scored.filter(row => row.score > 0) : scored;
+  return meaningful.slice(0, 3).map(row => row.item);
+}
+
+function buildSprCatalogReply(matches, lowerText) {
+  if (!matches.length) {
+    return '🛠️ *Motores y cabezas SPR Engine Series*\n\nPuedo revisar disponibilidad y precio en el catálogo de SPR en tiempo real. 📦\n\nPara encontrar la pieza exacta, compárteme:\n🚗 Marca y modelo\n📅 Año\n🔧 Motor o versión\n\nEjemplo: *motor Hilux 2.7 2012* o *cabeza L200 2.5 diésel*.';
+  }
+  const lines = ['🛠️ *Catálogo SPR Engine Series*', '', 'Encontré estas opciones relacionadas:'];
+  for (const item of matches) {
+    lines.push('', '🔩 *' + item.title + '*');
+    if (item.hasSeptemberOffer) {
+      lines.push('💰 Precio normal: ~' + formatSprMoney(item.regularPrice) + '~');
+      lines.push('🔥 *Precio especial exclusivo de septiembre: ' + formatSprMoney(item.offerPrice) + '* (-' + SPR_SEPTEMBER_DISCOUNT_PERCENT + '%)');
+    } else {
+      lines.push('💰 Precio vigente: *' + formatSprMoney(item.offerPrice || item.regularPrice) + '*');
+    }
+    lines.push(item.available ? '✅ Disponible en el catálogo' : '⚠️ Agotado por el momento');
+    lines.push('🔗 ' + item.url);
+  }
+  lines.push('', '📌 Los precios y la disponibilidad se consultan directamente en SPR. ¿Quieres que revisemos compatibilidad con tu vehículo?');
+  return lines.join('\n');
+}
+
 /**
  * Check working hours against company timezone
  */
@@ -769,7 +881,22 @@ Incluye:
 
 ¿Te gustaría solicitar una demostración?`;
 
-      if (asksPackage) {
+      const botIdentityForCatalog = `${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase();
+      const isSprAutopartesTenant = /spr\s*(bot|autopartes|engine)/i.test(botIdentityForCatalog) || /spr autopartes/i.test(botIdentityForCatalog);
+      const asksEngineProduct = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor)\b/.test(lowerText);
+      let sprCatalogReply = '';
+      if (isSprAutopartesTenant && asksEngineProduct) {
+        try {
+          const sprCatalog = await getSprEngineCatalog();
+          sprCatalogReply = buildSprCatalogReply(findSprEngineMatches(sprCatalog, lowerText), lowerText);
+        } catch (catalogError) {
+          console.warn('⚠️ SPR live catalog lookup failed:', catalogError.message);
+        }
+      }
+
+      if (sprCatalogReply) {
+        botReply = sprCatalogReply;
+      } else if (asksPackage) {
         botReply = packageReply;
       } else if (asksBot && (asksPrice || lowerText.includes('y el') || lowerText.includes('incluye') || lowerText.includes('funciona') || lowerText.includes('informacion') || lowerText.includes('información') || lowerText.includes('servicio'))) {
         botReply = botReplyText;
@@ -1576,3 +1703,4 @@ app.post('/api/meta/embedded-signup/complete', authenticateUser, async (req, res
     res.status(502).json({ success: false, error: metaError?.message || 'Meta no pudo completar la conexión de WhatsApp.' });
   }
 });
+SPR_ENGINE_COLLECTION_URL
