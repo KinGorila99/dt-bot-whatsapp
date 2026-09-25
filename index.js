@@ -1703,4 +1703,3 @@ app.post('/api/meta/embedded-signup/complete', authenticateUser, async (req, res
     res.status(502).json({ success: false, error: metaError?.message || 'Meta no pudo completar la conexión de WhatsApp.' });
   }
 });
-SPR_ENGINE_COLLECTION_URL
