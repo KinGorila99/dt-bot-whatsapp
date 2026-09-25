@@ -116,7 +116,7 @@ function formatWhatsAppReply(value) {
 }
 
 
-const SPR_ENGINE_COLLECTION_URL = process.env.SPR_ENGINE_COLLECTION_URL || 'https://sprautopartes.mx/collections/spr-engine-series/products.json?limit=250';
+const SPR_ENGINE_COLLECTION_URL = process.env.SPR_FULL_CATALOG_URL || process.env.SPR_ENGINE_COLLECTION_URL || 'https://sprautopartes.mx/products.json?limit=250';
 const SPR_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_CATALOG_TTL_MS || 60000));
 const SPR_SEPTEMBER_DISCOUNT_PERCENT = Math.max(0, Math.min(90, Number(process.env.SPR_SEPTEMBER_DISCOUNT_PERCENT || 15)));
 let sprCatalogCache = { fetchedAt: 0, items: [] };
@@ -210,9 +210,9 @@ function findSprEngineMatches(items, lowerText) {
 
 function buildSprCatalogReply(matches, lowerText) {
   if (!matches.length) {
-    return '🛠️ *Motores y cabezas SPR Engine Series*\n\nPuedo revisar disponibilidad y precio en el catálogo de SPR en tiempo real. 📦\n\nPara encontrar la pieza exacta, compárteme:\n🚗 Marca y modelo\n📅 Año\n🔧 Motor o versión\n\nEjemplo: *motor Hilux 2.7 2012* o *cabeza L200 2.5 diésel*.';
+    return '🛠️ *Catálogo de SPR Autopartes*\n\nPuedo revisar disponibilidad y precio en el catálogo completo de SPR en tiempo real. 📦\n\nPara encontrar la pieza exacta, compárteme:\n🚗 Marca y modelo\n📅 Año\n🔧 Motor, versión o tipo de refacción\n\nEjemplo: *motor Hilux 2.7 2012*, *amortiguador Elantra 2020* o *aceite Motul 5W-30*.';
   }
-  const lines = ['🛠️ *Catálogo SPR Engine Series*', '', 'Encontré estas opciones relacionadas:'];
+  const lines = ['🛠️ *Catálogo de SPR Autopartes*', '', 'Encontré estas opciones relacionadas:'];
   for (const item of matches) {
     lines.push('', '🔩 *' + item.title + '*');
     if (item.hasSeptemberOffer) {
@@ -224,7 +224,7 @@ function buildSprCatalogReply(matches, lowerText) {
     lines.push(item.available ? '✅ Disponible en el catálogo' : '⚠️ Agotado por el momento');
     lines.push('🔗 ' + item.url);
   }
-  lines.push('', '📌 Los precios y la disponibilidad se consultan directamente en SPR. ¿Quieres que revisemos compatibilidad con tu vehículo?');
+  lines.push('', '📌 Los precios y la disponibilidad se consultan directamente en SPR. ¿Quieres que revisemos compatibilidad con tu vehículo o buscar otra pieza?');
   return lines.join('\n');
 }
 
@@ -902,9 +902,9 @@ Incluye:
 
       const botIdentityForCatalog = `${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase();
       const isSprAutopartesTenant = /spr\s*(bot|autopartes|engine)/i.test(botIdentityForCatalog) || /spr autopartes/i.test(botIdentityForCatalog);
-      const asksEngineProduct = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor)\b/.test(lowerText);
+      const asksCatalogProduct = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock)\b/.test(lowerText);
       let sprCatalogReply = '';
-      if (isSprAutopartesTenant && asksEngineProduct) {
+      if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
           const sprCatalog = await getSprEngineCatalog();
           sprCatalogReply = buildSprCatalogReply(findSprEngineMatches(sprCatalog, lowerText), lowerText);
