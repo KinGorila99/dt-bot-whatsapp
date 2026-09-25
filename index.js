@@ -190,7 +190,7 @@ async function getSprEngineCatalog() {
 
 function findSprEngineMatches(items, lowerText) {
   const normalizedQuery = normalizeBotText(lowerText);
-  const stopWords = new Set(['quiero', 'busco', 'necesito', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo']);
+  const stopWords = new Set(['quiero', 'busco', 'necesito', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo', 'producto', 'productos', 'catalogo', 'catalog', 'refaccion', 'refacciones', 'pieza', 'piezas', 'stock', 'completo', 'completa', 'todo', 'toda', 'todos', 'todas', 'ver', 'muestrame', 'muéstrame', 'informacion', 'información', 'que', 'qué']);
   const tokens = normalizedQuery.split(' ').filter(token => token.length >= 3 && !stopWords.has(token));
   const wantsHead = /\b(cabeza|cabezas|culata)\b/.test(normalizedQuery);
   const wantsMotor = /\bmotor(?:es)?\b/.test(normalizedQuery) && !wantsHead;
@@ -214,7 +214,7 @@ function buildSprCatalogReply(matches, lowerText) {
   }
   const lines = ['🛠️ *Catálogo de SPR Autopartes*', '', 'Encontré estas opciones relacionadas:'];
   for (const item of matches) {
-    lines.push('', '🔩 *' + item.title + '*');
+    lines.push('', '🛒 *' + item.title + '*');
     if (item.hasSeptemberOffer) {
       lines.push('💰 Precio normal: ~' + formatSprMoney(item.regularPrice) + '~');
       lines.push('🔥 *Precio especial exclusivo de septiembre: ' + formatSprMoney(item.offerPrice) + '* (-' + SPR_SEPTEMBER_DISCOUNT_PERCENT + '%)');
