@@ -86,13 +86,32 @@ function normalizeBotText(value) {
  * Apply a consistent WhatsApp visual style to every automated reply.
  * Keeps configured and knowledge-base messages readable without changing their meaning.
  */
+function decorateWhatsAppKeywordLine(line) {
+  const keywordEmojis = [
+    [/^\s*(precio normal|precio|costo|cotizaci[oó]n)\b/i, '💰'],
+    [/^\s*(disponibilidad|disponible|existencia|stock)\b/i, '✅'],
+    [/^\s*(env[ií]o|env[ií]os|entrega)\b/i, '🚚'],
+    [/^\s*(garant[ií]a)\b/i, '🛡️'],
+    [/^\s*(asesor|asesora|equipo comercial)\b/i, '🧑‍💼'],
+    [/^\s*(ubicaci[oó]n|direcci[oó]n|sucursal)\b/i, '📍'],
+    [/^\s*(motor|motores|cabeza|cabezas|culata)\b/i, '🔩'],
+    [/^\s*(paquete|crm core|whatsapp|api chat bot)\b/i, '🚀']
+  ];
+  if (!line || /\p{Extended_Pictographic}/u.test(line)) return line;
+  for (const [pattern, emoji] of keywordEmojis) {
+    if (pattern.test(line)) return emoji + ' ' + line.trim();
+  }
+  return line;
+}
+
 function formatWhatsAppReply(value) {
   let text = String(value || '').replace(/\r/g, '').trim();
   if (!text) return '';
   text = text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
-  if (!/\p{Extended_Pictographic}/u.test(text)) text = '💬 ' + text;
-  const lines = text.split('\n');
-  if (lines[0] && !lines[0].includes('*')) lines[0] = '*' + lines[0].trim() + '*';
+  const lines = text.split('\n').map(decorateWhatsAppKeywordLine);
+  if (lines[0] && !lines[0].includes('*') && lines[0].trim().length <= 80) {
+    lines[0] = '*' + lines[0].trim() + '*';
+  }
   return lines.join('\n');
 }
 
