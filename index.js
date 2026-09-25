@@ -223,7 +223,7 @@ function findSprEngineMatches(items, lowerText) {
   const tokens = normalizedQuery.split(' ').filter(token => token.length >= 3 && !stopWords.has(token));
   const categoryRules = [
     { key: 'motor', pattern: /\bmotor(?:es)?\b/ },
-    { key: 'cabeza', pattern: /\b(cabeza|culata)\b/ },
+    { key: 'cabeza', pattern: /\b(cabeza(?:s)?|culata(?:s)?)\b/ },
     { key: 'amortiguador', pattern: /\bamortiguador(?:es)?\b/ },
     { key: 'suspension', pattern: /\bsuspension\b/ },
     { key: 'freno', pattern: /\b(freno(?:s)?|balata(?:s)?|pastilla(?:s)?)\b/ },
@@ -238,7 +238,7 @@ function findSprEngineMatches(items, lowerText) {
     { key: 'carroceria', pattern: /\b(parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria)\b/ }
   ];
   const requestedCategory = categoryRules.find(rule => rule.pattern.test(normalizedQuery));
-  const wantsHead = /\b(cabeza|cabezas|culata)\b/.test(normalizedQuery);
+  const wantsHead = /\b(cabeza(?:s)?|culata(?:s)?)\b/.test(normalizedQuery);
   const wantsMotor = /\bmotor(?:es)?\b/.test(normalizedQuery) && !wantsHead;
   const scored = items.map(item => {
     let score = 0;
@@ -256,7 +256,12 @@ function findSprEngineMatches(items, lowerText) {
     return { item, score, haystack, matchedTokens };
   }).sort((a, b) => b.score - a.score || a.item.title.localeCompare(b.item.title));
 
-  if (!tokens.length) return scored.slice(0, 3).map(row => row.item);
+  if (!tokens.length) {
+    const noTokenMatches = requestedCategory
+      ? scored.filter(row => requestedCategory.pattern.test(row.haystack))
+      : scored;
+    return noTokenMatches.slice(0, 3).map(row => row.item);
+  }
 
   let relevant = scored.filter(row => row.score > 0);
   if (requestedCategory) {
