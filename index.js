@@ -182,7 +182,7 @@ function normalizeSprProduct(product) {
   const isEngineSeries = /\bengine\s+series\b/.test(classificationText);
   const hasMotorKeyword = /\bmotor(?:es)?\b/.test(classificationText);
   const isAccessoryOrMount = /\b(soporte(?:s)?|base(?:s)?|taco(?:s)?|montura(?:s)?|mount(?:s)?|sensor(?:es)?|refaccion(?:es)?|accesorio(?:s)?)\b/.test(classificationText);
-  const discountEligible = isEngineSeries || isHeadOrCylinder || (hasMotorKeyword && !isAccessoryOrMount);
+  const isNonEngineProduct = /\b(faro(?:s)?|niebla|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|amortiguador(?:es)?|suspension|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite(?:s)?|lubricante(?:s)?|radiador(?:es)?|bomba(?:s)?|turbo(?:s)?|embrague|clutch|direccion|terminal(?:es)?|rotula(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria|soporte(?:s)?|base(?:s)?|taco(?:s)?|montura(?:s)?|mount(?:s)?|sensor(?:es)?|accesorio(?:s)?|limpiaparabrisas)\b/.test(classificationText); const discountEligible = !isNonEngineProduct && (isEngineSeries || isHeadOrCylinder || hasMotorKeyword);
   const september = isSeptemberInMexico();
   const calculatedSeptemberPrice = regularPrice > 0
     ? Math.round(regularPrice * (1 - SPR_SEPTEMBER_DISCOUNT_PERCENT / 100) * 100) / 100
