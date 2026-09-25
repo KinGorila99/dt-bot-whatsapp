@@ -177,7 +177,7 @@ function normalizeSprProduct(product) {
   const vendor = String(product?.vendor || 'SPR ENGINE SERIES').trim();
   const productType = String(product?.product_type || '').trim();
   const tags = Array.isArray(product?.tags) ? product.tags.join(' ') : String(product?.tags || '');
-  const classificationText = normalizeBotText([title, productType, tags, vendor].filter(Boolean).join(' '));
+  const classificationText = normalizeBotText([title, productType, tags].filter(Boolean).join(' '));
   const isHeadOrCylinder = /\b(cabeza(?:s)?|culata(?:s)?)\b/.test(classificationText);
   const isEngineSeries = /\bengine\s+series\b/.test(classificationText);
   const hasMotorKeyword = /\bmotor(?:es)?\b/.test(classificationText);
