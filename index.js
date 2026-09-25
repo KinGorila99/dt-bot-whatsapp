@@ -83,6 +83,21 @@ function normalizeBotText(value) {
 
 
 /**
+ * Apply a consistent WhatsApp visual style to every automated reply.
+ * Keeps configured and knowledge-base messages readable without changing their meaning.
+ */
+function formatWhatsAppReply(value) {
+  let text = String(value || '').replace(/\r/g, '').trim();
+  if (!text) return '';
+  text = text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
+  if (!/\p{Extended_Pictographic}/u.test(text)) text = '💬 ' + text;
+  const lines = text.split('\n');
+  if (lines[0] && !lines[0].includes('*')) lines[0] = '*' + lines[0].trim() + '*';
+  return lines.join('\n');
+}
+
+
+/**
  * Check working hours against company timezone
  */
 function checkWorkingHours(workingHours) {
@@ -798,6 +813,8 @@ Escribe "CRM", "WhatsApp", "paquete" o "asesor" para continuar.`) || `¡Hola ${c
 Escribe el nombre del servicio o pon *asesor* y te comunicamos con nuestro equipo.`;
       }
     }
+
+    botReply = formatWhatsAppReply(botReply);
 
     // 6. Send Outbound WhatsApp Reply via Meta Graph API
     const botIdentity = `${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase(); const isDtMarketingTenant = /\bdt\s*(marketing|crm)\b/.test(botIdentity); const tenantBotName = String(botSettings?.bot_name || 'nuestro asistente').trim(); const crossTenantContent = /(dt marketing|dt crm core|api chat bot|paquete completo|escribe \*crm\*, \*whatsapp\* o \*paquete\*)/i; const asksLocation = /\b(ubicacion|ubicados|donde estan|direccion|sucursal)\b/.test(lowerText); if (!isDtMarketingTenant && (asksLocation || crossTenantContent.test(botReply))) { console.error(`[Cross-Tenant Content Blocked] Company: ${companyId} | Phone ID: ${phoneNumberId}`); botReply = asksLocation ? `📍 *Estamos ubicados en Querétaro, México.* 🚚 Realizamos envíos a todo México. Si ya deseas comprar, compártenos la pieza que buscas y los datos de tu vehículo para preparar tu cotización.` : `🤔 *Quiero ayudarte mejor.* Para orientarte sobre *${tenantBotName}*, ¿buscas una cotización, una pieza o servicio, información de envío, garantía o hablar con un asesor?`; } let outboundSuccess = false;
