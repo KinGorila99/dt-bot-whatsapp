@@ -224,6 +224,22 @@ async function getSprEngineCatalog() {
   return items;
 }
 
+async function searchSprCatalog(query) {
+  const response = await axios.get('https://sprautopartes.mx/search/suggest.json', {
+    timeout: 9000,
+    params: {
+      q: String(query || '').trim(),
+      'resources[type]': 'product',
+      'resources[limit]': 10
+    },
+    headers: { 'User-Agent': 'DT Bot Core / SPR catalog search' }
+  });
+  const products = Array.isArray(response.data?.resources?.results?.products)
+    ? response.data.resources.results.products
+    : [];
+  return products.map(normalizeSprProduct).filter(item => item.title && item.regularPrice > 0);
+}
+
 function findSprEngineMatches(items, lowerText) {
   const normalizedQuery = normalizeBotText(lowerText);
   const stopWords = new Set(['quiero', 'busco', 'necesito', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo', 'producto', 'productos', 'catalogo', 'catalog', 'refaccion', 'refacciones', 'pieza', 'piezas', 'stock', 'completo', 'completa', 'todo', 'toda', 'todos', 'todas', 'ver', 'muestrame', 'muéstrame', 'informacion', 'información', 'que', 'qué', 'delantero', 'delantera', 'trasero', 'trasera', 'izquierdo', 'izquierda', 'derecho', 'derecha', 'lado']);
@@ -1005,8 +1021,14 @@ Incluye:
       let sprCatalogReply = '';
       if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
-          const sprCatalog = await getSprEngineCatalog();
-          sprCatalogReply = buildSprCatalogReply(findSprEngineMatches(sprCatalog, lowerText), lowerText, sprCatalog);
+          let catalogItems = await getSprEngineCatalog();
+          let sprMatches = findSprEngineMatches(catalogItems, lowerText);
+          if (!sprMatches.length && !isGenericSprCatalogRequest(lowerText)) {
+            const searchedItems = await searchSprCatalog(messageText);
+            sprMatches = findSprEngineMatches(searchedItems, lowerText);
+            if (sprMatches.length) catalogItems = [...catalogItems, ...searchedItems];
+          }
+          sprCatalogReply = buildSprCatalogReply(sprMatches, lowerText, catalogItems);
         } catch (catalogError) {
           console.warn('⚠️ SPR live catalog lookup failed:', catalogError.message);
         }
