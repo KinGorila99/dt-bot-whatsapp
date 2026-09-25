@@ -301,6 +301,20 @@ function findSprEngineMatches(items, lowerText) {
   return relevant.slice(0, 3).map(row => row.item);
 }
 
+// Preserve catalog context across short customer follow-ups.
+const SPR_CATALOG_CONTEXT_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carrocer[ií]a)\b/;
+const SPR_CATALOG_REFINEMENT_PATTERN = /\b(delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atr[aá]s|modelo|a[nñ]o|versi[oó]n|motor)\b/;
+function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
+  const current = String(currentMessage || '').trim();
+  const previous = (Array.isArray(previousCustomerMessages) ? previousCustomerMessages : []).map(value => String(value || '').trim()).filter(Boolean);
+  const currentNormalized = normalizeBotText(current);
+  const previousNormalized = normalizeBotText(previous.join(' '));
+  const isFollowUpRefinement = SPR_CATALOG_REFINEMENT_PATTERN.test(currentNormalized)
+    && !SPR_CATALOG_CONTEXT_PATTERN.test(currentNormalized.replace(/\b(delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atr[aá]s|modelo|a[nñ]o|versi[oó]n)\b/g, ''));
+  if (previous.length && isFollowUpRefinement && SPR_CATALOG_CONTEXT_PATTERN.test(previousNormalized)) return previous.slice(-4).join(' ') + ' ' + current;
+  return current;
+}
+
 function isGenericSprCatalogRequest(lowerText) {
   const query = normalizeBotText(lowerText);
   const asksGeneral = /\b(que productos|que tienen|que hay|catalogo|catalog|refacciones|productos|todo|completo)\b/.test(query);
@@ -799,6 +813,34 @@ app.post('/webhook/whatsapp', async (req, res) => {
       if (cSnap.exists) convData = cSnap.data();
     } catch (e) {}
 
+    // Keep recent customer turns for catalog follow-ups such as "delantero".
+    let recentCustomerMessages = Array.isArray(convData?.recent_customer_messages)
+      ? convData.recent_customer_messages.map(value => String(value || '').trim()).filter(Boolean)
+      : [];
+    if (!recentCustomerMessages.length && convData?.last_customer_message) {
+      recentCustomerMessages = [String(convData.last_customer_message).trim()];
+    }
+    if (!recentCustomerMessages.length && convData?.last_message_sender === 'customer' && convData?.last_message) {
+      recentCustomerMessages = [String(convData.last_message).trim()];
+    }
+    if (!recentCustomerMessages.length) {
+      try {
+        const previousMessages = await db.collection('messages')
+          .where('conversation_id', '==', convId)
+          .get();
+        recentCustomerMessages = previousMessages.docs
+          .map(doc => doc.data() || {})
+          .filter(data => data.sender_type === 'customer' && data.content)
+          .sort((a, b) => timestampMs(a.created_at) - timestampMs(b.created_at))
+          .map(data => String(data.content).trim())
+          .filter(Boolean)
+          .slice(-4);
+      } catch (historyError) {
+        console.warn('Could not recover catalog context for conversation:', historyError.message);
+      }
+    }
+    const catalogContextText = buildSprCatalogContext(recentCustomerMessages, messageText);
+
     if (!convData) {
       convData = {
         id: convId,
@@ -815,8 +857,9 @@ app.post('/webhook/whatsapp', async (req, res) => {
         human_handoff_started_at: null,
         last_agent_message_at: null,
         unread_count: 1,
-                welcome_sent_at: null,
-
+        welcome_sent_at: null,
+        last_customer_message: messageText,
+        recent_customer_messages: [messageText],
         last_message: messageText,
         last_message_sender: 'customer',
         created_at: timestamp,
@@ -824,6 +867,9 @@ app.post('/webhook/whatsapp', async (req, res) => {
         last_message_at: timestamp
       };
     } else {
+      recentCustomerMessages = [...recentCustomerMessages, messageText].filter(Boolean).slice(-4);
+      convData.last_customer_message = messageText;
+      convData.recent_customer_messages = recentCustomerMessages;
       convData.last_message = messageText;
       convData.last_message_sender = 'customer';
       convData.last_message_at = timestamp;
@@ -1017,18 +1063,20 @@ Incluye:
 
       const botIdentityForCatalog = `${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase();
       const isSprAutopartesTenant = /spr\s*(bot|autopartes|engine)/i.test(botIdentityForCatalog) || /spr autopartes/i.test(botIdentityForCatalog);
-      const asksCatalogProduct = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria)\b/.test(lowerText);
+      const catalogQueryText = catalogContextText || messageText;
+      const catalogLowerText = normalizeBotText(catalogQueryText);
+      const asksCatalogProduct = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria)\b/.test(lowerText) || catalogLowerText !== lowerText;
       let sprCatalogReply = '';
       if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
           let catalogItems = await getSprEngineCatalog();
-          let sprMatches = findSprEngineMatches(catalogItems, lowerText);
-          if (!sprMatches.length && !isGenericSprCatalogRequest(lowerText)) {
-            const searchedItems = await searchSprCatalog(messageText);
-            sprMatches = findSprEngineMatches(searchedItems, lowerText);
+          let sprMatches = findSprEngineMatches(catalogItems, catalogLowerText);
+          if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
+            const searchedItems = await searchSprCatalog(catalogQueryText);
+            sprMatches = findSprEngineMatches(searchedItems, catalogLowerText);
             if (sprMatches.length) catalogItems = [...catalogItems, ...searchedItems];
           }
-          sprCatalogReply = buildSprCatalogReply(sprMatches, lowerText, catalogItems);
+          sprCatalogReply = buildSprCatalogReply(sprMatches, catalogLowerText, catalogItems);
         } catch (catalogError) {
           console.warn('⚠️ SPR live catalog lookup failed:', catalogError.message);
         }
