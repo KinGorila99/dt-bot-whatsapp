@@ -262,7 +262,8 @@ function findSprEngineMatches(items, lowerText) {
   ];
   const requestedCategory = categoryRules.find(rule => rule.pattern.test(normalizedQuery));
   const wantsHead = /\b(cabeza(?:s)?|culata(?:s)?)\b/.test(normalizedQuery);
-  const wantsMotor = /\bmotor(?:es)?\b/.test(normalizedQuery) && !wantsHead;
+  const wantsMotorAccessory = /\b(soporte(?:s)?|base(?:s)?|taco(?:s)?|montura(?:s)?|mount(?:s)?|sensor(?:es)?|accesorio(?:s)?)\b/.test(normalizedQuery);
+  const wantsMotor = /\bmotor(?:es)?\b/.test(normalizedQuery) && !wantsHead && !wantsMotorAccessory;
   const motorAccessoryPattern = /\b(soporte(?:s)?|base(?:s)?|taco(?:s)?|montura(?:s)?|mount(?:s)?|sensor(?:es)?|accesorio(?:s)?)\b/;
   const onlyEngineProducts = rows => wantsMotor
     ? rows.filter(row => row.item.discountEligible === true && !motorAccessoryPattern.test(row.haystack))
