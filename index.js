@@ -411,7 +411,10 @@ function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult
     return '🛠️ *Catálogo de SPR Autopartes*\n\nContamos con refacciones para diferentes marcas y modelos:\n\n' + categoryLines + '\n\nPara revisar una pieza exacta, envíame:\n🚗 Marca y modelo\n📅 Año\n🔧 Pieza o sistema que necesitas\n\nEjemplo: *amortiguador Versa delantero izquierdo 2015* o *aceite Motul 5W-30*. 📦';
   }
   if (!matches.length) {
-    return '🛠️ *Catálogo de SPR Autopartes*\n\nNo encontré una coincidencia exacta para esa pieza. ⚠️\n\nCompárteme la marca, modelo, año y pieza solicitada para revisar compatibilidad, disponibilidad y precio en tiempo real.\n\nEjemplo: *amortiguador Versa delantero izquierdo 2015* o *aceite Motul 5W-30*.';
+    const stockNote = isAldoStockCategoryQuery(lowerText)
+      ? 'La existencia de colisión e iluminación se confirma con Aldo Autopartes.'
+      : 'La existencia se confirma al preparar el pedido; SPR no se toma como inventario.';
+    return '🛠️ *Catálogo de SPR Autopartes*\n\nNo encontré una coincidencia exacta para esa pieza. ⚠️\n\nCompárteme la marca, modelo, año y pieza solicitada para revisar compatibilidad, precio y existencia. ' + stockNote + '\n\nEjemplo: *amortiguador Versa delantero izquierdo 2015* o *aceite Motul 5W-30*.';
   }
   const lines = ['🛠️ *Catálogo de SPR Autopartes*', '', 'Encontré estas opciones relacionadas:'];
   for (const item of matches) {
