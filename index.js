@@ -149,7 +149,6 @@ const SPR_ENGINE_COLLECTION_URL = process.env.SPR_FULL_CATALOG_URL || process.en
 const SPR_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_CATALOG_TTL_MS || 60000));
 const SPR_SEPTEMBER_DISCOUNT_PERCENT = Math.max(0, Math.min(90, Number(process.env.SPR_SEPTEMBER_DISCOUNT_PERCENT || 15)));
 let sprCatalogCache = { fetchedAt: 0, items: [] };
-
 // SPR does not provide a reliable inventory signal. Collision and lighting
 // availability is checked against Aldo Autopartes when the public lookup responds.
 const ALDO_STOCK_URL = process.env.ALDO_STOCK_URL || 'https://www.aldoautopartes.com/pi_busqueda.jsp';
@@ -373,17 +372,45 @@ function findSprEngineMatches(items, lowerText) {
   return relevant.slice(0, 3).map(row => row.item);
 }
 
-// Preserve catalog context across short customer follow-ups.
-const SPR_CATALOG_CONTEXT_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carrocer[ií]a)\b/;
+// A short follow-up such as "delantero" or "izquierdo" is a refinement of
+// the customer's previous catalog request. Keep the vehicle and part from
+// that previous turn so a side/orientation answer cannot jump to another
+// make or model.
+const SPR_CATALOG_CONTEXT_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|producto(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carrocer[ií]a)\b/;
 const SPR_CATALOG_REFINEMENT_PATTERN = /\b(delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atr[aá]s|modelo|a[nñ]o|versi[oó]n|motor)\b/;
+
+// Do not guess a vehicle from a generic part request. Ask for the vehicle
+// before searching so the bot cannot return an unrelated make or model.
+const SPR_CATALOG_GENERIC_WORDS_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|que|qué|por|favor|precio|precios|cuanto|cu[aá]nto|cuesta|costo|cotizacion|cotizaci[oó]n|cotizar|comprar|compra|nuevo|nueva|disponible|disponibilidad|stock|catalogo|cat[aá]logo|producto|productos|pieza|piezas|refaccion|refacciones|motor|motores|cabeza|cabezas|culata|engine|series|amortiguador|amortiguadores|suspension|freno|frenos|balata|balatas|pastilla|pastillas|aceite|lubricante|lubricantes|direccion|terminal|terminales|rotula|rotulas|radiador|radiadores|bomba|bombas|turbo|turbos|embrague|clutch|soporte|soportes|faro|faros|calavera|calaveras|lampara|lamparas|luz|luces|espejo|espejos|parrilla|parrillas|defensa|defensas|cofre|salpicadera|salpicaderas|carroceria|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atras|modelo|ano|version|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|camiones|completo|completa|todo|toda|todos|todas)\b/gi;
+const SPR_VEHICLE_MAKES = new Set(['nissan', 'ford', 'chevrolet', 'chevy', 'volkswagen', 'vw', 'toyota', 'honda', 'kia', 'hyundai', 'dodge', 'chrysler', 'jeep', 'mazda', 'mitsubishi', 'suzuki', 'seat', 'renault', 'peugeot', 'fiat', 'ram', 'gmc', 'volvo', 'audi', 'bmw', 'mercedes', 'mercedesbenz', 'isuzu', 'subaru', 'lincoln', 'cadillac', 'buick', 'acura', 'infiniti', 'lexus', 'porsche', 'mg', 'byd']);
+
+function hasSprVehicleReference(value) {
+  const normalized = normalizeBotText(value)
+    .replace(/\b(?:19|20)\d{2}\b/g, ' ')
+    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ');
+  const vehicleTokens = normalized.split(/\s+/).filter(token => token.length >= 2);
+  if (!vehicleTokens.length || vehicleTokens.every(token => SPR_VEHICLE_MAKES.has(token))) return false;
+  return true;
+}
+
+function isAmbiguousSprCatalogRequest(value) {
+  const normalized = normalizeBotText(value);
+  return SPR_CATALOG_CONTEXT_PATTERN.test(normalized) && !hasSprVehicleReference(normalized);
+}
+
 function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
   const current = String(currentMessage || '').trim();
-  const previous = (Array.isArray(previousCustomerMessages) ? previousCustomerMessages : []).map(value => String(value || '').trim()).filter(Boolean);
+  const previous = (Array.isArray(previousCustomerMessages) ? previousCustomerMessages : [])
+    .map(value => String(value || '').trim())
+    .filter(Boolean);
   const currentNormalized = normalizeBotText(current);
   const previousNormalized = normalizeBotText(previous.join(' '));
   const isFollowUpRefinement = SPR_CATALOG_REFINEMENT_PATTERN.test(currentNormalized)
     && !SPR_CATALOG_CONTEXT_PATTERN.test(currentNormalized.replace(/\b(delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atr[aá]s|modelo|a[nñ]o|versi[oó]n)\b/g, ''));
-  if (previous.length && isFollowUpRefinement && SPR_CATALOG_CONTEXT_PATTERN.test(previousNormalized)) return previous.slice(-4).join(' ') + ' ' + current;
+
+  if (previous.length && isFollowUpRefinement && SPR_CATALOG_CONTEXT_PATTERN.test(previousNormalized)) {
+    return previous.slice(-4).join(' ') + ' ' + current;
+  }
   return current;
 }
 
@@ -410,11 +437,11 @@ function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult
     const categoryLines = (availableCategories.length ? availableCategories : categoryRules.map(([label]) => label)).map(label => '🔧 ' + label).join('\n');
     return '🛠️ *Catálogo de SPR Autopartes*\n\nContamos con refacciones para diferentes marcas y modelos:\n\n' + categoryLines + '\n\nPara revisar una pieza exacta, envíame:\n🚗 Marca y modelo\n📅 Año\n🔧 Pieza o sistema que necesitas\n\nEjemplo: *amortiguador Versa delantero izquierdo 2015* o *aceite Motul 5W-30*. 📦';
   }
+  if (isAmbiguousSprCatalogRequest(lowerText)) {
+    return '🛠️ *Catálogo de SPR Autopartes*\n\nPara buscar la pieza correcta necesito algunos datos adicionales. 🔎\n\n¿De qué *marca, modelo y año* es tu vehículo?\n🔧 También dime qué pieza necesitas y, si aplica, el lado (izquierdo o derecho).\n\nEjemplo: *faro delantero para Nissan Versa 2015*.';
+  }
   if (!matches.length) {
-    const stockNote = isAldoStockCategoryQuery(lowerText)
-      ? 'La existencia de colisión e iluminación se confirma con Aldo Autopartes.'
-      : 'La existencia se confirma al preparar el pedido; SPR no se toma como inventario.';
-    return '🛠️ *Catálogo de SPR Autopartes*\n\nNo encontré una coincidencia exacta para esa pieza. ⚠️\n\nCompárteme la marca, modelo, año y pieza solicitada para revisar compatibilidad, precio y existencia. ' + stockNote + '\n\nEjemplo: *amortiguador Versa delantero izquierdo 2015* o *aceite Motul 5W-30*.';
+    return '🛠️ *Catálogo de SPR Autopartes*\n\nNo encontré una coincidencia exacta para esa pieza. ⚠️\n\nCompárteme la marca, modelo, año y pieza solicitada para revisar compatibilidad, precio y disponibilidad.\n\nEjemplo: *amortiguador Versa delantero izquierdo 2015* o *aceite Motul 5W-30*.';
   }
   const lines = ['🛠️ *Catálogo de SPR Autopartes*', '', 'Encontré estas opciones relacionadas:'];
   for (const item of matches) {
@@ -426,17 +453,14 @@ function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult
       lines.push('💰 Precio vigente: *' + formatSprMoney(item.offerPrice || item.regularPrice) + '*');
     }
     const stockLine = stockResult?.status === 'in_stock'
-      ? '✅ Existencia confirmada por Aldo Autopartes'
+      ? '✅ Disponible para cotización'
       : stockResult?.status === 'out_of_stock'
-        ? '⚠️ Aldo Autopartes reporta agotado por el momento'
-        : isAldoStockCategoryQuery(lowerText)
-          ? '🔎 Existencia por confirmar con Aldo Autopartes'
-          : '🔎 Existencia por confirmar; SPR no se toma como inventario';
+        ? '⚠️ Por el momento aparece agotado'
+        : '🔎 Disponibilidad por confirmar';
     lines.push(stockLine);
     lines.push('🔗 ' + item.url);
   }
-  const stockFooter = isAldoStockCategoryQuery(lowerText) ? '📌 Para colisión e iluminación, la existencia se valida con Aldo Autopartes; la página de SPR no se toma como inventario.' : '📌 La existencia se confirma al preparar el pedido; la página de SPR no se toma como inventario.';
-  lines.push('', stockFooter, '¿Quieres que revisemos compatibilidad con tu vehículo o buscar otra pieza?');
+  lines.push('', '¿Quieres que revisemos compatibilidad con tu vehículo o buscar otra pieza?');
   return lines.join('\n');
 }
 
@@ -896,7 +920,9 @@ app.post('/webhook/whatsapp', async (req, res) => {
       if (cSnap.exists) convData = cSnap.data();
     } catch (e) {}
 
-    // Keep recent customer turns for catalog follow-ups such as "delantero".
+    // Preserve recent customer turns separately from the last rendered
+    // message. The latter becomes the bot's reply after this handler runs,
+    // which previously made short follow-ups lose the vehicle context.
     let recentCustomerMessages = Array.isArray(convData?.recent_customer_messages)
       ? convData.recent_customer_messages.map(value => String(value || '').trim()).filter(Boolean)
       : [];
@@ -906,6 +932,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
     if (!recentCustomerMessages.length && convData?.last_message_sender === 'customer' && convData?.last_message) {
       recentCustomerMessages = [String(convData.last_message).trim()];
     }
+    // Older conversations do not have the new context field. Recover the
+    // latest customer turns once from their stored messages when possible.
     if (!recentCustomerMessages.length) {
       try {
         const previousMessages = await db.collection('messages')
@@ -940,9 +968,11 @@ app.post('/webhook/whatsapp', async (req, res) => {
         human_handoff_started_at: null,
         last_agent_message_at: null,
         unread_count: 1,
-        welcome_sent_at: null,
-        last_customer_message: messageText,
-        recent_customer_messages: [messageText],
+                welcome_sent_at: null,
+
+         last_customer_message: messageText,
+         recent_customer_messages: [messageText],
+
         last_message: messageText,
         last_message_sender: 'customer',
         created_at: timestamp,
@@ -1019,6 +1049,20 @@ app.post('/webhook/whatsapp', async (req, res) => {
       const sSnap = await db.doc(`bot_settings/${companyId}`).get();
       if (sSnap.exists) botSettings = sSnap.data();
     } catch (e) {}
+
+    // Resolve the display identity from the tenant selected by the verified
+    // WhatsApp integration. This prevents a client account from inheriting
+    // the platform owner's DT Marketing welcome text.
+    let tenantCompany = null;
+    try {
+      const companySnap = await db.doc("companies/" + companyId).get();
+      if (companySnap.exists) tenantCompany = companySnap.data() || null;
+    } catch (e) {
+      console.warn('Could not load tenant company profile:', e.message);
+    }
+    const tenantDisplayName = String(
+      tenantCompany?.nombre || botSettings?.business_name || botSettings?.business_description || 'nuestro negocio'
+    ).trim();
 
     // Check for Human Handoff Intent
     const lowerText = normalizeBotText(messageText);
@@ -1148,7 +1192,7 @@ Incluye:
       const isSprAutopartesTenant = /spr\s*(bot|autopartes|engine)/i.test(botIdentityForCatalog) || /spr autopartes/i.test(botIdentityForCatalog);
       const catalogQueryText = catalogContextText || messageText;
       const catalogLowerText = normalizeBotText(catalogQueryText);
-      const asksCatalogProduct = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria)\b/.test(lowerText) || catalogLowerText !== lowerText;
+      const asksCatalogProduct = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera|carroceria)\b/.test(lowerText) || catalogLowerText !== lowerText;
       let sprCatalogReply = '';
       if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
@@ -1179,7 +1223,7 @@ Incluye:
       } else if (bestMatch && maxScore >= 2) {        
         botReply = `${bestMatch.content} ¿Te gustaría que un asesor te prepare una cotización personalizada?`;
       } else if (['si', 'sii', 'siii', 'siiii', 'yes', 'claro', 'por favor', 'adelante', 'me interesa', 'me interesa la demo', 'si me interesa', 'si quiero', 'quiero una demo', 'quiero una demostracion', 'me gustaria una demo', 'me gustaria una demostracion'].includes(lowerText)) {
-  botReply = `¡Excelente! 🙌 Con gusto te mostramos una demo de DT Marketing.
+  botReply = `¡Excelente! 🙌 Con gusto te mostramos una demo de ${tenantDisplayName}.
 
 Un asesor te contactará por este medio para conocer tu negocio y enseñarte el DT CRM Core + API Chat Bot de WhatsApp.
 
@@ -1192,7 +1236,7 @@ Si quieres atención inmediata, escribe *asesor*`;
         const configuredWelcome = String(botSettings?.welcome_message || '').trim();
         botReply = convData.welcome_sent_at ? '¡Hola de nuevo! 👋 ¿Qué información necesitas?' : (convData.welcome_sent_at = new Date().toISOString(), configuredWelcome || `¡Hola ${customerName}! 👋
 
-Gracias por escribir a DT Marketing.
+Gracias por escribir a ${tenantDisplayName}.
 
 Soy el asistente virtual. Puedo ayudarte con:
 • DT CRM Core
@@ -1218,7 +1262,7 @@ Escribe el nombre del servicio o pon *asesor* y te comunicamos con nuestro equip
     botReply = formatWhatsAppReply(botReply);
 
     // 6. Send Outbound WhatsApp Reply via Meta Graph API
-    const botIdentity = `${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase(); const isDtMarketingTenant = /\bdt\s*(marketing|crm)\b/.test(botIdentity); const tenantBotName = String(botSettings?.bot_name || 'nuestro asistente').trim(); const crossTenantContent = /(dt marketing|dt crm core|api chat bot|paquete completo|escribe \*crm\*, \*whatsapp\* o \*paquete\*)/i; const asksLocation = /\b(ubicacion|ubicados|donde estan|direccion|sucursal)\b/.test(lowerText); if (!isDtMarketingTenant && (asksLocation || crossTenantContent.test(botReply))) { console.error(`[Cross-Tenant Content Blocked] Company: ${companyId} | Phone ID: ${phoneNumberId}`); botReply = asksLocation ? `📍 *Estamos ubicados en Querétaro, México.* 🚚 Realizamos envíos a todo México. Si ya deseas comprar, compártenos la pieza que buscas y los datos de tu vehículo para preparar tu cotización.` : `🤔 *Quiero ayudarte mejor.* Para orientarte sobre *${tenantBotName}*, ¿buscas una cotización, una pieza o servicio, información de envío, garantía o hablar con un asesor?`; } let outboundSuccess = false;
+    const botIdentity = `${companyId} ${tenantDisplayName} ${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase(); const isDtMarketingTenant = companyId === 'comp_dt_marketing' || /\bdt\s*(marketing|crm)\b/.test(botIdentity); const tenantBotName = String(botSettings?.bot_name || tenantDisplayName || 'nuestro asistente').trim(); const crossTenantContent = /(dt marketing|dt crm core|api chat bot|paquete completo|escribe \*crm\*, \*whatsapp\* o \*paquete\*)/i; const asksLocation = /\b(ubicacion|ubicados|donde estan|direccion|sucursal)\b/.test(lowerText); if (!isDtMarketingTenant && (asksLocation || crossTenantContent.test(botReply))) { console.error(`[Cross-Tenant Content Blocked] Company: ${companyId} | Phone ID: ${phoneNumberId}`); botReply = asksLocation ? `📍 *Estamos ubicados en Querétaro, México.* 🚚 Realizamos envíos a todo México. Si ya deseas comprar, compártenos la pieza que buscas y los datos de tu vehículo para preparar tu cotización.` : `🤔 *Quiero ayudarte mejor.* Para orientarte sobre *${tenantBotName}*, ¿buscas una cotización, una pieza o servicio, información de envío, garantía o hablar con un asesor?`; } let outboundSuccess = false;
     let metaMessageId = null;
 
     if (botReply && accessToken && phoneNumberId) {
@@ -1559,29 +1603,26 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
     }
   }
 
-  // 6. Retrieve credentials strictly associated with target company.
-  // A company can have old/incomplete connection attempts, so never use the
-  // first Firestore document or a connection without a usable token.
-  let integrationCandidates = [];
+  // 6. Retrieve credentials strictly associated with target company
+  let activePhoneNumberId = null;
+  let activeToken = null;
+
   if (db) {
     try {
       const intSnap = await db.collection('integrations')
         .where('company_id', '==', company_id)
         .where('provider', '==', 'whatsapp')
+        .limit(1)
         .get();
 
-      integrationCandidates = (await Promise.all(intSnap.docs.map(async (doc) => {
-        const data = doc.data() || {};
-        const tokenSnap = await db.doc(`integrations/${doc.id}/secrets/tokens`).get();
-        const accessToken = tokenSnap.exists ? tokenSnap.data().access_token : null;
-        return { id: doc.id, data, accessToken };
-      }))).filter((item) => item.data.phone_number_id && item.accessToken);
-
-      const score = (item) => (item.data.status === 'connected' ? 8 : 0)
-        + (item.data.webhook_verified === true ? 2 : 0)
-        + (item.data.outbound_verified === true ? 2 : 0)
-        + (item.data.phone_number_id ? 1 : 0);
-      integrationCandidates.sort((a, b) => score(b) - score(a));
+      if (!intSnap.empty) {
+        const intData = intSnap.docs[0].data();
+        activePhoneNumberId = intData.phone_number_id;
+        const secDoc = await db.doc(`integrations/${intSnap.docs[0].id}/secrets/tokens`).get();
+        if (secDoc.exists && secDoc.data().access_token) {
+          activeToken = secDoc.data().access_token;
+        }
+      }
     } catch (e) {
       console.error('Error fetching tenant credentials:', e.message);
       return res.status(500).json({
@@ -1591,16 +1632,12 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
     }
   }
 
-  if (!integrationCandidates.length) {
+  if (!activePhoneNumberId || !activeToken) {
     return res.status(400).json({
       success: false,
       error: 'Credenciales de WhatsApp Cloud API no configuradas para esta empresa.'
     });
   }
-
-  const selectedIntegration = integrationCandidates[0];
-  const activePhoneNumberId = selectedIntegration.data.phone_number_id;
-  const activeToken = selectedIntegration.accessToken;
 
   // 7. Send message to Meta Graph API
   const http = customHttpClient || axios;
@@ -1766,13 +1803,13 @@ app.post('/api/test-message', authenticateUser, async (req, res) => {
       const intSnap = await db.collection('integrations')
         .where('company_id', '==', company_id)
         .where('provider', '==', 'whatsapp')
-        
+        .limit(1)
         .get();
 
       if (!intSnap.empty) {
-        const candidates = intSnap.docs.map(doc => ({ doc, data: doc.data() || {} })).sort((a,b) => { const score = item => (item.data.status === "connected" ? 8 : 0) + (item.data.webhook_verified === true ? 2 : 0) + (item.data.outbound_verified === true ? 2 : 0) + (item.data.phone_number_id ? 1 : 0); return score(b)-score(a); }); const selected = candidates.find(item => item.data.phone_number_id) || candidates[0]; const intData = selected.data;
+        const intData = intSnap.docs[0].data();
         activePhoneNumberId = activePhoneNumberId || intData.phone_number_id; activeWabaId = activeWabaId || intData.whatsapp_business_account_id;
-        const secDoc = await db.doc(`integrations/${selected.doc.id}/secrets/tokens`).get();
+        const secDoc = await db.doc(`integrations/${intSnap.docs[0].id}/secrets/tokens`).get();
         if (secDoc.exists && secDoc.data().access_token) {
           activeToken = secDoc.data().access_token;
         }
