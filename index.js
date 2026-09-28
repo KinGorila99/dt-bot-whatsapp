@@ -1473,26 +1473,29 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
     }
   }
 
-  // 6. Retrieve credentials strictly associated with target company
-  let activePhoneNumberId = null;
-  let activeToken = null;
-
+  // 6. Retrieve credentials strictly associated with target company.
+  // A company can have old/incomplete connection attempts, so never use the
+  // first Firestore document or a connection without a usable token.
+  let integrationCandidates = [];
   if (db) {
     try {
       const intSnap = await db.collection('integrations')
         .where('company_id', '==', company_id)
         .where('provider', '==', 'whatsapp')
-        
         .get();
 
-      if (!intSnap.empty) {
-        const candidates = intSnap.docs.map(doc => ({ doc, data: doc.data() || {} })).sort((a,b) => { const score = item => (item.data.status === "connected" ? 8 : 0) + (item.data.webhook_verified === true ? 2 : 0) + (item.data.outbound_verified === true ? 2 : 0) + (item.data.phone_number_id ? 1 : 0); return score(b)-score(a); }); const selected = candidates.find(item => item.data.phone_number_id) || candidates[0]; const intData = selected.data;
-        activePhoneNumberId = intData.phone_number_id;
-        const secDoc = await db.doc(`integrations/${selected.doc.id}/secrets/tokens`).get();
-        if (secDoc.exists && secDoc.data().access_token) {
-          activeToken = secDoc.data().access_token;
-        }
-      }
+      integrationCandidates = (await Promise.all(intSnap.docs.map(async (doc) => {
+        const data = doc.data() || {};
+        const tokenSnap = await db.doc(`integrations/${doc.id}/secrets/tokens`).get();
+        const accessToken = tokenSnap.exists ? tokenSnap.data().access_token : null;
+        return { id: doc.id, data, accessToken };
+      }))).filter((item) => item.data.phone_number_id && item.accessToken);
+
+      const score = (item) => (item.data.status === 'connected' ? 8 : 0)
+        + (item.data.webhook_verified === true ? 2 : 0)
+        + (item.data.outbound_verified === true ? 2 : 0)
+        + (item.data.phone_number_id ? 1 : 0);
+      integrationCandidates.sort((a, b) => score(b) - score(a));
     } catch (e) {
       console.error('Error fetching tenant credentials:', e.message);
       return res.status(500).json({
@@ -1502,12 +1505,16 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
     }
   }
 
-  if (!activePhoneNumberId || !activeToken) {
+  if (!integrationCandidates.length) {
     return res.status(400).json({
       success: false,
       error: 'Credenciales de WhatsApp Cloud API no configuradas para esta empresa.'
     });
   }
+
+  const selectedIntegration = integrationCandidates[0];
+  const activePhoneNumberId = selectedIntegration.data.phone_number_id;
+  const activeToken = selectedIntegration.accessToken;
 
   // 7. Send message to Meta Graph API
   const http = customHttpClient || axios;
