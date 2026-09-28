@@ -263,6 +263,10 @@ function findSprEngineMatches(items, lowerText) {
   const requestedCategory = categoryRules.find(rule => rule.pattern.test(normalizedQuery));
   const wantsHead = /\b(cabeza(?:s)?|culata(?:s)?)\b/.test(normalizedQuery);
   const wantsMotor = /\bmotor(?:es)?\b/.test(normalizedQuery) && !wantsHead;
+  const motorAccessoryPattern = /\b(soporte(?:s)?|base(?:s)?|taco(?:s)?|montura(?:s)?|mount(?:s)?|sensor(?:es)?|accesorio(?:s)?)\b/;
+  const onlyEngineProducts = rows => wantsMotor
+    ? rows.filter(row => row.item.discountEligible === true && !motorAccessoryPattern.test(row.haystack))
+    : rows;
   const scored = items.map(item => {
     let score = 0;
     const haystack = [item.normalizedTitle, normalizeBotText(item.vendor), normalizeBotText(item.productType), normalizeBotText(item.tags)].join(' ');
@@ -283,10 +287,10 @@ function findSprEngineMatches(items, lowerText) {
     const noTokenMatches = requestedCategory
       ? scored.filter(row => requestedCategory.pattern.test(row.haystack))
       : scored;
-    return noTokenMatches.slice(0, 3).map(row => row.item);
+    return onlyEngineProducts(noTokenMatches).slice(0, 3).map(row => row.item);
   }
 
-  let relevant = scored.filter(row => row.score > 0);
+  let relevant = onlyEngineProducts(scored.filter(row => row.score > 0));
   if (requestedCategory) {
     const categoryMatches = relevant.filter(row => requestedCategory.pattern.test(row.haystack));
     if (!categoryMatches.length) return [];
