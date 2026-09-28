@@ -150,6 +150,73 @@ const SPR_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_CATALOG_TTL_MS
 const SPR_SEPTEMBER_DISCOUNT_PERCENT = Math.max(0, Math.min(90, Number(process.env.SPR_SEPTEMBER_DISCOUNT_PERCENT || 15)));
 let sprCatalogCache = { fetchedAt: 0, items: [] };
 
+// SPR does not provide a reliable inventory signal. Collision and lighting
+// availability is checked against Aldo Autopartes when the public lookup responds.
+const ALDO_STOCK_URL = process.env.ALDO_STOCK_URL || 'https://www.aldoautopartes.com/pi_busqueda.jsp';
+const ALDO_STOCK_TIMEOUT_MS = Math.max(3000, Number(process.env.ALDO_STOCK_TIMEOUT_MS || 5000));
+const ALDO_STOCK_CACHE_TTL_MS = Math.max(15000, Number(process.env.ALDO_STOCK_CACHE_TTL_MS || 60000));
+const ALDO_STOCK_QUERY_PARAMS = String(process.env.ALDO_STOCK_QUERY_PARAMS || 'q,search')
+  .split(',')
+  .map(value => value.trim())
+  .filter(Boolean);
+const ALDO_STOCK_CATEGORY_PATTERN = /\b(colision|choque|faro(?:s)?|niebla|calavera(?:s)?|lampara(?:s)?|luz|luces|iluminacion|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|fascia(?:s)?|cofre|salpicadera(?:s)?|tolva(?:s)?|bisagra(?:s)?|moldura(?:s)?|manija(?:s)?|rejilla(?:s)?|puerta(?:s)?|cajuela|carroceria)\b/;
+const aldoStockCache = new Map();
+
+function isAldoStockCategoryQuery(value) {
+  return ALDO_STOCK_CATEGORY_PATTERN.test(normalizeBotText(value));
+}
+
+function parseAldoStockResponse(data, query) {
+  const rawText = typeof data === 'string' ? data : JSON.stringify(data || {});
+  const normalizedResponse = normalizeBotText(stripSprHtml(rawText));
+  const queryTokens = normalizeBotText(query).split(' ')
+    .filter(token => token.length >= 4 && !['quiero', 'busco', 'necesito', 'precio', 'tienes', 'tienen', 'para', 'pieza', 'piezas', 'producto', 'productos', 'disponible', 'disponibilidad', 'stock'].includes(token));
+  const snippets = queryTokens.length
+    ? queryTokens.map(token => {
+      const index = normalizedResponse.indexOf(token);
+      return index >= 0 ? normalizedResponse.slice(Math.max(0, index - 240), index + 320) : '';
+    }).filter(Boolean)
+    : [normalizedResponse.slice(0, 1600)];
+  const candidateText = snippets.join(' ');
+  const hasProductMatch = queryTokens.length === 0 || queryTokens.some(token => normalizedResponse.includes(token));
+  if (!hasProductMatch) return { status: 'unknown', source: 'Aldo Autopartes', reason: 'product_not_found' };
+  if (/\b(agotado|sin existencia|no disponible|fuera de stock|existencia 0|stock 0|cantidad 0|disponibilidad 0)\b/.test(candidateText)) {
+    return { status: 'out_of_stock', source: 'Aldo Autopartes' };
+  }
+  if (/\b(disponible|existencia|stock|inventario|en almacen)\b/.test(candidateText)
+    || /\b(?:unidades|piezas)\s*[:=]?\s*[1-9]\d*\b/.test(candidateText)) {
+    return { status: 'in_stock', source: 'Aldo Autopartes' };
+  }
+  return { status: 'unknown', source: 'Aldo Autopartes', reason: 'stock_not_explicit' };
+}
+
+async function searchAldoStock(query) {
+  const cleanQuery = String(query || '').trim();
+  const cacheKey = normalizeBotText(cleanQuery);
+  const now = Date.now();
+  const cached = aldoStockCache.get(cacheKey);
+  if (cached && now - cached.fetchedAt < ALDO_STOCK_CACHE_TTL_MS) return cached.result;
+
+  let result = { status: 'unknown', source: 'Aldo Autopartes', reason: 'lookup_failed' };
+  for (const queryParam of ALDO_STOCK_QUERY_PARAMS) {
+    try {
+      const response = await axios.get(ALDO_STOCK_URL, {
+        timeout: ALDO_STOCK_TIMEOUT_MS,
+        params: { [queryParam]: cleanQuery },
+        headers: { 'User-Agent': 'DT Bot Core / Aldo stock lookup', Accept: 'text/html,application/json' }
+      });
+      result = parseAldoStockResponse(response.data, cleanQuery);
+      if (result.status !== 'unknown') break;
+    } catch (error) {
+      console.warn('⚠️ Aldo stock lookup failed (' + queryParam + '):', error.message);
+      result = { status: 'unknown', source: 'Aldo Autopartes', reason: 'lookup_failed' };
+      break;
+    }
+  }
+  aldoStockCache.set(cacheKey, { fetchedAt: now, result });
+  return result;
+}
+
 function parseSprMoney(value) {
   const parsed = Number(String(value ?? '').replace(/[^0-9.-]/g, ''));
   return Number.isFinite(parsed) ? parsed : 0;
@@ -327,7 +394,7 @@ function isGenericSprCatalogRequest(lowerText) {
   return asksGeneral && !asksSpecific;
 }
 
-function buildSprCatalogReply(matches, lowerText, catalogItems = []) {
+function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult = null) {
   if (isGenericSprCatalogRequest(lowerText)) {
     const categoryRules = [
       ['Motores y cabezas de motor', /\b(motor|cabeza|culata)\b/],
@@ -355,10 +422,18 @@ function buildSprCatalogReply(matches, lowerText, catalogItems = []) {
     } else {
       lines.push('💰 Precio vigente: *' + formatSprMoney(item.offerPrice || item.regularPrice) + '*');
     }
-    lines.push(item.available ? '✅ Disponible en el catálogo' : '⚠️ Agotado por el momento');
+    const stockLine = stockResult?.status === 'in_stock'
+      ? '✅ Existencia confirmada por Aldo Autopartes'
+      : stockResult?.status === 'out_of_stock'
+        ? '⚠️ Aldo Autopartes reporta agotado por el momento'
+        : isAldoStockCategoryQuery(lowerText)
+          ? '🔎 Existencia por confirmar con Aldo Autopartes'
+          : '🔎 Existencia por confirmar; SPR no se toma como inventario';
+    lines.push(stockLine);
     lines.push('🔗 ' + item.url);
   }
-  lines.push('', '📌 Los precios y la disponibilidad se consultan directamente en SPR. ¿Quieres que revisemos compatibilidad con tu vehículo o buscar otra pieza?');
+  const stockFooter = isAldoStockCategoryQuery(lowerText) ? '📌 Para colisión e iluminación, la existencia se valida con Aldo Autopartes; la página de SPR no se toma como inventario.' : '📌 La existencia se confirma al preparar el pedido; la página de SPR no se toma como inventario.';
+  lines.push('', stockFooter, '¿Quieres que revisemos compatibilidad con tu vehículo o buscar otra pieza?');
   return lines.join('\n');
 }
 
@@ -1081,7 +1156,10 @@ Incluye:
             sprMatches = findSprEngineMatches(searchedItems, catalogLowerText);
             if (sprMatches.length) catalogItems = [...catalogItems, ...searchedItems];
           }
-          sprCatalogReply = buildSprCatalogReply(sprMatches, catalogLowerText, catalogItems);
+          const aldoStockResult = isAldoStockCategoryQuery(catalogQueryText)
+            ? await searchAldoStock(catalogQueryText)
+            : null;
+          sprCatalogReply = buildSprCatalogReply(sprMatches, catalogLowerText, catalogItems, aldoStockResult);
         } catch (catalogError) {
           console.warn('⚠️ SPR live catalog lookup failed:', catalogError.message);
         }
