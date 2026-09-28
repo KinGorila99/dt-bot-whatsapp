@@ -308,7 +308,7 @@ async function searchSprCatalog(query) {
 
 function findSprEngineMatches(items, lowerText) {
   const normalizedQuery = normalizeBotText(lowerText);
-  const stopWords = new Set(['quiero', 'busco', 'necesito', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo', 'producto', 'productos', 'catalogo', 'catalog', 'refaccion', 'refacciones', 'pieza', 'piezas', 'stock', 'completo', 'completa', 'todo', 'toda', 'todos', 'todas', 'ver', 'muestrame', 'muéstrame', 'informacion', 'información', 'que', 'qué', 'delantero', 'delantera', 'trasero', 'trasera', 'izquierdo', 'izquierda', 'derecho', 'derecha', 'lado']);
+  const stopWords = new Set(['quiero', 'quieres', 'busco', 'buscando', 'necesito', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo', 'producto', 'productos', 'catalogo', 'catalog', 'refaccion', 'refacciones', 'pieza', 'piezas', 'stock', 'completo', 'completa', 'todo', 'toda', 'todos', 'todas', 'ver', 'muestrame', 'muéstrame', 'informacion', 'información', 'que', 'qué', 'delantero', 'delantera', 'trasero', 'trasera', 'izquierdo', 'izquierda', 'derecho', 'derecha', 'lado', 'principal', 'niebla', 'antiniebla', 'no', 'sin', 'quiero']);
   const tokens = normalizedQuery.split(' ').filter(token => token.length >= 3 && !stopWords.has(token));
   const categoryRules = [
     { key: 'motor', pattern: /\bmotor(?:es)?\b/ },
@@ -327,6 +327,11 @@ function findSprEngineMatches(items, lowerText) {
     { key: 'carroceria', pattern: /\b(parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria)\b/ }
   ];
   const requestedCategory = categoryRules.find(rule => rule.pattern.test(normalizedQuery));
+  const requestedYears = [...normalizedQuery.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => Number(match[0]));
+  const requestedOrientation = normalizedQuery.match(/\b(izquierdo|izquierda|derecho|derecha|delantero|delantera|trasero|trasera)\b/)?.[1] || '';
+  const negativeFogRequest = /\b(?:no|sin|evitar|ningun|ninguna)\b(?:\s+\w+){0,8}\s+(?:faro\s+de\s+)?niebla\b/.test(normalizedQuery);
+  const asksFogLight = !negativeFogRequest && /\b(?:faro\s+de\s+niebla|niebla|antiniebla)\b/.test(normalizedQuery);
+  const asksMainLight = !asksFogLight && /\b(?:faro|faros|principal|delantero|delantera)\b/.test(normalizedQuery);
   const wantsHead = /\b(cabeza(?:s)?|culata(?:s)?)\b/.test(normalizedQuery);
   const wantsMotorAccessory = /\b(soporte(?:s)?|base(?:s)?|taco(?:s)?|montura(?:s)?|mount(?:s)?|sensor(?:es)?|accesorio(?:s)?)\b/.test(normalizedQuery);
   const wantsMotor = /\bmotor(?:es)?\b/.test(normalizedQuery) && !wantsHead && !wantsMotorAccessory;
@@ -334,6 +339,24 @@ function findSprEngineMatches(items, lowerText) {
   const onlyEngineProducts = rows => wantsMotor
     ? rows.filter(row => row.item.discountEligible === true && !motorAccessoryPattern.test(row.haystack))
     : rows;
+  const itemHasFogLight = item => /\b(?:niebla|antiniebla)\b/.test(item.normalizedTitle);
+  const itemMatchesRequestedYear = item => {
+    if (!requestedYears.length) return true;
+    const source = String(item.title || '') + ' ' + String(item.description || '') + ' ' + String(item.tags || '');
+    const explicitYears = [...source.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => Number(match[0]));
+    const ranges = [...source.matchAll(/\b((?:19|20)\d{2})\s*[-–/]\s*((?:19|20)\d{2})\b/g)]
+      .map(match => [Number(match[1]), Number(match[2])]);
+    return requestedYears.some(year => explicitYears.includes(year) || ranges.some(([start, end]) => year >= Math.min(start, end) && year <= Math.max(start, end)));
+  };
+  const itemMatchesRequestedOrientation = item => {
+    if (!requestedOrientation) return true;
+    const title = item.normalizedTitle || '';
+    if (requestedOrientation.startsWith('izquier')) return /\bizquierd[oa]\b/.test(title);
+    if (requestedOrientation.startsWith('derech')) return /\bderech[oa]\b/.test(title);
+    if (requestedOrientation.startsWith('delanter')) return /\b(?:delanter[oa]|frontal)\b/.test(title);
+    if (requestedOrientation.startsWith('traser')) return /\btraser[oa]\b/.test(title);
+    return true;
+  };
   const scored = items.map(item => {
     let score = 0;
     const haystack = [item.normalizedTitle, normalizeBotText(item.vendor), normalizeBotText(item.productType), normalizeBotText(item.tags)].join(' ');
@@ -347,6 +370,9 @@ function findSprEngineMatches(items, lowerText) {
     if (requestedCategory && requestedCategory.pattern.test(haystack)) score += 14;
     if (wantsHead) score += /\b(cabeza|culata)\b/.test(haystack) ? 12 : -8;
     if (wantsMotor) score += /\bmotor\b/.test(haystack) ? 5 : -3;
+    if (requestedYears.length && itemMatchesRequestedYear(item)) score += 10;
+    if (asksMainLight && requestedCategory?.key === 'iluminacion') score += itemHasFogLight(item) ? -20 : 10;
+    if (asksFogLight && requestedCategory?.key === 'iluminacion') score += itemHasFogLight(item) ? 12 : -20;
     return { item, score, haystack, matchedTokens };
   }).sort((a, b) => b.score - a.score || a.item.title.localeCompare(b.item.title));
 
@@ -354,7 +380,11 @@ function findSprEngineMatches(items, lowerText) {
     const noTokenMatches = requestedCategory
       ? scored.filter(row => requestedCategory.pattern.test(row.haystack))
       : scored;
-    return onlyEngineProducts(noTokenMatches).slice(0, 3).map(row => row.item);
+    return onlyEngineProducts(noTokenMatches)
+      .filter(row => itemMatchesRequestedYear(row.item))
+      .filter(row => itemMatchesRequestedOrientation(row.item))
+      .filter(row => !requestedCategory || requestedCategory.key !== 'iluminacion' || (asksFogLight ? itemHasFogLight(row.item) : !itemHasFogLight(row.item)))
+      .slice(0, 3).map(row => row.item);
   }
 
   let relevant = onlyEngineProducts(scored.filter(row => row.score > 0));
@@ -362,6 +392,24 @@ function findSprEngineMatches(items, lowerText) {
     const categoryMatches = relevant.filter(row => requestedCategory.pattern.test(row.haystack));
     if (!categoryMatches.length) return [];
     relevant = categoryMatches;
+  }
+
+  if (requestedYears.length) {
+    const yearMatches = relevant.filter(row => itemMatchesRequestedYear(row.item));
+    if (!yearMatches.length) return [];
+    relevant = yearMatches;
+  }
+
+  if (requestedOrientation) {
+    const orientationMatches = relevant.filter(row => itemMatchesRequestedOrientation(row.item));
+    if (!orientationMatches.length) return [];
+    relevant = orientationMatches;
+  }
+
+  if (requestedCategory?.key === 'iluminacion') {
+    const lightingMatches = relevant.filter(row => asksFogLight ? itemHasFogLight(row.item) : !itemHasFogLight(row.item));
+    if (!lightingMatches.length) return [];
+    relevant = lightingMatches;
   }
 
   // Vehicle/model words must also appear; orientation or year alone cannot create a match.
@@ -377,11 +425,11 @@ function findSprEngineMatches(items, lowerText) {
 // that previous turn so a side/orientation answer cannot jump to another
 // make or model.
 const SPR_CATALOG_CONTEXT_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|producto(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carrocer[ií]a)\b/;
-const SPR_CATALOG_REFINEMENT_PATTERN = /\b(delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atr[aá]s|modelo|a[nñ]o|versi[oó]n|motor)\b/;
+const SPR_CATALOG_REFINEMENT_PATTERN = /\b(delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atr[aá]s|modelo|a[nñ]o|versi[oó]n|principal|niebla|antiniebla|motor)\b/;
 
 // Do not guess a vehicle from a generic part request. Ask for the vehicle
 // before searching so the bot cannot return an unrelated make or model.
-const SPR_CATALOG_GENERIC_WORDS_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|que|qué|por|favor|precio|precios|cuanto|cu[aá]nto|cuesta|costo|cotizacion|cotizaci[oó]n|cotizar|comprar|compra|nuevo|nueva|disponible|disponibilidad|stock|catalogo|cat[aá]logo|producto|productos|pieza|piezas|refaccion|refacciones|motor|motores|cabeza|cabezas|culata|engine|series|amortiguador|amortiguadores|suspension|freno|frenos|balata|balatas|pastilla|pastillas|aceite|lubricante|lubricantes|direccion|terminal|terminales|rotula|rotulas|radiador|radiadores|bomba|bombas|turbo|turbos|embrague|clutch|soporte|soportes|faro|faros|calavera|calaveras|lampara|lamparas|luz|luces|espejo|espejos|parrilla|parrillas|defensa|defensas|cofre|salpicadera|salpicaderas|carroceria|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atras|modelo|ano|version|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|camiones|completo|completa|todo|toda|todos|todas)\b/gi;
+const SPR_CATALOG_GENERIC_WORDS_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|que|qué|por|favor|de|precio|precios|cuanto|cu[aá]nto|cuesta|costo|cotizacion|cotizaci[oó]n|cotizar|comprar|compra|nuevo|nueva|disponible|disponibilidad|stock|catalogo|cat[aá]logo|producto|productos|pieza|piezas|refaccion|refacciones|motor|motores|cabeza|cabezas|culata|engine|series|amortiguador|amortiguadores|suspension|freno|frenos|balata|balatas|pastilla|pastillas|aceite|lubricante|lubricantes|direccion|terminal|terminales|rotula|rotulas|radiador|radiadores|bomba|bombas|turbo|turbos|embrague|clutch|soporte|soportes|faro|faros|niebla|antiniebla|principal|calavera|calaveras|lampara|lamparas|luz|luces|espejo|espejos|parrilla|parrillas|defensa|defensas|cofre|salpicadera|salpicaderas|carroceria|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atras|modelo|ano|version|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|camiones|completo|completa|todo|toda|todos|todas|no|sin|evitar|ningun|ninguna)\b/gi;
 const SPR_VEHICLE_MAKES = new Set(['nissan', 'ford', 'chevrolet', 'chevy', 'volkswagen', 'vw', 'toyota', 'honda', 'kia', 'hyundai', 'dodge', 'chrysler', 'jeep', 'mazda', 'mitsubishi', 'suzuki', 'seat', 'renault', 'peugeot', 'fiat', 'ram', 'gmc', 'volvo', 'audi', 'bmw', 'mercedes', 'mercedesbenz', 'isuzu', 'subaru', 'lincoln', 'cadillac', 'buick', 'acura', 'infiniti', 'lexus', 'porsche', 'mg', 'byd']);
 
 function hasSprVehicleReference(value) {
@@ -406,7 +454,22 @@ function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
   const currentNormalized = normalizeBotText(current);
   const previousNormalized = normalizeBotText(previous.join(' '));
   const isFollowUpRefinement = SPR_CATALOG_REFINEMENT_PATTERN.test(currentNormalized)
-    && !SPR_CATALOG_CONTEXT_PATTERN.test(currentNormalized.replace(/\b(delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atr[aá]s|modelo|a[nñ]o|versi[oó]n)\b/g, ''));
+    && !SPR_CATALOG_CONTEXT_PATTERN.test(currentNormalized.replace(/\b(delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atr[aá]s|modelo|a[nñ]o|versi[oó]n|principal|niebla|antiniebla)\b/g, ''));
+
+  const previousCatalogMessage = [...previous].reverse().find(value => {
+    const normalized = normalizeBotText(value);
+    return SPR_CATALOG_CONTEXT_PATTERN.test(normalized) && hasSprVehicleReference(normalized);
+  });
+  const currentHasVehicle = hasSprVehicleReference(currentNormalized);
+  const currentHasCatalogTerm = SPR_CATALOG_CONTEXT_PATTERN.test(currentNormalized)
+    || SPR_CATALOG_REFINEMENT_PATTERN.test(currentNormalized)
+    || isFollowUpRefinement;
+
+  // Keep the last vehicle/model when the customer clarifies the same part
+  // (for example: "faro de Versa 2017" -> "quiero el faro principal").
+  if (previousCatalogMessage && currentHasCatalogTerm && !currentHasVehicle) {
+    return previousCatalogMessage + ' ' + current;
+  }
 
   if (previous.length && isFollowUpRefinement && SPR_CATALOG_CONTEXT_PATTERN.test(previousNormalized)) {
     return previous.slice(-4).join(' ') + ' ' + current;
