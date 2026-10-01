@@ -147,7 +147,8 @@ function formatWhatsAppReply(value) {
 
 const SPR_ENGINE_COLLECTION_URL = process.env.SPR_FULL_CATALOG_URL || process.env.SPR_ENGINE_COLLECTION_URL || 'https://sprautopartes.mx/products.json?limit=250';
 const SPR_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_CATALOG_TTL_MS || 60000));
-const SPR_SEPTEMBER_DISCOUNT_PERCENT = Math.max(0, Math.min(90, Number(process.env.SPR_SEPTEMBER_DISCOUNT_PERCENT || 15)));
+// Promoción de septiembre desactivada: el bot muestra únicamente el precio normal.
+const SPR_SEPTEMBER_DISCOUNT_PERCENT = 0;
 let sprCatalogCache = { fetchedAt: 0, items: [] };
 // SPR does not provide a reliable inventory signal. Collision and lighting
 // availability is checked against Aldo Autopartes when the public lookup responds.
@@ -513,7 +514,7 @@ function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult
       lines.push('💰 Precio normal: ~' + formatSprMoney(item.regularPrice) + '~');
       lines.push('🔥 *Precio especial exclusivo de septiembre: ' + formatSprMoney(item.offerPrice) + '* (-' + SPR_SEPTEMBER_DISCOUNT_PERCENT + '%)');
     } else {
-      lines.push('💰 Precio vigente: *' + formatSprMoney(item.offerPrice || item.regularPrice) + '*');
+      lines.push('💰 Precio normal: *' + formatSprMoney(item.regularPrice || item.offerPrice) + '*');
     }
     const stockLine = stockResult?.status === 'in_stock'
       ? '✅ Disponible para cotización'
