@@ -723,7 +723,8 @@ app.get('/api/status', (req, res) => {
     server_time: new Date().toISOString(),
     graph_api_version: GRAPH_API_VERSION,
     signature_verification: !!META_APP_SECRET ? 'enforced' : 'optional',
-    database: db ? 'firebase_admin_authenticated' : 'uninitialized'
+    database: db ? 'firebase_admin_authenticated' : 'uninitialized',
+    catalog_guard: '6d2293d'
   });
 });
 
