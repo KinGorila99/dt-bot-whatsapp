@@ -734,7 +734,8 @@ app.get('/api/status', (req, res) => {
     graph_api_version: GRAPH_API_VERSION,
     signature_verification: !!META_APP_SECRET ? 'enforced' : 'optional',
     database: db ? 'firebase_admin_authenticated' : 'uninitialized',
-    catalog_guard: '6d2293d'
+    catalog_guard: '6d2293d',
+    unknown_product_guard: '42b213b'
   });
 });
 
