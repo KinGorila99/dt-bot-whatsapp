@@ -1264,6 +1264,14 @@ Incluye:
             sprMatches = findSprEngineMatches(searchedItems, catalogLowerText);
             if (sprMatches.length) catalogItems = [...catalogItems, ...searchedItems];
           }
+          const strictEngineTokens = (/\b(motor(?:es)?|cabeza(?:s)?|culata)\b/.test(catalogLowerText) ? catalogLowerText.split(/\s+/).filter(token => /[a-z]/.test(token) && /\d/.test(token) && token.length >= 3 && !/^(19|20)\d{2}$/.test(token) && !["motor","motores","cabeza","cabezas","culata","engine","series"].includes(token)) : []);
+          if (strictEngineTokens.length) {
+            sprMatches = sprMatches.filter(item => {
+              const haystack = normalizeBotText([item.title, item.description, item.productType, item.tags].filter(Boolean).join(" "));
+              const words = haystack.split(/\s+/);
+              return strictEngineTokens.every(token => words.some(word => word === token || word.includes(token)));
+            });
+          }
           const aldoStockResult = isAldoStockCategoryQuery(catalogQueryText)
             ? await searchAldoStock(catalogQueryText)
             : null;
