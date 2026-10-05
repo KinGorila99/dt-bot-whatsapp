@@ -309,7 +309,7 @@ async function searchSprCatalog(query) {
 
 function findSprEngineMatches(items, lowerText) {
   const normalizedQuery = normalizeBotText(lowerText);
-  const stopWords = new Set(['quiero', 'quieres', 'busco', 'buscando', 'necesito', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo', 'producto', 'productos', 'catalogo', 'catalog', 'refaccion', 'refacciones', 'pieza', 'piezas', 'stock', 'completo', 'completa', 'todo', 'toda', 'todos', 'todas', 'ver', 'muestrame', 'muéstrame', 'informacion', 'información', 'que', 'qué', 'delantero', 'delantera', 'trasero', 'trasera', 'izquierdo', 'izquierda', 'derecho', 'derecha', 'lado', 'principal', 'niebla', 'antiniebla', 'no', 'sin', 'quiero']);
+  const stopWords = new Set(['quiero', 'quieres', 'busco', 'buscando', 'necesito', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'engine', 'series', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo', 'producto', 'productos', 'catalogo', 'catalog', 'refaccion', 'refacciones', 'pieza', 'piezas', 'stock', 'completo', 'completa', 'todo', 'toda', 'todos', 'todas', 'ver', 'muestrame', 'muéstrame', 'informacion', 'información', 'que', 'qué', 'delantero', 'delantera', 'trasero', 'trasera', 'izquierdo', 'izquierda', 'derecho', 'derecha', 'lado', 'principal', 'niebla', 'antiniebla', 'no', 'sin', 'quiero']);
   const tokens = normalizedQuery.split(' ').filter(token => token.length >= 3 && !stopWords.has(token));
   const categoryRules = [
     { key: 'motor', pattern: /\bmotor(?:es)?\b/ },
@@ -413,10 +413,7 @@ function findSprEngineMatches(items, lowerText) {
     relevant = lightingMatches;
   }
 
-  // Vehicle/model words must also appear; orientation or year alone cannot create a match.
-  const categoryWords = new Set(categoryRules.flatMap(rule => rule.key.split(' ')));
-  const vehicleTokens = tokens.filter(token => !categoryRules.some(rule => rule.pattern.test(token)) && !/^\d{4}$/.test(token));
-  if (vehicleTokens.length && !relevant.some(row => vehicleTokens.some(token => row.haystack.includes(token)))) return [];
+  // Every meaningful make/model token must appear in the same product. const vehicleTokens = tokens.filter(token => !categoryRules.some(rule => rule.pattern.test(token)) && !/^\d{4}$/.test(token)).filter(token => token.length >= 3 && !['spr'].includes(token)); if (vehicleTokens.length) { const exactVehicleMatches = relevant.filter(row => vehicleTokens.every(token => row.haystack.includes(token))); if (!exactVehicleMatches.length) return []; relevant = exactVehicleMatches; }
 
   return relevant.slice(0, 3).map(row => row.item);
 }
@@ -505,7 +502,7 @@ function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult
     return '🛠️ *Catálogo de SPR Autopartes*\n\nPara buscar la pieza correcta necesito algunos datos adicionales. 🔎\n\n¿De qué *marca, modelo y año* es tu vehículo?\n🔧 También dime qué pieza necesitas y, si aplica, el lado (izquierdo o derecho).\n\nEjemplo: *faro delantero para Nissan Versa 2015*.';
   }
   if (!matches.length) {
-    return '🛠️ *Catálogo de SPR Autopartes*\n\nNo encontré una coincidencia exacta para esa pieza. ⚠️\n\nCompárteme la marca, modelo, año y pieza solicitada para revisar compatibilidad, precio y disponibilidad.\n\nEjemplo: *amortiguador Versa delantero izquierdo 2015* o *aceite Motul 5W-30*.';
+    return '🛠️ *Catálogo de SPR Autopartes*\n\nPor el momento no contamos con existencias para ese modelo en específico. ⚠️\n\nNo quiero sustituir la pieza que solicitas por otra diferente. Si quieres, compárteme la marca, modelo, año y pieza exacta para revisar otra opción compatible.';
   }
   const lines = ['🛠️ *Catálogo de SPR Autopartes*', '', 'Encontré estas opciones relacionadas:'];
   for (const item of matches) {
@@ -519,7 +516,7 @@ function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult
     const stockLine = stockResult?.status === 'in_stock'
       ? '✅ Disponible para cotización'
       : stockResult?.status === 'out_of_stock'
-        ? '⚠️ Por el momento aparece agotado'
+        ? '⚠️ Por el momento no contamos con existencias para esa pieza específica'
         : '🔎 Disponibilidad por confirmar';
     lines.push(stockLine);
     lines.push('🔗 ' + item.url);
