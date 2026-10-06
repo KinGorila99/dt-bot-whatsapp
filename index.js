@@ -770,7 +770,7 @@ app.get('/api/status', (req, res) => {
     signature_verification: !!META_APP_SECRET ? 'enforced' : 'optional',
     database: db ? 'firebase_admin_authenticated' : 'uninitialized',
     catalog_guard: '07330f6',
-    unknown_product_guard: 'b42a3c3'
+    unknown_product_guard: '7fb4779'
   });
 });
 
