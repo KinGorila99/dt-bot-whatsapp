@@ -770,7 +770,8 @@ app.get('/api/status', (req, res) => {
     signature_verification: !!META_APP_SECRET ? 'enforced' : 'optional',
     database: db ? 'firebase_admin_authenticated' : 'uninitialized',
     catalog_guard: '07330f6',
-    unknown_product_guard: '7fb4779'
+    unknown_product_guard: '7fb4779',
+    greeting_guard: 'cordial-20261006'
   });
 });
 
@@ -1241,6 +1242,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
       const asksPackage = lowerText.includes('paquete') || lowerText.includes('completo') || lowerText.includes('ambos') || lowerText.includes('los dos') || lowerText.includes('crm y bot') || lowerText.includes('bot y crm');
       const asksCrm = lowerText.includes('crm');
       const asksBot = lowerText.includes('bot') || lowerText.includes('chatbot') || lowerText.includes('chat bot') || lowerText.includes('whatsapp') || lowerText.includes('api chat');
+      const isFriendlyGreeting = ['hola', 'buenos dias', 'buenas tardes', 'buenas noches', 'inicio'].includes(lowerText);
 
       const crmReply = `📊 *DT CRM Core*
 
@@ -1332,6 +1334,15 @@ Incluye:
 
       if (sprCatalogReply) {
         botReply = sprCatalogReply;
+      } else if (isFriendlyGreeting) {
+        const greetingPrefix = lowerText === 'buenos dias'
+          ? '\u2600\ufe0f \u00a1Muy buenos d\u00edas!'
+          : lowerText === 'buenas tardes'
+            ? '\uD83C\uDF24\ufe0f \u00a1Muy buenas tardes!'
+            : lowerText === 'buenas noches'
+              ? '\uD83C\uDF19 \u00a1Muy buenas noches!'
+              : '\uD83D\uDC4B \u00a1Hola!';
+        botReply = greetingPrefix + "\n\nGracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo a encontrar la pieza que necesitas.\n\n\u00bfQu\u00e9 pieza o refacci\u00f3n est\u00e1s buscando? \uD83D\uDE97\uD83D\uDD27";
       } else if (asksPackage) {
         botReply = packageReply;
       } else if (asksBot && (asksPrice || lowerText.includes('y el') || lowerText.includes('incluye') || lowerText.includes('funciona') || lowerText.includes('informacion') || lowerText.includes('información') || lowerText.includes('servicio'))) {
@@ -1350,18 +1361,6 @@ Si quieres atención inmediata, escribe *asesor*`;
   botReply = `Entendido 👍 Si después quieres conocer nuestros servicios, escribe *CRM*, *WhatsApp* o *paquete*`;
 } else if (['ya', 'ok', 'okay', 'listo', 'recibido'].includes(lowerText)) {
   botReply = `Perfecto, ${customerName}. ¿Qué producto o servicio te interesa? También puedes escribir *asesor* para hablar con nuestro equipo.`;
-} else if (lowerText === 'hola' || lowerText === 'buenos dias' || lowerText === 'buenas tardes' || lowerText === 'buenas noches' || lowerText === 'inicio') {
-        const configuredWelcome = String(botSettings?.welcome_message || '').trim();
-        botReply = convData.welcome_sent_at ? '¡Hola de nuevo! 👋 ¿Qué información necesitas?' : (convData.welcome_sent_at = new Date().toISOString(), configuredWelcome || `¡Hola ${customerName}! 👋
-
-Gracias por escribir a ${tenantDisplayName}.
-
-Soy el asistente virtual. Puedo ayudarte con:
-• DT CRM Core
-• API Chat Bot de WhatsApp
-• Paquete completo
-
-Escribe "CRM", "WhatsApp", "paquete" o "asesor" para continuar.`) || `¡Hola ${customerName}! 👋 Bienvenido a nuestro canal oficial de WhatsApp. ¿En qué producto o cotización podemos asesorarte hoy? (Escribe "asesor" para hablar con un ejecutivo).`;
       } else {
         // Safe, non-hallucinating response with clarification
                 const configuredFallback = String(botSettings?.fallback_message || '').trim();
