@@ -547,7 +547,7 @@ function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult
     return '🛠️ *Catálogo de SPR Autopartes*\n\nPara buscar la pieza correcta necesito algunos datos adicionales. 🔎\n\n¿De qué *marca, modelo y año* es tu vehículo?\n🔧 También dime qué pieza necesitas y, si aplica, el lado (izquierdo o derecho).\n\nEjemplo: *faro delantero para Nissan Versa 2015*.';
   }
   if (!matches.length) {
-    return '🛠️ *Catálogo de SPR Autopartes*\n\nPor el momento no contamos con esa pieza o producto en nuestro catálogo. ⚠️\n\nNo quiero sustituir lo que solicitas por algo diferente. Si buscas otra refacción, compárteme la marca, modelo, año y pieza exacta para revisar una opción compatible.';
+    return 'No tenemos ese artículo en existencia.';
   }
   const lines = ['🛠️ *Catálogo de SPR Autopartes*', '', 'Encontré estas opciones relacionadas:'];
   for (const item of matches) {
