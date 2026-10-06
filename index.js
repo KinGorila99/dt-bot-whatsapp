@@ -337,8 +337,15 @@ function findSprEngineMatches(items, lowerText) {
   const wantsMotorAccessory = /\b(soporte(?:s)?|base(?:s)?|taco(?:s)?|montura(?:s)?|mount(?:s)?|sensor(?:es)?|accesorio(?:s)?)\b/.test(normalizedQuery);
   const wantsMotor = /\bmotor(?:es)?\b/.test(normalizedQuery) && !wantsHead && !wantsMotorAccessory;
   const motorAccessoryPattern = /\b(soporte(?:s)?|base(?:s)?|taco(?:s)?|montura(?:s)?|mount(?:s)?|sensor(?:es)?|accesorio(?:s)?)\b/;
+  // A request for a motor must never be answered with a cylinder head. The
+  // catalog uses both words in some titles (for example, "cabeza motor"), so
+  // exclude any head/cylinder listing unless the customer explicitly asked
+  // for a head.
   const onlyEngineProducts = rows => wantsMotor
-    ? rows.filter(row => row.item.discountEligible === true && !motorAccessoryPattern.test(row.haystack))
+    ? rows.filter(row => row.item.discountEligible === true
+      && !motorAccessoryPattern.test(row.haystack)
+      && /(?:motor|engine(?:\s+series)?)/.test(row.haystack)
+      && !/(?:cabeza|culata)/.test(row.haystack))
     : rows;
   const itemHasFogLight = item => /\b(?:niebla|antiniebla)\b/.test(item.normalizedTitle);
   const itemMatchesRequestedYear = item => {
@@ -416,6 +423,34 @@ function findSprEngineMatches(items, lowerText) {
   // Every meaningful make/model token must appear in the same product. const vehicleTokens = tokens.filter(token => !categoryRules.some(rule => rule.pattern.test(token)) && !/^\d{4}$/.test(token)).filter(token => token.length >= 3 && !['spr'].includes(token)); if (vehicleTokens.length) { const exactVehicleMatches = relevant.filter(row => vehicleTokens.every(token => row.haystack.includes(token))); if (!exactVehicleMatches.length) return []; relevant = exactVehicleMatches; }
 
   return relevant.slice(0, 3).map(row => row.item);
+}
+
+// Keep a specific vehicle request tied to the same vehicle in every catalog
+// path, including the live Shopify search fallback. This is a final guard in
+// case the search provider returns broad results for a query such as
+// \"Chevrolet Corsa 2005 motor remanufacturado\".
+function filterStrictSprVehicleMatches(matches, query) {
+  const normalized = normalizeBotText(query);
+  const requestedYears = [...normalized.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => Number(match[0]));
+  const qualifierPattern = /\b(remanufacturad[oa]s?|reconstruid[oa]s?|usad[oa]s?|nuev[oa]s?|complet[oa]s?|original(?:es)?|generico(?:s)?|generica(?:s)?)\b/g;
+  const identityTokens = normalized
+    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
+    .replace(qualifierPattern, ' ')
+    .replace(/\b(?:19|20)\d{2}\b/g, ' ')
+    .split(/\s+/)
+    .filter(token => (token.length >= 3 || (token.length >= 2 && /\d/.test(token))) && !['spr'].includes(token));
+  if (!identityTokens.length && !requestedYears.length) return matches;
+
+  return matches.filter(item => {
+    const haystack = [item.normalizedTitle, normalizeBotText(item.vendor), normalizeBotText(item.productType), normalizeBotText(item.tags)].join(' ');
+    if (!identityTokens.every(token => haystack.includes(token))) return false;
+    if (!requestedYears.length) return true;
+    const source = [item.title, item.description, item.tags].map(value => String(value || '')).join(' ');
+    const explicitYears = [...source.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => Number(match[0]));
+    const ranges = [...source.matchAll(/\b((?:19|20)\d{2})\s*[-/]\s*((?:19|20)\d{2})\b/g)]
+      .map(match => [Number(match[1]), Number(match[2])]);
+    return requestedYears.some(year => explicitYears.includes(year) || ranges.some(([start, end]) => year >= Math.min(start, end) && year <= Math.max(start, end)));
+  });
 }
 
 // A short follow-up such as "delantero" or "izquierdo" is a refinement of
@@ -1271,9 +1306,11 @@ Incluye:
         try {
           let catalogItems = await getSprEngineCatalog();
           let sprMatches = findSprEngineMatches(catalogItems, catalogLowerText);
+          sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
           if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
             const searchedItems = await searchSprCatalog(catalogQueryText);
             sprMatches = findSprEngineMatches(searchedItems, catalogLowerText);
+            sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
             if (sprMatches.length) catalogItems = [...catalogItems, ...searchedItems];
           }
           const strictEngineTokens = (/\b(motor(?:es)?|cabeza(?:s)?|culata)\b/.test(catalogLowerText) ? catalogLowerText.split(/\s+/).filter(token => /[a-z]/.test(token) && /\d/.test(token) && token.length >= 3 && !/^(19|20)\d{2}$/.test(token) && !["motor","motores","cabeza","cabezas","culata","engine","series"].includes(token)) : []);
