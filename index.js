@@ -147,6 +147,10 @@ function formatWhatsAppReply(value) {
 
 const SPR_ENGINE_COLLECTION_URL = process.env.SPR_FULL_CATALOG_URL || process.env.SPR_ENGINE_COLLECTION_URL || 'https://sprautopartes.mx/products.json?limit=250';
 const SPR_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_CATALOG_TTL_MS || 60000));
+// Shopify product titles may omit trim/package words included in natural-language requests.
+// Keep make/model, year, part and side strict while treating these descriptors as optional.
+const SPR_OPTIONAL_VEHICLE_WORDS = new Set(['gl','gls','gle','glx','lt','ls','le','lx','ex','se','sv','sr','slt','xlt','xl','xle','xse','mind','mild','sport','touring','limited','premium','plus','classic','sedan','hatchback','hb','coupe','convertible']);
+const SPR_OPTIONAL_VEHICLE_WORDS_PATTERN = /\b(gl|gls|gle|glx|lt|ls|le|lx|ex|se|sv|sr|slt|xlt|xl|xle|xse|mind|mild|sport|touring|limited|premium|plus|classic|sedan|hatchback|hb|coupe|convertible)\b/gi;
 // Promoción de septiembre desactivada: el bot muestra únicamente el precio normal.
 const SPR_SEPTEMBER_DISCOUNT_PERCENT = 0;
 let sprCatalogCache = { fetchedAt: 0, items: [] };
@@ -420,7 +424,7 @@ function findSprEngineMatches(items, lowerText) {
     relevant = lightingMatches;
   }
 
-  // Every meaningful make/model token must appear in the same product. const vehicleTokens = tokens.filter(token => !categoryRules.some(rule => rule.pattern.test(token)) && !/^\d{4}$/.test(token)).filter(token => token.length >= 3 && !['spr'].includes(token)); if (vehicleTokens.length) { const exactVehicleMatches = relevant.filter(row => vehicleTokens.every(token => row.haystack.includes(token))); if (!exactVehicleMatches.length) return []; relevant = exactVehicleMatches; }
+  // Every meaningful make/model token must appear in the same product. const vehicleTokens = tokens.filter(token => !categoryRules.some(rule => rule.pattern.test(token)) && !/^\d{4}$/.test(token)).filter(token => !SPR_OPTIONAL_VEHICLE_WORDS.has(token)).filter(token => token.length >= 3 && !['spr'].includes(token)); if (vehicleTokens.length) { const exactVehicleMatches = relevant.filter(row => vehicleTokens.every(token => row.haystack.includes(token))); if (!exactVehicleMatches.length) return []; relevant = exactVehicleMatches; }
 
   return relevant.slice(0, 3).map(row => row.item);
 }
@@ -434,8 +438,7 @@ function filterStrictSprVehicleMatches(matches, query) {
   const requestedYears = [...normalized.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => Number(match[0]));
   const qualifierPattern = /\b(remanufacturad[oa]s?|reconstruid[oa]s?|usad[oa]s?|nuev[oa]s?|complet[oa]s?|original(?:es)?|generico(?:s)?|generica(?:s)?)\b/g;
   const identityTokens = normalized
-    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
-    .replace(qualifierPattern, ' ')
+    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ').replace(SPR_OPTIONAL_VEHICLE_WORDS_PATTERN, ' ').replace(qualifierPattern, ' ')
     .replace(/\b(?:19|20)\d{2}\b/g, ' ')
     .split(/\s+/)
     .filter(token => (token.length >= 3 || (token.length >= 2 && /\d/.test(token))) && !['spr'].includes(token));
@@ -453,6 +456,19 @@ function filterStrictSprVehicleMatches(matches, query) {
   });
 }
 
+// Search Shopify with useful vehicle and part terms instead of the full sentence.
+// The catalog search is sensitive to filler words and trim details, while make/model,
+// year, part and side are the terms that identify the item.
+const SPR_SEARCH_FILLER_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|me|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|por|favor|que|cotizacion|cotizar|precio|precios|cuanto|cuesta|costo|disponible|disponibilidad|stock|modelo|ano|version)\b/gi;
+function buildSprFocusedSearchQuery(value) {
+  const normalized = normalizeBotText(value);
+  const focused = normalized
+    .replace(SPR_SEARCH_FILLER_PATTERN, ' ')
+    .replace(SPR_OPTIONAL_VEHICLE_WORDS_PATTERN, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return focused || normalized;
+}
 // A short follow-up such as "delantero" or "izquierdo" is a refinement of
 // the customer's previous catalog request. Keep the vehicle and part from
 // that previous turn so a side/orientation answer cannot jump to another
@@ -769,7 +785,7 @@ app.get('/api/status', (req, res) => {
     graph_api_version: GRAPH_API_VERSION,
     signature_verification: !!META_APP_SECRET ? 'enforced' : 'optional',
     database: db ? 'firebase_admin_authenticated' : 'uninitialized',
-    catalog_guard: '07330f6',
+    catalog_guard: '07330f6', catalog_search_guard: 'focused-query-20261006',
     unknown_product_guard: '7fb4779',
     greeting_guard: 'tenant-courtesy-20261006'
   });
@@ -1316,7 +1332,7 @@ Incluye:
           let sprMatches = findSprEngineMatches(catalogItems, catalogLowerText);
           sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
           if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
-            const searchedItems = await searchSprCatalog(catalogQueryText);
+            const focusedSearchQuery = buildSprFocusedSearchQuery(catalogQueryText); const searchedItems = await searchSprCatalog(focusedSearchQuery);
             sprMatches = findSprEngineMatches(searchedItems, catalogLowerText);
             sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
             if (sprMatches.length) catalogItems = [...catalogItems, ...searchedItems];
