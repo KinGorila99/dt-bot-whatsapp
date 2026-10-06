@@ -771,7 +771,7 @@ app.get('/api/status', (req, res) => {
     database: db ? 'firebase_admin_authenticated' : 'uninitialized',
     catalog_guard: '07330f6',
     unknown_product_guard: '7fb4779',
-    greeting_guard: 'cordial-20261006'
+    greeting_guard: 'cordial-courtesy-20261006'
   });
 });
 
@@ -1242,7 +1242,9 @@ app.post('/webhook/whatsapp', async (req, res) => {
       const asksPackage = lowerText.includes('paquete') || lowerText.includes('completo') || lowerText.includes('ambos') || lowerText.includes('los dos') || lowerText.includes('crm y bot') || lowerText.includes('bot y crm');
       const asksCrm = lowerText.includes('crm');
       const asksBot = lowerText.includes('bot') || lowerText.includes('chatbot') || lowerText.includes('chat bot') || lowerText.includes('whatsapp') || lowerText.includes('api chat');
-      const isFriendlyGreeting = ['hola', 'buenos dias', 'buenas tardes', 'buenas noches', 'inicio'].includes(lowerText);
+      const isFriendlyGreeting = /^(?:hola|holi|buen dia|buenos dias|buenas tardes|buenas noches|inicio)$/.test(lowerText);
+      const isCourtesyMessage = /^(?:(?:muchas|mil)\s+)?gracias(?:\s+(?:por|igualmente|de todos modos|todo)\b.*)?$/.test(lowerText)
+        || /^(?:(?:te|le)\s+)?agradezco\b/.test(lowerText);
 
       const crmReply = `📊 *DT CRM Core*
 
@@ -1343,6 +1345,8 @@ Incluye:
               ? '\uD83C\uDF19 \u00a1Muy buenas noches!'
               : '\uD83D\uDC4B \u00a1Hola!';
         botReply = greetingPrefix + "\n\nGracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo a encontrar la pieza que necesitas.\n\n\u00bfQu\u00e9 pieza o refacci\u00f3n est\u00e1s buscando? \uD83D\uDE97\uD83D\uDD27";
+      } else if (isCourtesyMessage) {
+        botReply = '\uD83D\uDE0A \u00a1Con gusto! Gracias a ti por escribir a *SPR Autopartes*.\n\nCuando necesites otra pieza, aqu\u00ed estaremos para ayudarte. \uD83D\uDE97\uD83D\uDD27';
       } else if (asksPackage) {
         botReply = packageReply;
       } else if (asksBot && (asksPrice || lowerText.includes('y el') || lowerText.includes('incluye') || lowerText.includes('funciona') || lowerText.includes('informacion') || lowerText.includes('información') || lowerText.includes('servicio'))) {
