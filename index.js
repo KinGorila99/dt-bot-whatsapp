@@ -771,7 +771,7 @@ app.get('/api/status', (req, res) => {
     database: db ? 'firebase_admin_authenticated' : 'uninitialized',
     catalog_guard: '07330f6',
     unknown_product_guard: '7fb4779',
-    greeting_guard: 'cordial-courtesy-20261006'
+    greeting_guard: 'tenant-courtesy-20261006'
   });
 });
 
@@ -1302,6 +1302,10 @@ Incluye:
 
       const botIdentityForCatalog = `${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase();
       const isSprAutopartesTenant = /spr\s*(bot|autopartes|engine)/i.test(botIdentityForCatalog) || /spr autopartes/i.test(botIdentityForCatalog);
+      const publicBusinessName = isSprAutopartesTenant ? 'SPR Autopartes' : tenantDisplayName;
+      const publicBotName = String(
+        botSettings?.bot_name || (isSprAutopartesTenant ? 'SPR BOT' : 'asistente virtual')
+      ).trim();
       const catalogQueryText = catalogContextText || messageText;
       const catalogLowerText = normalizeBotText(catalogQueryText);
       const asksCatalogProduct = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera|carroceria)\b/.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText);
@@ -1344,9 +1348,15 @@ Incluye:
             : lowerText === 'buenas noches'
               ? '\uD83C\uDF19 \u00a1Muy buenas noches!'
               : '\uD83D\uDC4B \u00a1Hola!';
-        botReply = greetingPrefix + "\n\nGracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo a encontrar la pieza que necesitas.\n\n\u00bfQu\u00e9 pieza o refacci\u00f3n est\u00e1s buscando? \uD83D\uDE97\uD83D\uDD27";
+        const helpPrompt = isSprAutopartesTenant
+          ? '\u00bfQu\u00e9 pieza o refacci\u00f3n est\u00e1s buscando? \uD83D\uDE97\uD83D\uDD27'
+          : '\u00bfEn qu\u00e9 podemos ayudarte hoy?';
+        botReply = greetingPrefix + "\n\nGracias por escribir a *" + publicBusinessName + "*. Soy *" + publicBotName + "* y con gusto te ayudo.\n\n" + helpPrompt;
       } else if (isCourtesyMessage) {
-        botReply = '\uD83D\uDE0A \u00a1Con gusto! Gracias a ti por escribir a *SPR Autopartes*.\n\nCuando necesites otra pieza, aqu\u00ed estaremos para ayudarte. \uD83D\uDE97\uD83D\uDD27';
+        const courtesyFollowup = isSprAutopartesTenant
+          ? 'Cuando necesites otra pieza, aqu\u00ed estaremos para ayudarte. \uD83D\uDE97\uD83D\uDD27'
+          : 'Cuando necesites algo m\u00e1s, aqu\u00ed estaremos para ayudarte.';
+        botReply = '\uD83D\uDE0A \u00a1Con gusto! Gracias a ti por escribir a *' + publicBusinessName + '*.\n\n' + courtesyFollowup;
       } else if (asksPackage) {
         botReply = packageReply;
       } else if (asksBot && (asksPrice || lowerText.includes('y el') || lowerText.includes('incluye') || lowerText.includes('funciona') || lowerText.includes('informacion') || lowerText.includes('información') || lowerText.includes('servicio'))) {
