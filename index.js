@@ -439,7 +439,7 @@ function filterStrictSprVehicleMatches(matches, query) {
   const qualifierPattern = /\b(remanufacturad[oa]s?|reconstruid[oa]s?|usad[oa]s?|nuev[oa]s?|complet[oa]s?|original(?:es)?|generico(?:s)?|generica(?:s)?)\b/g;
   const identityTokens = normalized
     .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ').replace(SPR_OPTIONAL_VEHICLE_WORDS_PATTERN, ' ').replace(qualifierPattern, ' ')
-    .replace(/\b(?:19|20)\d{2}\b/g, ' ')
+    .replace(/\b\d{4}\b/g, ' ')
     .split(/\s+/)
     .filter(token => (token.length >= 3 || (token.length >= 2 && /\d/.test(token))) && !['spr'].includes(token));
   if (!identityTokens.length && !requestedYears.length) return matches;
@@ -456,6 +456,18 @@ function filterStrictSprVehicleMatches(matches, query) {
   });
 }
 
+function getSprYearClarification(value) {
+  const normalized = normalizeBotText(value);
+  const invalidYears = [...normalized.matchAll(/\b(?!19|20)\d{4}\b/g)].map(match => match[0]);
+  if (!invalidYears.length) return null;
+  const invalidYear = invalidYears[0];
+  const numeric = Number(invalidYear);
+  const suggestedYear = numeric >= 3000 && numeric <= 3999 ? String(2000 + (numeric % 100)) : '';
+  return { invalidYear, suggestedYear };
+}
+function isSprYearConfirmation(value) {
+  return /\b(si|correcto|correcta|exacto|exacta|afirmativo|asi)\b/.test(normalizeBotText(value));
+}
 // Search Shopify with useful vehicle and part terms instead of the full sentence.
 // The catalog search is sensitive to filler words and trim details, while make/model,
 // year, part and side are the terms that identify the item.
@@ -465,7 +477,8 @@ function buildSprFocusedSearchQuery(value) {
   const focused = normalized
     .replace(SPR_SEARCH_FILLER_PATTERN, ' ')
     .replace(SPR_OPTIONAL_VEHICLE_WORDS_PATTERN, ' ')
-    .replace(/\s+/g, ' ')
+        .replace(/\b(?!19|20)\d{4}\b/g, ' ')
+.replace(/\s+/g, ' ')
     .trim();
   return focused || normalized;
 }
@@ -785,7 +798,7 @@ app.get('/api/status', (req, res) => {
     graph_api_version: GRAPH_API_VERSION,
     signature_verification: !!META_APP_SECRET ? 'enforced' : 'optional',
     database: db ? 'firebase_admin_authenticated' : 'uninitialized',
-    catalog_guard: '07330f6', catalog_search_guard: 'focused-query-20261006',
+    catalog_guard: '07330f6', catalog_search_guard: 'year-confirmation-20261007',
     unknown_product_guard: '7fb4779',
     greeting_guard: 'tenant-courtesy-20261006'
   });
@@ -1322,13 +1335,41 @@ Incluye:
       const publicBotName = String(
         botSettings?.bot_name || (isSprAutopartesTenant ? 'SPR BOT' : 'asistente virtual')
       ).trim();
-      const catalogQueryText = catalogContextText || messageText;
-      const catalogLowerText = normalizeBotText(catalogQueryText);
+      let catalogQueryText = catalogContextText || messageText;
+      let catalogLowerText = normalizeBotText(catalogQueryText);
+      let yearConfirmationReply = '';
+      const pendingYear = convData?.pending_year_confirmation || null;
+      const currentNormalizedText = normalizeBotText(messageText);
+      const confirmsPendingYear = pendingYear && isSprYearConfirmation(messageText);
+      const deniesPendingYear = pendingYear && /\b(no|incorrecto|incorrecta|ese no|esa no)\b/.test(currentNormalizedText);
+      if (confirmsPendingYear) {
+        const explicitYear = currentNormalizedText.match(/\b(?:19|20)\d{2}\b/);
+        const confirmedYear = explicitYear ? explicitYear[0] : String(pendingYear.suggested_year || '');
+        catalogQueryText = String(pendingYear.original_query || catalogQueryText).replace(String(pendingYear.invalid_year || ''), confirmedYear);
+        catalogLowerText = normalizeBotText(catalogQueryText);
+        convData.pending_year_confirmation = null;
+      } else if (deniesPendingYear) {
+        convData.pending_year_confirmation = null;
+        yearConfirmationReply = '\u00bfCu\u00e1l es el a\u00f1o correcto para revisar esa pieza? \U0001F4C5';
+      } else {
+        const yearClarification = getSprYearClarification(catalogQueryText);
+        if (yearClarification) {
+          convData.pending_year_confirmation = {
+            original_query: catalogQueryText,
+            invalid_year: yearClarification.invalidYear,
+            suggested_year: yearClarification.suggestedYear || null
+          };
+          yearConfirmationReply = yearClarification.suggestedYear
+            ? '\u00bfTe refieres al a\u00f1o ' + yearClarification.suggestedYear + '? Conf\u00edrmame y busco el amortiguador correcto. \U0001F50E'
+            : 'No pude identificar el a\u00f1o. \u00bfCu\u00e1l es el a\u00f1o correcto para revisar esa pieza? \U0001F4C5';
+        }
+      }
       const asksCatalogProduct = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera|carroceria)\b/.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText);
       let sprCatalogReply = '';
       if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
-          let catalogItems = await getSprEngineCatalog();
+          if (!yearConfirmationReply) {
+            let catalogItems = await getSprEngineCatalog();
           let sprMatches = findSprEngineMatches(catalogItems, catalogLowerText);
           sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
           if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
@@ -1349,11 +1390,15 @@ Incluye:
             ? await searchAldoStock(catalogQueryText)
             : null;
           sprCatalogReply = buildSprCatalogReply(sprMatches, catalogLowerText, catalogItems, aldoStockResult);
+          }
         } catch (catalogError) {
           console.warn('⚠️ SPR live catalog lookup failed:', catalogError.message);
         }
       }
 
+      if (yearConfirmationReply) {
+        sprCatalogReply = yearConfirmationReply;
+      }
       if (sprCatalogReply) {
         botReply = sprCatalogReply;
       } else if (isFriendlyGreeting) {
