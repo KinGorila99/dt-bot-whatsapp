@@ -1285,7 +1285,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
             const asksPrice = ['precio', 'cuanto', 'cuesta', 'costo', 'mensual', 'vale', 'tarifa', 'pago', 'acceso'].some(term => lowerText.includes(term));
       const asksPackage = lowerText.includes('paquete') || lowerText.includes('completo') || lowerText.includes('ambos') || lowerText.includes('los dos') || lowerText.includes('crm y bot') || lowerText.includes('bot y crm');
-      const asksPromotion = /\b(promocion|descuento|oferta|halloween|activacion\s+gratis)\b/.test(lowerText);
+      const asksPromotion = /\b(promocion|promo|descuento|oferta|halloween|activacion\s+gratis)\b/.test(lowerText);
       const asksCrm = lowerText.includes('crm');
       const asksBot = lowerText.includes('bot') || lowerText.includes('chatbot') || lowerText.includes('chat bot') || lowerText.includes('whatsapp') || lowerText.includes('api chat');
       const isFriendlyGreeting = /^(?:hola|holi|buen dia|buenos dias|buenas tardes|buenas noches|inicio)$/.test(lowerText);
