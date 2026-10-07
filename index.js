@@ -788,7 +788,22 @@ async function resolveTenant(dbInstance, phoneNumberId, wabaId) {
 }
 
 /**
- * 1. HEALTH & DIAGNOSTIC STATUS ENDPOINTS
+ function extractInboundMedia(message) {
+  const type = String(message?.type || '').trim().toLowerCase();
+  if (!['image', 'video', 'audio', 'document', 'sticker'].includes(type)) return null;
+  const payload = message?.[type] && typeof message[type] === 'object' ? message[type] : {};
+  const mediaId = payload.id ? String(payload.id).trim() : '';
+  if (!mediaId) return null;
+  return {
+    media_id: mediaId,
+    media_type: type,
+    media_mime_type: payload.mime_type ? String(payload.mime_type).trim() : null,
+    media_caption: payload.caption ? String(payload.caption).trim() : null,
+    media_filename: payload.filename ? String(payload.filename).trim() : null
+  };
+}
+
+* 1. HEALTH & DIAGNOSTIC STATUS ENDPOINTS
  */
 app.get('/', (req, res) => {
   res.json({
@@ -822,7 +837,50 @@ app.get('/api/status', (req, res) => {
 
 /**
  * 2. META WEBHOOK VERIFICATION HANDSHAKE
- * GET /webhook/whatsapp
+ app.get('/api/whatsapp/media/:mediaId', async (req, res) => {
+  const mediaId = String(req.params.mediaId || '').trim();
+  if (!mediaId || !db) return res.status(404).send('Media not found');
+
+  try {
+    const messageSnap = await db.collection('messages')
+      .where('media_id', '==', mediaId)
+      .limit(1)
+      .get();
+    if (messageSnap.empty) return res.status(404).send('Media not found');
+
+    const messageData = messageSnap.docs[0].data() || {};
+    const tenant = await resolveTenant(db, messageData.phone_number_id, messageData.waba_id);
+    if (!tenant?.accessToken) return res.status(503).send('WhatsApp media is not configured');
+
+    const metaResponse = await axios.get(
+      `https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(mediaId)}`,
+      { headers: { Authorization: `Bearer ${tenant.accessToken}` }, timeout: 10000 }
+    );
+    const mediaUrl = metaResponse.data?.url;
+    if (!mediaUrl) return res.status(404).send('Media URL not available');
+
+    const mediaResponse = await axios.get(mediaUrl, {
+      headers: { Authorization: `Bearer ${tenant.accessToken}` },
+      responseType: 'stream',
+      timeout: 20000
+    });
+    const contentType = messageData.media_mime_type || metaResponse.data?.mime_type || 'application/octet-stream';
+    res.set('Content-Type', contentType);
+    res.set('Cache-Control', 'private, max-age=300');
+    if (metaResponse.data?.file_size) res.set('Content-Length', String(metaResponse.data.file_size));
+    mediaResponse.data.on('error', error => {
+      console.warn(`WhatsApp media stream failed for ${mediaId}:`, error.message);
+      if (!res.headersSent) res.status(502).end();
+    });
+    mediaResponse.data.pipe(res);
+  } catch (error) {
+    const status = error.response?.status === 404 || error.response?.status === 400 ? 404 : 502;
+    console.warn(`WhatsApp media lookup failed for ${mediaId}:`, error.response?.data?.error?.message || error.message);
+    if (!res.headersSent) res.status(status).send(status === 404 ? 'Media not found' : 'Media temporarily unavailable');
+  }
+});
+
+* GET /webhook/whatsapp
  */
 app.get('/webhook/whatsapp', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -969,11 +1027,17 @@ app.post('/webhook/whatsapp', async (req, res) => {
     // Graph API recipient addressing requires the canonical 52XXXXXXXXXX form.
     if (/^521\d{10}$/.test(customerPhone)) customerPhone = `52${customerPhone.slice(3)}`;
     let customerName = contact?.profile?.name || `Usuario WhatsApp (+${customerPhone})`;
-    let messageText = message.text?.body || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || '';
+    
     const timestamp = message.timestamp ? new Date(parseInt(message.timestamp, 10) * 1000).toISOString() : new Date().toISOString();
 
     // 1. Strict Tenant Company & Credential Resolution
-    // Webhook events must ONLY be routed to a company that owns this verified phone_number_id.
+        const inboundMedia = extractInboundMedia(message);
+    let messageText = message.text?.body || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || inboundMedia?.media_caption || '';
+    if (!messageText && inboundMedia) {
+      const mediaLabels = { image: '📷 Imagen recibida', video: '🎥 Video recibido', audio: '🎙️ Audio recibido', document: '📄 Documento recibido', sticker: '🧩 Sticker recibido' };
+      messageText = mediaLabels[inboundMedia.media_type] || '📎 Archivo recibido';
+    }
+
     // Fallback to random companies or arbitrary WhatsApp records is strictly prohibited to prevent cross-tenant leakage.
     const tenant = await resolveTenant(db, phoneNumberId, wabaId);
 
@@ -1156,7 +1220,10 @@ app.post('/webhook/whatsapp', async (req, res) => {
       external_message_id: messageId,
       sender_type: 'customer',
       created_at: timestamp,
-      delivery_status: 'delivered'
+            delivery_status: 'delivered',
+      phone_number_id: phoneNumberId,
+      waba_id: wabaId,
+      ...(inboundMedia || {})
     };
 
     try {
