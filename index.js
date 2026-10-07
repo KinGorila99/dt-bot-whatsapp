@@ -2361,3 +2361,18 @@ app.post('/api/meta/embedded-signup/complete', authenticateUser, async (req, res
     res.status(502).json({ success: false, error: metaError?.message || 'Meta no pudo completar la conexión de WhatsApp.' });
   }
 });
+// Keep inbound WhatsApp media metadata available to the webhook and CRM.
+function extractInboundMedia(message) {
+  const type = String(message?.type || '').trim().toLowerCase();
+  if (!['image', 'video', 'audio', 'document', 'sticker'].includes(type)) return null;
+  const payload = message?.[type] && typeof message[type] === 'object' ? message[type] : {};
+  const mediaId = payload.id ? String(payload.id).trim() : '';
+  if (!mediaId) return null;
+  return {
+    media_id: mediaId,
+    media_type: type,
+    media_mime_type: payload.mime_type ? String(payload.mime_type).trim() : null,
+    media_caption: payload.caption ? String(payload.caption).trim() : null,
+    media_filename: payload.filename ? String(payload.filename).trim() : null
+  };
+}
