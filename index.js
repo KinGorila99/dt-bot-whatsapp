@@ -481,7 +481,7 @@ function getSprYearClarification(value) {
   const suggestedYear = numeric >= 3000 && numeric <= 3999 ? String(2000 + (numeric % 100)) : '';
   return { invalidYear, suggestedYear };
 }
-function isSprYearConfirmation(value) {
+function getSprConfirmationPart(value) { const normalized = normalizeBotText(value); const rules = [['la cabeza de motor', /\bcabeza(?:s)?\s+de\s+motor\b/], ['el motor', /\bmotor(?:es)?\b/], ['la tolva', /\btolva(?:s)?\b/], ['el faro de niebla', /\bfaro(?:s)?\s+(?:de\s+)?niebla\b/], ['el faro principal', /\bfaro(?:s)?\s+(?:principal|delantero|delantera)\b/], ['el faro', /\bfaro(?:s)?\b/], ['la calavera', /\bcalavera(?:s)?\b/], ['la lampara', /\blampara(?:s)?\b/], ['el amortiguador', /\bamortiguador(?:es)?\b/], ['la suspension', /\bsuspension\b/], ['la caja de direccion', /\bcaja\s+de\s+direccion\b/], ['la direccion', /\bdireccion\b/], ['el radiador', /\bradiador(?:es)?\b/], ['la bomba', /\bbomba(?:s)?\b/], ['el soporte', /\bsoporte(?:s)?\b/], ['la pieza', /\bpieza(?:s)?\b/]]; const match = rules.find(([, pattern]) => pattern.test(normalized)); return match ? match[0] : 'la pieza'; } function isSprYearConfirmation(value) {
   return /\b(si|correcto|correcta|exacto|exacta|afirmativo|asi)\b/.test(normalizeBotText(value));
 }
 // Search Shopify with useful vehicle and part terms instead of the full sentence.
@@ -1394,7 +1394,7 @@ Incluye:
             suggested_year: yearClarification.suggestedYear || null
           };
           yearConfirmationReply = yearClarification.suggestedYear
-            ? '\u00bfTe refieres al a\u00f1o ' + yearClarification.suggestedYear + '? Conf\u00edrmame y busco el amortiguador correcto. \U0001F50E'
+            ? '\u00bfTe refieres al a\u00f1o ' + yearClarification.suggestedYear + '? Conf\u00edrmame y busco ' + getSprConfirmationPart(catalogQueryText) + '. \U0001F50E'
             : 'No pude identificar el a\u00f1o. \u00bfCu\u00e1l es el a\u00f1o correcto para revisar esa pieza? \U0001F4C5';
         }
       }
