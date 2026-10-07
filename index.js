@@ -1074,7 +1074,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const timestamp = message.timestamp ? new Date(parseInt(message.timestamp, 10) * 1000).toISOString() : new Date().toISOString();
 
     // 1. Strict Tenant Company & Credential Resolution
-        const inboundMedia = extractInboundMedia(message);
+        
     let messageText = message.text?.body || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || inboundMedia?.media_caption || '';
     if (!messageText && inboundMedia) {
       const mediaLabels = { image: '📷 Imagen recibida', video: '🎥 Video recibido', audio: '🎙️ Audio recibido', document: '📄 Documento recibido', sticker: '🧩 Sticker recibido' };
