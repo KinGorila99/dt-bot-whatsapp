@@ -238,6 +238,22 @@ function isSeptemberInMexico() {
   return Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Mexico_City', month: 'numeric' }).format(new Date())) === 9;
 }
 
+function getMexicoCityDateParts(value = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Mexico_City',
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+  }).formatToParts(value).reduce((result, part) => {
+    if (part.type !== 'literal') result[part.type] = part.value;
+    return result;
+  }, {});
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
+}
+
+function isOctoberDtMarketingPromotionActive(value = new Date()) {
+  const mexicoNow = getMexicoCityDateParts(value);
+  return mexicoNow >= '2026-10-01T00:00:00' && mexicoNow < '2026-10-30T12:00:00';
+}
+
 function normalizeSprProduct(product) {
   const variants = Array.isArray(product?.variants) ? product.variants : [];
   const variant = variants[0] || {};
@@ -798,7 +814,7 @@ app.get('/api/status', (req, res) => {
     graph_api_version: GRAPH_API_VERSION,
     signature_verification: !!META_APP_SECRET ? 'enforced' : 'optional',
     database: db ? 'firebase_admin_authenticated' : 'uninitialized',
-    catalog_guard: '07330f6', catalog_search_guard: 'year-confirmation-20261007',
+    catalog_guard: '07330f6', catalog_search_guard: 'year-confirmation-20261007', marketing_promo_guard: 'halloween-october-20261007',
     unknown_product_guard: '7fb4779',
     greeting_guard: 'tenant-courtesy-20261006'
   });
@@ -1269,6 +1285,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
             const asksPrice = ['precio', 'cuanto', 'cuesta', 'costo', 'mensual', 'vale', 'tarifa', 'pago', 'acceso'].some(term => lowerText.includes(term));
       const asksPackage = lowerText.includes('paquete') || lowerText.includes('completo') || lowerText.includes('ambos') || lowerText.includes('los dos') || lowerText.includes('crm y bot') || lowerText.includes('bot y crm');
+      const asksPromotion = /\b(promocion|descuento|oferta|halloween|activacion\s+gratis)\b/.test(lowerText);
       const asksCrm = lowerText.includes('crm');
       const asksBot = lowerText.includes('bot') || lowerText.includes('chatbot') || lowerText.includes('chat bot') || lowerText.includes('whatsapp') || lowerText.includes('api chat');
       const isFriendlyGreeting = /^(?:hola|holi|buen dia|buenos dias|buenas tardes|buenas noches|inicio)$/.test(lowerText);
@@ -1307,7 +1324,24 @@ Incluye:
 
 ¿Quieres conocer el paquete completo o hablar con un asesor?`;
 
-      const packageReply = `🚀 *Paquete Completo DT Marketing*
+      const isDtMarketingTenant = /dt\s*marketing/i.test(`${tenantDisplayName} ${tenantCompany?.nombre || ''} ${botSettings?.business_name || ''} ${botSettings?.business_description || ''}`);
+      const dtMarketingOctoberPromoActive = isDtMarketingTenant && isOctoberDtMarketingPromotionActive();
+      const packageReply = dtMarketingOctoberPromoActive
+        ? `🎃 *DESCUENTO DE MIEDO* 👻
+
+Contrata *DT CRM Core + DT Bot Core* y obtén:
+
+👻 *Activación GRATIS* ~$1,999 MXN~
+💬 Atención automatizada 24/7
+📊 Prospectos y clientes organizados
+📈 Seguimiento de oportunidades
+🔗 Bot + CRM trabajando juntos
+
+🔥 *$2,499 MXN al mes*
+📅 Válida durante octubre.
+
+📲 Solicita una demostración con *DT Marketing*.`
+        : `🚀 *Paquete Completo DT Marketing*
 
 💰 *$2,499 MXN mensuales + activación*
 
@@ -1418,7 +1452,7 @@ Incluye:
           ? 'Cuando necesites otra pieza, aqu\u00ed estaremos para ayudarte. \uD83D\uDE97\uD83D\uDD27'
           : 'Cuando necesites algo m\u00e1s, aqu\u00ed estaremos para ayudarte.';
         botReply = '\uD83D\uDE0A \u00a1Con gusto! Gracias a ti por escribir a *' + publicBusinessName + '*.\n\n' + courtesyFollowup;
-      } else if (asksPackage) {
+      } else if (asksPackage || (asksPromotion && !isSprAutopartesTenant)) {
         botReply = packageReply;
       } else if (asksBot && (asksPrice || lowerText.includes('y el') || lowerText.includes('incluye') || lowerText.includes('funciona') || lowerText.includes('informacion') || lowerText.includes('información') || lowerText.includes('servicio'))) {
         botReply = botReplyText;
