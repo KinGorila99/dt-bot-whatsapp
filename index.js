@@ -814,7 +814,7 @@ app.get('/api/status', (req, res) => {
     graph_api_version: GRAPH_API_VERSION,
     signature_verification: !!META_APP_SECRET ? 'enforced' : 'optional',
     database: db ? 'firebase_admin_authenticated' : 'uninitialized',
-    catalog_guard: '07330f6', catalog_search_guard: 'year-confirmation-20261007', marketing_promo_guard: 'halloween-october-20261007',
+    catalog_guard: '07330f6', catalog_search_guard: 'year-confirmation-20261007', marketing_promo_guard: 'halloween-october-20261007-promo-keyword',
     unknown_product_guard: '7fb4779',
     greeting_guard: 'tenant-courtesy-20261006'
   });
