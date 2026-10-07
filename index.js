@@ -1205,7 +1205,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
     // Check for Human Handoff Intent
     const lowerText = normalizeBotText(messageText);
     const humanKeywords = ['asesor', 'humano', 'persona', 'agente', 'ejecutivo', 'hablar con alguien', 'representante', 'ayuda humana', 'transferir'];
-    const wantsHuman = humanKeywords.some(kw => lowerText.includes(kw));
+    const wantsHuman = humanKeywords.some(kw => lowerText.includes(kw)); const isFriendlyGreeting = /^(?:(?:hola|holi|hey|hello)\s+)?(?:hola|holi|hey|hello|buen dia|buenos dias|buenas tardes|buenas noches|inicio)$/.test(lowerText); const isCourtesyMessage = /^(?:(?:muchas|mil)\s+)?gracias(?:\s+(?:por|igualmente|de todos modos|todo)\b.*)?$/.test(lowerText) || /^(?:(?:te|le)\s+)?agradezco\b/.test(lowerText);
 
     let botReply = '';
 
@@ -1236,7 +1236,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
       try {
         await db.doc(`followups/${taskId}`).set(taskData);
       } catch (e) {}
-    } else if (botSettings?.working_hours && !checkWorkingHours(botSettings.working_hours)) {
+    } else if (botSettings?.working_hours && !checkWorkingHours(botSettings.working_hours) && !isFriendlyGreeting && !isCourtesyMessage) {
       // Out of hours
       botReply = botSettings.out_of_hours_message || `¡Hola! Gracias por comunicarte. En este momento nos encontramos fuera de horario de atención comercial, pero ya registramos tu consulta y un asesor te responderá a primera hora.`;
     } else {
@@ -1402,11 +1402,11 @@ Incluye:
       if (sprCatalogReply) {
         botReply = sprCatalogReply;
       } else if (isFriendlyGreeting) {
-        const greetingPrefix = lowerText === 'buenos dias'
+        const greetingPrefix = lowerText.includes('buenos dias')
           ? '\u2600\ufe0f \u00a1Muy buenos d\u00edas!'
-          : lowerText === 'buenas tardes'
+          : lowerText.includes('buenas tardes')
             ? '\uD83C\uDF24\ufe0f \u00a1Muy buenas tardes!'
-            : lowerText === 'buenas noches'
+            : lowerText.includes('buenas noches')
               ? '\uD83C\uDF19 \u00a1Muy buenas noches!'
               : '\uD83D\uDC4B \u00a1Hola!';
         const helpPrompt = isSprAutopartesTenant
