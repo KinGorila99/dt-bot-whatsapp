@@ -835,6 +835,49 @@ app.get('/api/status', (req, res) => {
   });
 });
 
+app.get('/api/whatsapp/media/:mediaId', async (req, res) => {
+  const mediaId = String(req.params.mediaId || '').trim();
+  if (!mediaId || !db) return res.status(404).send('Media not found');
+
+  try {
+    const messageSnap = await db.collection('messages')
+      .where('media_id', '==', mediaId)
+      .limit(1)
+      .get();
+    if (messageSnap.empty) return res.status(404).send('Media not found');
+
+    const messageData = messageSnap.docs[0].data() || {};
+    const tenant = await resolveTenant(db, messageData.phone_number_id, messageData.waba_id);
+    if (!tenant?.accessToken) return res.status(503).send('WhatsApp media is not configured');
+
+    const metaResponse = await axios.get(
+      `https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(mediaId)}`,
+      { headers: { Authorization: `Bearer ${tenant.accessToken}` }, timeout: 10000 }
+    );
+    const mediaUrl = metaResponse.data?.url;
+    if (!mediaUrl) return res.status(404).send('Media URL not available');
+
+    const mediaResponse = await axios.get(mediaUrl, {
+      headers: { Authorization: `Bearer ${tenant.accessToken}` },
+      responseType: 'stream',
+      timeout: 20000
+    });
+    const contentType = messageData.media_mime_type || metaResponse.data?.mime_type || 'application/octet-stream';
+    res.set('Content-Type', contentType);
+    res.set('Cache-Control', 'private, max-age=300');
+    if (metaResponse.data?.file_size) res.set('Content-Length', String(metaResponse.data.file_size));
+    mediaResponse.data.on('error', error => {
+      console.warn(`WhatsApp media stream failed for ${mediaId}:`, error.message);
+      if (!res.headersSent) res.status(502).end();
+    });
+    mediaResponse.data.pipe(res);
+} catch (error) {
+    const status = error.response?.status === 404 || error.response?.status === 400 ? 404 : 502;
+    console.warn(`WhatsApp media lookup failed for ${mediaId}:`, error.response?.data?.error?.message || error.message);
+    if (!res.headersSent) res.status(status).send(status === 404 ? 'Media not found' : 'Media temporarily unavailable');
+}
+});
+
 /**
  * 2. META WEBHOOK VERIFICATION HANDSHAKE
  app.get('/api/whatsapp/media/:mediaId', async (req, res) => {
