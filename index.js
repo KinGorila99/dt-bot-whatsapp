@@ -176,7 +176,7 @@ const SPR_PART_SYNONYM_GROUPS = [
   { canonical: 'flecha', aliases: ['flecha', 'semieje', 'eje homocinetico'] },
   { canonical: 'faro', aliases: ['faro delantero', 'faro', 'headlamp'] },
   { canonical: 'calavera', aliases: ['calavera', 'mica trasera', 'stop', 'rear lamp'] },
-  { canonical: 'fascia', aliases: ['fascia', 'defensa', 'bumper'] },
+  { canonical: 'fascia', aliases: ['fascia', 'facia', 'fasia', 'faccia', 'defensa', 'bumper'] },
   { canonical: 'espejo', aliases: ['espejo', 'retrovisor'] },
   { canonical: 'soporte de motor', aliases: ['soporte de motor', 'base de motor', 'taco de motor'] },
   { canonical: 'embrague', aliases: ['embrague', 'clutch', 'repset'] },
@@ -199,7 +199,7 @@ function canonicalizeSprPartSynonyms(value) {
   for (const replacer of SPR_PART_SYNONYM_REPLACERS) {
     normalized = normalized.replace(replacer.pattern, ` ${replacer.canonical} `);
   }
-  return normalized.replace(/\s+/g, ' ').trim();
+  const vehicleAliases = new Map([['kickn', 'kicks'], ['kikcs', 'kicks'], ['kiccks', 'kicks']]); normalized = normalized.split(/\s+/).map(token => vehicleAliases.get(token) || token).join(' '); return normalized.replace(/\s+/g, ' ').trim();
 }
 
 
