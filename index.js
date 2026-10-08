@@ -1412,11 +1412,26 @@ app.post('/webhook/whatsapp', async (req, res) => {
     // Check for Human Handoff Intent
     const lowerText = normalizeBotText(messageText);
     const humanKeywords = ['asesor', 'humano', 'persona', 'agente', 'ejecutivo', 'hablar con alguien', 'representante', 'ayuda humana', 'transferir'];
-    const isShopifySuspensionIntro = /^hola vengo de spr autopartes y necesito asesoria para suspension marca modelo y ano$/.test(lowerText); const isShopifyPartsIntro = /^hola vengo de spr autopartes y me gustaria consultar sobre algunas piezas$/.test(lowerText); const isShopifyPrefillIntro = isShopifySuspensionIntro || isShopifyPartsIntro; const wantsHuman = !isShopifyPrefillIntro && humanKeywords.some(kw => lowerText.includes(kw)); const isFriendlyGreeting = /^(?:(?:hola|holi|hey|hello)\s+)?(?:hola|holi|hey|hello|buen dia|buenos dias|buenas tardes|buenas noches|inicio)$/.test(lowerText); const isCourtesyMessage = /^(?:(?:muchas|mil)\s+)?gracias(?:\s+(?:por|igualmente|de todos modos|todo)\b.*)?$/.test(lowerText) || /^(?:(?:te|le)\s+)?agradezco\b/.test(lowerText);
+    // Shopify prefills can arrive with punctuation or small wording variations.
+    // Normalize them before any catalog, knowledge-base, or human-handoff rule.
+    const isShopifySuspensionIntro = /^hola\s+vengo\s+de\s+spr\s+autopartes\s+y\s+necesito\s+asesoria\s+para\s+suspension(?:\s+marca\s+modelo\s+y\s+ano)?$/.test(lowerText);
+    const isShopifyPartsIntro = /^hola\s+vengo\s+de\s+spr\s+autopartes\s+y\s+me\s+gustaria\s+consultar\s+sobre\s+(?:algunas|unas|varias)?\s*piezas?$/.test(lowerText);
+    const isShopifyPrefillIntro = isShopifySuspensionIntro || isShopifyPartsIntro;
+    const wantsHuman = !isShopifyPrefillIntro && humanKeywords.some(kw => lowerText.includes(kw));
+    const isFriendlyGreeting = /^(?:(?:hola|holi|hey|hello)\s+)?(?:hola|holi|hey|hello|buen dia|buenos dias|buenas tardes|buenas noches|inicio)$/.test(lowerText); const isCourtesyMessage = /^(?:(?:muchas|mil)\s+)?gracias(?:\s+(?:por|igualmente|de todos modos|todo)\b.*)?$/.test(lowerText) || /^(?:(?:te|le)\s+)?agradezco\b/.test(lowerText);
 
     let botReply = '';
 
-    if (wantsHuman) {
+    if (isShopifyPrefillIntro) {
+      console.log(`[Shopify Prefill Accepted] ${isShopifySuspensionIntro ? 'suspension' : 'parts'} | Company: ${companyId}`);
+      botReply = isShopifySuspensionIntro
+        ? `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo con tu consulta de suspensión.
+
+🚗 Compárteme la *marca, modelo y año* de tu vehículo para revisar la pieza correcta.`
+        : `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo.
+
+🔧 ¿Qué pieza necesitas consultar? Compárteme la *marca, modelo y año* de tu vehículo para orientarte mejor.`;
+    } else if (wantsHuman) {
       convData.human_handoff = true;
       convData.bot_enabled = false;
       convData.status = 'pending';
