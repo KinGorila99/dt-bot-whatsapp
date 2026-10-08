@@ -159,6 +159,17 @@ function normalizeBotText(value) {
     .trim();
 }
 
+function isFriendlyGreetingText(value) {
+  const text = normalizeBotText(value);
+  return /^(?:(?:hola|holi|hey|hello)\s+)?(?:hola|holi|hey|hello|buen|buen dia|buenos|buenos dias|buenas|buenas tardes|buenas noches|inicio)$/.test(text);
+}
+
+function isCourtesyText(value) {
+  const text = normalizeBotText(value);
+  return /^(?:(?:muchas|muchisimas|mil)\s+)?gracias(?:\s+(?:por|igualmente|de todos modos|todo|tu|su|te|le)\b.*)?$/.test(text)
+    || /^(?:(?:te|le)\s+)?agradezco\b/.test(text);
+}
+
 // Customer language varies widely by region and by shop. Keep these aliases
 // in one place so the catalog matcher can search the canonical part name while
 // still accepting the wording a customer actually uses.
@@ -180,7 +191,7 @@ const SPR_PART_SYNONYM_GROUPS = [
   { canonical: 'espejo', aliases: ['espejo', 'retrovisor'] },
   { canonical: 'soporte de motor', aliases: ['soporte de motor', 'base de motor', 'taco de motor'] },
   { canonical: 'embrague', aliases: ['embrague', 'clutch', 'repset'] },
-  { canonical: 'tornillo', aliases: ['tornillo', 'estabilizador', 'cacahuate'] }
+  { canonical: 'tornillo', aliases: ['tornillo', 'estabilizador', 'cacahuate', 'cachuate', 'cahuate', 'cacuate'] }
 ];
 
 function escapeSprRegex(value) {
@@ -199,7 +210,16 @@ function canonicalizeSprPartSynonyms(value) {
   for (const replacer of SPR_PART_SYNONYM_REPLACERS) {
     normalized = normalized.replace(replacer.pattern, ` ${replacer.canonical} `);
   }
-  const vehicleAliases = new Map([['kickn', 'kicks'], ['kikcs', 'kicks'], ['kiccks', 'kicks']]); normalized = normalized.split(/\s+/).map(token => vehicleAliases.get(token) || token).join(' '); return normalized.replace(/\s+/g, ' ').trim();
+  // Correct a small set of common vehicle-name typos only after the normal
+  // accent and part-synonym normalization. This keeps the matcher tolerant
+  // without allowing unrelated words to be guessed as a make or model.
+  const vehicleAliases = new Map([
+    ['kickn', 'kicks'],
+    ['kikcs', 'kicks'],
+    ['kiccks', 'kicks']
+  ]);
+  normalized = normalized.split(/\s+/).map(token => vehicleAliases.get(token) || token).join(' ');
+  return normalized.replace(/\s+/g, ' ').trim();
 }
 
 
@@ -470,8 +490,10 @@ function isSprEngineSpecificationToken(token) {
 }
 
 function findSprEngineMatches(items, lowerText) {
+  // Match against the focused request so greetings, courtesy and question
+  // wording cannot become accidental vehicle/model tokens.
   const normalizedQuery = buildSprFocusedSearchQuery(lowerText);
-  const stopWords = new Set(['marca', 'modelo', 'ano', 'año', 'version', 'quiero', 'quieres', 'busco', 'buscando', 'necesito', 'ocupo', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'engine', 'series', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo', 'producto', 'productos', 'catalogo', 'catalog', 'refaccion', 'refacciones', 'pieza', 'piezas', 'stock', 'completo', 'completa', 'todo', 'toda', 'todos', 'todas', 'ver', 'muestrame', 'muéstrame', 'informacion', 'información', 'que', 'qué', 'delantero', 'delantera', 'trasero', 'trasera', 'izquierdo', 'izquierda', 'derecho', 'derecha', 'lado', 'principal', 'niebla', 'antiniebla', 'no', 'sin', 'valvula', 'valvulas', 'cil', 'cilindro', 'cilindros', 'con', 'abs', 'fwd', 'birlo', 'birlos', 'ocupo']);
+  const stopWords = new Set(['quiero', 'quieres', 'busco', 'buscando', 'necesito', 'ocupo', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'engine', 'series', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo', 'producto', 'productos', 'catalogo', 'catalog', 'refaccion', 'refacciones', 'pieza', 'piezas', 'stock', 'completo', 'completa', 'todo', 'toda', 'todos', 'todas', 'ver', 'muestrame', 'muéstrame', 'informacion', 'información', 'que', 'qué', 'marca', 'modelo', 'ano', 'año', 'version', 'delantero', 'delantera', 'trasero', 'trasera', 'izquierdo', 'izquierda', 'derecho', 'derecha', 'lado', 'principal', 'niebla', 'antiniebla', 'no', 'sin', 'valvula', 'valvulas', 'cil', 'cilindro', 'cilindros', 'con', 'abs', 'fwd', 'birlo', 'birlos', 'ocupo']);
   const tokens = normalizedQuery.split(' ').filter(token => token.length >= 3 && !stopWords.has(token));
   const categoryRules = [
     { key: 'motor', pattern: /\bmotor(?:es)?\b/ },
@@ -491,7 +513,7 @@ function findSprEngineMatches(items, lowerText) {
     { key: 'horquilla', pattern: /\b(?:horquilla(?:s)?|brazo\s+(?:de\s+)?(?:suspension|control)|tijera(?:s)?|meseta(?:s)?)\b/ },
     { key: 'flecha', pattern: /\b(?:flecha(?:s)?|semieje(?:s)?|eje\s+homocinetico)\b/ },
     { key: 'fascia', pattern: /\b(?:fascia(?:s)?|defensa(?:s)?|bumper(?:s)?)\b/ },
-    { key: 'tornillo', pattern: /\b(?:tornillo(?:s)?|estabilizador(?:es)?|cacahuate(?:s)?)\b/ },
+    { key: 'tornillo', pattern: /\b(?:tornillo(?:s)?|estabilizador(?:es)?|cacahuate(?:s)?|cachuate(?:s)?|cahuate(?:s)?|cacuate(?:s)?)\b/ },
     { key: 'soporte', pattern: /\bsoporte(?:s)?\b/ },
     { key: 'iluminacion', pattern: /\b(faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?)\b/ },
     { key: 'carroceria', pattern: /\b(parrilla(?:s)?|rejilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria)\b/ }
@@ -499,7 +521,14 @@ function findSprEngineMatches(items, lowerText) {
   let requestedCategory = categoryRules.find(rule => rule.pattern.test(normalizedQuery));
   const requestedYears = [...normalizedQuery.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => Number(match[0]));
   const requestedOrientation = normalizedQuery.match(/\b(izquierdo|izquierda|derecho|derecha|delantero|delantera|trasero|trasera)\b/)?.[1] || '';
-  const negativeFogRequest = /\b(?:no|sin|evitar|ningun|ninguna)\b(?:\s+\w+){0,8}\s+(?:faro\s+de\s+)?niebla\b/.test(normalizedQuery); if (negativeFogRequest) { const nonLightingCategory = categoryRules.find(rule => rule.key !== 'iluminacion' && rule.pattern.test(normalizedQuery)); if (nonLightingCategory) requestedCategory = nonLightingCategory; }
+  const negativeFogRequest = /\b(?:no|sin|evitar|ningun|ninguna)\b(?:\s+\w+){0,8}\s+(?:faro\s+de\s+)?niebla\b/.test(normalizedQuery);
+  // In a request such as "rejilla sin faro de niebla", the fog phrase is a
+  // negative feature of the grille. It must not turn the request into a fog
+  // lamp search or discard the grille as an unrelated lighting product.
+  if (negativeFogRequest) {
+    const nonLightingCategory = categoryRules.find(rule => rule.key !== 'iluminacion' && rule.pattern.test(normalizedQuery));
+    if (nonLightingCategory) requestedCategory = nonLightingCategory;
+  }
   const asksFogLight = !negativeFogRequest && /\b(?:faro\s+de\s+niebla|niebla|antiniebla)\b/.test(normalizedQuery);
   const asksMainLight = !negativeFogRequest && !asksFogLight && /\b(?:faro|faros|principal|delantero|delantera)\b/.test(normalizedQuery);
   const wantsHead = /\b(cabeza(?:s)?|culata(?:s)?)\b/.test(normalizedQuery);
@@ -513,8 +542,8 @@ function findSprEngineMatches(items, lowerText) {
   const onlyEngineProducts = rows => wantsMotor
     ? rows.filter(row => row.item.discountEligible === true
       && !motorAccessoryPattern.test(row.haystack)
-      && /(?:motor|engine(?:\s+series)?)/.test(row.haystack)
-      && !/(?:cabeza|culata)/.test(row.haystack))
+      && /\b(?:motor|engine(?:\s+series)?)\b/.test(row.haystack)
+      && !/\b(?:cabeza|culata)\b/.test(row.haystack))
     : rows;
   const itemHasFogLight = item => /\b(?:niebla|antiniebla)\b/.test(item.normalizedTitle);
   const itemMatchesRequestedYear = item => {
@@ -528,8 +557,9 @@ function findSprEngineMatches(items, lowerText) {
   const itemMatchesRequestedOrientation = item => {
     if (!requestedOrientation) return true;
     const title = item.normalizedTitle || '';
-    if (requestedOrientation.startsWith('izquier')) return /\bizquierd[oa]\b/.test(title);
-    if (requestedOrientation.startsWith('derech')) return /\bderech[oa]\b/.test(title);
+    const bilateral = /\bamb[oa]s\s+lados?\b/.test(title) || /\bamb[oa]s\b/.test(title);
+    if (requestedOrientation.startsWith('izquier')) return /\bizquierd[oa]\b/.test(title) || bilateral;
+    if (requestedOrientation.startsWith('derech')) return /\bderech[oa]\b/.test(title) || bilateral;
     if (requestedOrientation.startsWith('delanter')) return /\b(?:delanter[oa]|frontal)\b/.test(title);
     if (requestedOrientation.startsWith('traser')) return /\btraser[oa]\b/.test(title);
     return true;
@@ -616,7 +646,7 @@ function filterStrictSprVehicleMatches(matches, query) {
   const requestedYears = [...normalized.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => Number(match[0]));
   const qualifierPattern = /\b(remanufacturad[oa]s?|reconstruid[oa]s?|usad[oa]s?|nuev[oa]s?|complet[oa]s?|original(?:es)?|generico(?:s)?|generica(?:s)?)\b/g;
   const identityTokens = normalized
-    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ').replace(SPR_CATALOG_EXTRA_FILLER_PATTERN, ' ').replace(SPR_CATALOG_EXTRA_FILLER_PATTERN, ' ').replace(SPR_OPTIONAL_VEHICLE_WORDS_PATTERN, ' ').replace(qualifierPattern, ' ')
+    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ').replace(SPR_CATALOG_EXTRA_FILLER_PATTERN, ' ').replace(SPR_OPTIONAL_VEHICLE_WORDS_PATTERN, ' ').replace(qualifierPattern, ' ')
     .replace(/\b\d{4}\b/g, ' ')
     .split(/\s+/)
     .filter(token => (token.length >= 3 || (token.length >= 2 && /\d/.test(token))) && !['spr', 'ocupo'].includes(token))
@@ -650,7 +680,10 @@ function getSprConfirmationPart(value) { const normalized = canonicalizeSprPartS
 // Search Shopify with useful vehicle and part terms instead of the full sentence.
 // The catalog search is sensitive to filler words and trim details, while make/model,
 // year, part and side are the terms that identify the item.
-const SPR_SEARCH_FILLER_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|me|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|por|favor|que|cotizacion|cotizar|precio|precios|cuanto|cuesta|costo|disponible|disponibilidad|stock|marca|modelo|ano|version|articulo|articulos|pieza|piezas|refaccion|refacciones|producto|productos|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|vengo|spr|autopartes|asesoria|hola|holi|hey|buen|buenos|buenas|dia|dias|puedes|pueden|podrias|podrian|consultar|consulta|ayuda|ayudar|dime|tambien|porfa|porfavor|de|a|y)\b/gi;
+// Shopify recibe únicamente términos que identifican el artículo. Descartar
+// la redacción de la pregunta evita que el buscador interprete "para mi carro"
+// o "marca/modelo/año" como parte del nombre del producto.
+const SPR_SEARCH_FILLER_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|me|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|por|favor|que|cotizacion|cotizar|precio|precios|cuanto|cuesta|costo|disponible|disponibilidad|stock|marca|modelo|ano|version|articulo|articulos|pieza|piezas|refaccion|refacciones|producto|productos|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|vengo|spr|autopartes|asesoria|hola|holi|hey|buen|buenos|buenas|dia|dias|puedes|pueden|podrias|podrian|consultar|consulta|ayuda|ayudar|dime|tambien|porfa|porfavor|de|y)\b/gi;
 function buildSprFocusedSearchQuery(value) {
   const normalized = canonicalizeSprPartSynonyms(value);
   const focused = normalized
@@ -680,18 +713,25 @@ function buildSprCatalogSearchQueries(value) {
     { pattern: /\b(?:direccion|terminal(?:es)?|rotula(?:s)?)\b/, terms: ['direccion', 'terminal'] },
     { pattern: /\b(?:radiador(?:es)?|enfriamiento)\b/, terms: ['radiador'] },
     { pattern: /\b(?:motor(?:es)?|cabeza(?:s)?|culata(?:s)?)\b/, terms: ['motor', 'cabeza'] },
-    { pattern: /\b(?:bieleta(?:s)?|junta\s+homocinetica|espiga(?:s)?|horquilla(?:s)?|flecha(?:s)?|fascia(?:s)?|tornillo(?:s)?)\b/, terms: ['bieleta', 'junta', 'horquilla', 'flecha', 'fascia', 'tornillo'] }
+    { pattern: /\b(?:bieleta(?:s)?|junta\s+homocinetica|espiga(?:s)?|horquilla(?:s)?|flecha(?:s)?|fascia(?:s)?|tornillo(?:s)?|estabilizador(?:es)?|cacahuate(?:s)?|cachuate(?:s)?)\b/, terms: ['bieleta', 'junta', 'horquilla', 'flecha', 'fascia', 'tornillo', 'tornillo estabilizador'] }
   ];
   const partGroup = partGroups.find(group => group.pattern.test(normalized));
   const vehicleText = buildSprFocusedSearchQuery(normalized)
     .replace(partGroup?.pattern || /$^/, ' ')
     .replace(/\b(?:hola|vengo|spr|autopartes|asesoria|suspension|marca|modelo|ano|a[nñ]o|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atras|con|sin|abs|fwd|birlo|birlos)\b/g, ' ')
-    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ').replace(SPR_CATALOG_EXTRA_FILLER_PATTERN, ' ')
+    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+  const requestedPartTerm = partGroup?.terms.find(term => new RegExp(`\\b${escapeSprRegex(term)}\\b`).test(normalized));
+  const relatedPartTerms = requestedPartTerm === 'tornillo' && partGroup?.terms.includes('tornillo estabilizador')
+    ? ['tornillo estabilizador']
+    : [];
+  const orderedPartTerms = requestedPartTerm
+    ? [requestedPartTerm, ...relatedPartTerms, ...partGroup.terms.filter(term => term !== requestedPartTerm && !relatedPartTerms.includes(term))]
+    : (partGroup?.terms || []);
   const candidates = [focused, originalFocused];
   if (partGroup && vehicleText) {
-    for (const term of partGroup.terms) {
+    for (const term of orderedPartTerms) {
       // Search in both word orders. Shopify does not consistently rank a
       // title the same way when the part precedes or follows the vehicle.
       candidates.push(`${term} ${vehicleText}`);
@@ -707,18 +747,22 @@ function buildSprCatalogSearchQueries(value) {
 // the customer's previous catalog request. Keep the vehicle and part from
 // that previous turn so a side/orientation answer cannot jump to another
 // make or model.
-const SPR_CATALOG_CONTEXT_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|producto(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|maza(?:s)?|balero(?:s)?|bieleta(?:s)?|junta\s+homocinetica|horquilla(?:s)?|flecha(?:s)?|fascia(?:s)?|tornillo(?:s)?|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carrocer[ií]a)\b/;
+const SPR_CATALOG_CONTEXT_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|producto(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|maza(?:s)?|balero(?:s)?|bieleta(?:s)?|junta\s+homocinetica|horquilla(?:s)?|flecha(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|tornillo(?:s)?|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carrocer[ií]a)\b/;
 const SPR_CATALOG_REFINEMENT_PATTERN = /\b(delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atr[aá]s|modelo|a[nñ]o|versi[oó]n|principal|niebla|antiniebla|motor)\b/;
 
 // Do not guess a vehicle from a generic part request. Ask for the vehicle
 // before searching so the bot cannot return an unrelated make or model.
-const SPR_CATALOG_GENERIC_WORDS_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|que|qué|por|favor|de|precio|precios|cuanto|cu[aá]nto|cuesta|costo|cotizacion|cotizaci[oó]n|cotizar|comprar|compra|nuevo|nueva|disponible|disponibilidad|stock|catalogo|cat[aá]logo|producto|productos|pieza|piezas|refaccion|refacciones|motor|motores|cabeza|cabezas|culata|engine|series|amortiguador|amortiguadores|suspension|freno|frenos|balata|balatas|pastilla|pastillas|aceite|lubricante|lubricantes|direccion|terminal|terminales|rotula|rotulas|radiador|radiadores|bomba|bombas|turbo|turbos|embrague|clutch|maza|mazas|balero|baleros|bieleta|bieletas|junta|homocinetica|horquilla|horquillas|flecha|flechas|fascia|fascias|soporte|soportes|faro|faros|niebla|antiniebla|principal|calavera|calaveras|lampara|lamparas|luz|luces|espejo|espejos|parrilla|parrillas|defensa|defensas|tornillo|tornillos|cofre|salpicadera|salpicaderas|carroceria|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atras|modelo|ano|version|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|camiones|completo|completa|todo|toda|todos|todas|no|sin|evitar|ningun|ninguna)\b/gi;
-const SPR_CATALOG_EXTRA_FILLER_PATTERN = /\b(hola|holi|hey|hello|buen|buenos|buenas|dia|dias|vengo|spr|autopartes|asesoria|marca|modelo|ano|version|puedes|pueden|podrias|podrian|consultar|consulta|ayuda|ayudar|dime|tambien|porfa|porfavor|articulo|articulos|refaccion|refacciones|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|camiones|remanufacturad[oa]s?|reconstruid[oa]s?|usad[oa]s?|nuev[oa]s?|complet[oa]s?|original(?:es)?|generico(?:s)?|generica(?:s)?|de|a|y)\b/gi; const SPR_VEHICLE_MAKES = new Set(['nissan', 'ford', 'chevrolet', 'chevy', 'volkswagen', 'vw', 'toyota', 'honda', 'kia', 'hyundai', 'dodge', 'chrysler', 'jeep', 'mazda', 'mitsubishi', 'suzuki', 'seat', 'renault', 'peugeot', 'fiat', 'ram', 'gmc', 'volvo', 'audi', 'bmw', 'mercedes', 'mercedesbenz', 'isuzu', 'subaru', 'lincoln', 'cadillac', 'buick', 'acura', 'infiniti', 'lexus', 'porsche', 'mg', 'byd']);
+const SPR_CATALOG_GENERIC_WORDS_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|que|qué|por|favor|de|precio|precios|cuanto|cu[aá]nto|cuesta|costo|cotizacion|cotizaci[oó]n|cotizar|comprar|compra|nuevo|nueva|disponible|disponibilidad|stock|catalogo|cat[aá]logo|producto|productos|pieza|piezas|refaccion|refacciones|motor|motores|cabeza|cabezas|culata|engine|series|amortiguador|amortiguadores|suspension|freno|frenos|balata|balatas|pastilla|pastillas|aceite|lubricante|lubricantes|direccion|terminal|terminales|rotula|rotulas|radiador|radiadores|bomba|bombas|turbo|turbos|embrague|clutch|maza|mazas|balero|baleros|bieleta|bieletas|junta|homocinetica|horquilla|horquillas|flecha|flechas|guia|guias|fascia|fascias|soporte|soportes|faro|faros|niebla|antiniebla|principal|calavera|calaveras|lampara|lamparas|luz|luces|espejo|espejos|parrilla|parrillas|defensa|defensas|tornillo|tornillos|cofre|salpicadera|salpicaderas|carroceria|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atras|modelo|ano|version|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|camiones|completo|completa|todo|toda|todos|todas|no|sin|evitar|ningun|ninguna)\b/gi;
+// Conversational words are removed only from vehicle-identity checks. They
+// must never make a valid catalog request look like a different vehicle.
+const SPR_CATALOG_EXTRA_FILLER_PATTERN = /\b(hola|holi|hey|hello|buen|buenos|buenas|dia|dias|vengo|spr|autopartes|asesoria|marca|modelo|ano|version|puedes|pueden|podrias|podrian|consultar|consulta|ayuda|ayudar|dime|tambien|porfa|porfavor|articulo|articulos|refaccion|refacciones|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|camiones|remanufacturad[oa]s?|reconstruid[oa]s?|usad[oa]s?|nuev[oa]s?|complet[oa]s?|original(?:es)?|generico(?:s)?|generica(?:s)?|de|a|y)\b/gi;
+const SPR_VEHICLE_MAKES = new Set(['nissan', 'ford', 'chevrolet', 'chevy', 'volkswagen', 'vw', 'toyota', 'honda', 'kia', 'hyundai', 'dodge', 'chrysler', 'jeep', 'mazda', 'mitsubishi', 'suzuki', 'seat', 'renault', 'peugeot', 'fiat', 'ram', 'gmc', 'volvo', 'audi', 'bmw', 'mercedes', 'mercedesbenz', 'isuzu', 'subaru', 'lincoln', 'cadillac', 'buick', 'acura', 'infiniti', 'lexus', 'porsche', 'mg', 'byd']);
 
 function hasSprVehicleReference(value) {
   const normalized = normalizeBotText(value)
     .replace(/\b(?:19|20)\d{2}\b/g, ' ')
-    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ').replace(SPR_CATALOG_EXTRA_FILLER_PATTERN, ' ');
+    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
+    .replace(SPR_CATALOG_EXTRA_FILLER_PATTERN, ' ');
   const vehicleTokens = normalized.split(/\s+/).filter(token => token.length >= 2);
   if (!vehicleTokens.length || vehicleTokens.every(token => SPR_VEHICLE_MAKES.has(token))) return false;
   return true;
@@ -777,8 +821,39 @@ function isUnlistedSprProductRequest(value) {
   return residual.split(' ').filter(token => token.length >= 3).length >= 1;
 }
 
-function isSprStoreLocationQuestion(value){const query=normalizeBotText(value);const asksLocation=/\b(ubicacion|ubicados|donde estan|donde se encuentran|sucursal|domicilio|local|tienda|oficina|como llego)\b/.test(query)||/\bdireccion\s+(?:del|de la)\s+(?:local|sucursal|negocio|tienda|oficina|empresa)\b/.test(query)||/\b(?:cual es|dime|me compartes|me das|comparteme|compartenos)\s+(?:la\s+|su\s+)?direccion\b/.test(query);if(!asksLocation)return false;return !(SPR_CATALOG_CONTEXT_PATTERN.test(query)&&hasSprVehicleReference(query)&&!query.includes('local')&&!query.includes('sucursal')&&!query.includes('negocio')&&!query.includes('tienda')&&!query.includes('oficina')&&!query.includes('empresa')); } function buildSprFaqReply(value,isSprAutopartesTenant){if(!isSprAutopartesTenant)return '';const query=normalizeBotText(value);if(isSprStoreLocationQuestion(query))return '📍 *Estamos ubicados en Querétaro, México.* 🚚 Realizamos envíos a todo México.';if(/\b(horario|horarios|hora|horas|abren|cierran|abierto|abiertos|atienden|atencion)\b/.test(query))return 'Atendemos de *Lunes a Sábado* de *9:00 am* a *7:30 pm*. ✅
-Nuestro canal de WhatsApp y redes sociales recibe consultas las *24 horas*. 🕑';if(/\b(envio|envios|enviamos|mandan|mandamos|entrega|entregan|cobertura|nacional|foraneo|foraneos|foranea|foraneas|otro estado|todo mexico)\b/.test(query))return '🚚 Sí, realizamos envíos a todo México. Compárteme la pieza, marca, modelo y año para revisar tu cotización.';return '';} function isIncompleteSprCatalogRequest(value){const query=canonicalizeSprPartSynonyms(value);if(SPR_CATALOG_CONTEXT_PATTERN.test(query))return false;return /\b(precio|precios|cuanto|cuesta|costo|cotizacion|cotizar|cotiza|disponible|disponibilidad|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|principal|niebla|antiniebla)\b/.test(query);} function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult = null) {
+function isSprStoreLocationQuestion(value) {
+  const query = normalizeBotText(value);
+  const asksLocation = /\b(ubicacion|ubicados|donde estan|donde se encuentran|sucursal|domicilio|local|tienda|oficina|como llego)\b/.test(query)
+    || /\bdireccion\s+(?:del|de la)\s+(?:local|sucursal|negocio|tienda|oficina|empresa)\b/.test(query)
+    || /\b(?:cual es|dime|me compartes|me das|comparteme|compartenos)\s+(?:la\s+|su\s+)?direccion\b/.test(query);
+  if (!asksLocation) return false;
+  // “Dirección de Honda Passport modelo 98” is a requested part, not the
+  // address of the store. Preserve that distinction before answering FAQ.
+  return !(SPR_CATALOG_CONTEXT_PATTERN.test(query) && hasSprVehicleReference(query) && !/\b(local|sucursal|negocio|tienda|oficina|empresa)\b/.test(query));
+}
+
+function buildSprFaqReply(value, isSprAutopartesTenant) {
+  if (!isSprAutopartesTenant) return '';
+  const query = normalizeBotText(value);
+  if (isSprStoreLocationQuestion(query)) {
+    return '📍 *Estamos ubicados en Querétaro, México.* 🚚 Realizamos envíos a todo México.';
+  }
+  if (/\b(horario|horarios|hora|horas|abren|cierran|abierto|abiertos|atienden|atencion)\b/.test(query)) {
+    return 'Atendemos de *Lunes a Sábado* de *9:00 am* a *7:30 pm*. ✅\nNuestro canal de WhatsApp y redes sociales recibe consultas las *24 horas*. 🕑';
+  }
+  if (/\b(envio|envios|enviamos|mandan|mandamos|entrega|entregan|cobertura|nacional|foraneo|foraneos|foranea|foraneas|otro estado|todo mexico)\b/.test(query)) {
+    return '🚚 Sí, realizamos envíos a todo México. Compárteme la pieza, marca, modelo y año para revisar tu cotización.';
+  }
+  return '';
+}
+
+function isIncompleteSprCatalogRequest(value) {
+  const query = canonicalizeSprPartSynonyms(value);
+  if (SPR_CATALOG_CONTEXT_PATTERN.test(query)) return false;
+  return /\b(precio|precios|cuanto|cuesta|costo|cotizacion|cotizar|cotiza|disponible|disponibilidad|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|principal|niebla|antiniebla)\b/.test(query);
+}
+
+function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult = null) {
   if (isGenericSprCatalogRequest(lowerText)) {
     const categoryRules = [
       ['Motores y cabezas de motor', /\b(motor|cabeza|culata)\b/],
@@ -797,7 +872,10 @@ Nuestro canal de WhatsApp y redes sociales recibe consultas las *24 horas*. 🕑
   if (isAmbiguousSprCatalogRequest(lowerText)) {
     return '🛠️ *Catálogo de SPR Autopartes*\n\nPara buscar la pieza correcta necesito algunos datos adicionales. 🔎\n\n¿De qué *marca, modelo y año* es tu vehículo?\n🔧 También dime qué pieza necesitas y, si aplica, el lado (izquierdo o derecho).\n\nEjemplo: *faro delantero para Nissan Versa 2015*.';
   }
-  if (isIncompleteSprCatalogRequest(lowerText)) return '🔎 Para preparar una cotización necesito la pieza exacta y los datos del vehículo: *marca, modelo y año*. Si aplica, indícame también el lado.';  if (isIncompleteSprCatalogRequest(lowerText)) return '🔎 Para preparar una cotización necesito la pieza exacta y los datos del vehículo: *marca, modelo y año*. Si aplica, indícame también el lado.'; if (!matches.length) {
+  if (isIncompleteSprCatalogRequest(lowerText)) {
+    return '🔎 Para preparar una cotización necesito la pieza exacta y los datos del vehículo: *marca, modelo y año*. Si aplica, indícame también el lado.';
+  }
+  if (!matches.length) {
     return 'No tenemos ese artículo en existencia.';
   }
   const lines = ['🛠️ *Catálogo de SPR Autopartes*', '', 'Encontré estas opciones relacionadas:'];
@@ -1547,7 +1625,9 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const isShopifyPartsIntro = /^hola\s+vengo\s+de\s+spr\s+autopartes\s+y\s+me\s+gustaria\s+consultar\s+sobre\s+(?:algunas|unas|varias)?\s*piezas?$/.test(lowerText);
     const isShopifyPrefillIntro = isShopifySuspensionIntro || isShopifyPartsIntro;
     const wantsHuman = !isShopifyPrefillIntro && humanKeywords.some(kw => lowerText.includes(kw));
-    const isFriendlyGreeting = /^(?:(?:hola|holi|hey|hello)\s+)?(?:hola|holi|hey|hello|buen dia|buenos dias|buenas tardes|buenas noches|inicio)$/.test(lowerText); const isCourtesyMessage = /^(?:(?:muchas|mil)\s+)?gracias(?:\s+(?:por|igualmente|de todos modos|todo)\b.*)?$/.test(lowerText) || /^(?:(?:te|le)\s+)?agradezco\b/.test(lowerText);
+    const isFriendlyGreeting = isFriendlyGreetingText(messageText);
+    const isCourtesyMessage = isCourtesyText(messageText);
+    const isCommonFaqQuestion = /\b(horario|horarios|hora|horas|abren|cierran|ubicacion|ubicados|donde|sucursal|domicilio|local|tienda|oficina|direccion|envio|envios|entrega|cobertura|todo mexico)\b/.test(lowerText);
 
     let botReply = '';
 
@@ -1591,7 +1671,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
       try {
         await db.doc(`followups/${taskId}`).set(taskData);
       } catch (e) {}
-    } else if (botSettings?.working_hours && !checkWorkingHours(botSettings.working_hours) && !isFriendlyGreeting && !isCourtesyMessage && !isShopifyPrefillIntro) {
+    } else if (botSettings?.working_hours && !checkWorkingHours(botSettings.working_hours) && !isFriendlyGreeting && !isCourtesyMessage && !isShopifyPrefillIntro && !isCommonFaqQuestion) {
       // Out of hours
       botReply = botSettings.out_of_hours_message || `¡Hola! Gracias por comunicarte. En este momento nos encontramos fuera de horario de atención comercial, pero ya registramos tu consulta y un asesor te responderá a primera hora.`;
     } else {
@@ -1627,9 +1707,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
       const asksPromotion = /\b(promocion|promo|descuento|oferta|halloween|activacion\s+gratis)\b/.test(lowerText);
       const asksCrm = lowerText.includes('crm');
       const asksBot = lowerText.includes('bot') || lowerText.includes('chatbot') || lowerText.includes('chat bot') || lowerText.includes('whatsapp') || lowerText.includes('api chat');
-      const isFriendlyGreeting = /^(?:hola|holi|buen dia|buenos dias|buenas tardes|buenas noches|inicio)$/.test(lowerText);
-      const isCourtesyMessage = /^(?:(?:muchas|mil)\s+)?gracias(?:\s+(?:por|igualmente|de todos modos|todo)\b.*)?$/.test(lowerText)
-        || /^(?:(?:te|le)\s+)?agradezco\b/.test(lowerText);
+      const isFriendlyGreeting = isFriendlyGreetingText(messageText);
+      const isCourtesyMessage = isCourtesyText(messageText);
 
       const crmReply = `📊 *DT CRM Core*
 
@@ -1702,12 +1781,13 @@ Incluye:
 
 ¿Te gustaría solicitar una demostración?`;
 
-      const botIdentityForCatalog = `${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase();
+      const botIdentityForCatalog = `${tenantDisplayName} ${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase();
       const isSprAutopartesTenant = /spr\s*(bot|autopartes|engine)/i.test(botIdentityForCatalog) || /spr autopartes/i.test(botIdentityForCatalog);
       const publicBusinessName = isSprAutopartesTenant ? 'SPR Autopartes' : tenantDisplayName;
       const publicBotName = String(
         botSettings?.bot_name || (isSprAutopartesTenant ? 'SPR BOT' : 'asistente virtual')
       ).trim();
+      const sprFaqReply = buildSprFaqReply(messageText, isSprAutopartesTenant);
       let catalogQueryText = catalogContextText || messageText;
       let catalogLowerText = canonicalizeSprPartSynonyms(catalogQueryText);
       let yearConfirmationReply = '';
@@ -1738,7 +1818,7 @@ Incluye:
         }
       }
       const catalogInputText = canonicalizeSprPartSynonyms(lowerText);
-      const asksCatalogProduct = !isShopifyPrefillIntro && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|maza(?:s)?|balero(?:s)?|bieleta(?:s)?|junta\s+homocinetica|horquilla(?:s)?|flecha(?:s)?|fascia(?:s)?|soporte|terminal|r[oó]tula|tornillo(?:s)?|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera|carroceria)\b/.test(catalogInputText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText));
+      const asksCatalogProduct = !isShopifyPrefillIntro && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|maza(?:s)?|balero(?:s)?|bieleta(?:s)?|junta\s+homocinetica|horquilla(?:s)?|flecha(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|soporte|terminal|r[oó]tula|tornillo(?:s)?|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera|carroceria)\b/.test(catalogInputText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText));
       let sprCatalogReply = '';
       if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
@@ -1796,7 +1876,11 @@ Incluye:
 🔧 ¿Qué pieza necesitas consultar? Compárteme la *marca, modelo y año* de tu vehículo para orientarte mejor.`; } else if (yearConfirmationReply) {
         sprCatalogReply = yearConfirmationReply;
       }
-      if (sprCatalogReply) { botReply = sprCatalogReply; } else if (buildSprFaqReply(messageText, isSprAutopartesTenant)) { botReply = buildSprFaqReply(messageText, isSprAutopartesTenant); } else if (isFriendlyGreeting) {
+      if (sprCatalogReply) {
+        botReply = sprCatalogReply;
+      } else if (sprFaqReply) {
+        botReply = sprFaqReply;
+      } else if (isFriendlyGreeting) {
         const greetingPrefix = lowerText.includes('buenos dias')
           ? '\u2600\ufe0f \u00a1Muy buenos d\u00edas!'
           : lowerText.includes('buenas tardes')
@@ -1850,6 +1934,11 @@ Escribe el nombre del servicio o pon *asesor* y te comunicamos con nuestro equip
 
     // 6. Send Outbound WhatsApp Reply via Meta Graph API
     const botIdentity = `${companyId} ${tenantDisplayName} ${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase(); const isDtMarketingTenant = companyId === 'comp_dt_marketing' || /\bdt\s*(marketing|crm)\b/.test(botIdentity); const tenantBotName = String(botSettings?.bot_name || tenantDisplayName || 'nuestro asistente').trim(); const crossTenantContent = /(dt marketing|dt crm core|api chat bot|paquete completo|escribe \*crm\*, \*whatsapp\* o \*paquete\*)/i; const asksLocation = /\b(ubicacion|ubicados|donde estan|donde se encuentran|sucursal|domicilio|horarios?)\b/.test(lowerText) || (/\bdireccion\b/.test(lowerText) && (/\b(?:cual es|dime|me compartes|me das|compartenos|comparteme)\s+(?:la\s+|su\s+)?direccion\b/.test(lowerText) || /\bsu\s+direccion\b/.test(lowerText) || /\bdireccion\s+(?:del|de la)\s+(?:local|sucursal|negocio|tienda|oficina|empresa)\b/.test(lowerText) || /\bdireccion\s+(?:de|del)\s+(?:spr|ustedes|la empresa|el negocio|la tienda)\b/.test(lowerText))); if (!isDtMarketingTenant && (asksLocation || crossTenantContent.test(botReply))) { console.error(`[Cross-Tenant Content Blocked] Company: ${companyId} | Phone ID: ${phoneNumberId}`); botReply = asksLocation ? `📍 *Estamos ubicados en Querétaro, México.* 🚚 Realizamos envíos a todo México. Si ya deseas comprar, compártenos la pieza que buscas y los datos de tu vehículo para preparar tu cotización.` : `🤔 *Quiero ayudarte mejor.* Para orientarte sobre *${tenantBotName}*, ¿buscas una cotización, una pieza o servicio, información de envío, garantía o hablar con un asesor?`; } let outboundSuccess = false;
+    // Only SPR owns the configured Querétaro location. Never leak it to a
+    // different client when a generic fallback was generated.
+    if (!isDtMarketingTenant && asksLocation && !isSprAutopartesTenant) {
+      botReply = `📍 Para compartirte la ubicación de *${tenantBotName}*, un asesor de la empresa te atenderá directamente.`;
+    }
     let metaMessageId = null;
 
     if (botReply && accessToken && phoneNumberId) {
@@ -2518,6 +2607,24 @@ module.exports = {
   verifyMetaSignature,
   isSyntheticMetaPayload,
   resolveTenant,
+  normalizeBotText,
+  isFriendlyGreetingText,
+  isCourtesyText,
+  canonicalizeSprPartSynonyms,
+  buildSprFocusedSearchQuery,
+  buildSprCatalogSearchQueries,
+  findSprEngineMatches,
+  filterStrictSprVehicleMatches,
+  isAmbiguousSprCatalogRequest,
+  buildSprCatalogContext,
+  isUnlistedSprProductRequest,
+  getSprYearClarification,
+  isSprYearConfirmation,
+  isSprStoreLocationQuestion,
+  buildSprFaqReply,
+  isIncompleteSprCatalogRequest,
+  buildSprCatalogReply,
+  normalizeSprProduct,
   setDb,
   setAdminAuth,
   setHttpClient,
