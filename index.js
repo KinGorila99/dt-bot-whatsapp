@@ -1414,7 +1414,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const humanKeywords = ['asesor', 'humano', 'persona', 'agente', 'ejecutivo', 'hablar con alguien', 'representante', 'ayuda humana', 'transferir'];
     // Shopify prefills can arrive with punctuation or small wording variations.
     // Normalize them before any catalog, knowledge-base, or human-handoff rule.
-    const isShopifySuspensionIntro = /^hola\s+vengo\s+de\s+spr\s+autopartes\s+y\s+necesito\s+asesoria\s+para\s+suspension(?:\s+marca\s+modelo\s+y\s+ano)?$/.test(lowerText);
+    const isShopifySuspensionIntro = /^hola\s+vengo\s+de\s+spr\s+autopartes\s+y\s+necesito\s+asesoria\s+para\s+suspension(?:\s+marca\s+modelo\s+y\s+ano(?:\s+.+)?)?$/.test(lowerText);
+    const isShopifySuspensionVehicleProvided = /^hola\s+vengo\s+de\s+spr\s+autopartes\s+y\s+necesito\s+asesoria\s+para\s+suspension\s+marca\s+modelo\s+y\s+ano\s+.+$/.test(lowerText);
     const isShopifyPartsIntro = /^hola\s+vengo\s+de\s+spr\s+autopartes\s+y\s+me\s+gustaria\s+consultar\s+sobre\s+(?:algunas|unas|varias)?\s*piezas?$/.test(lowerText);
     const isShopifyPrefillIntro = isShopifySuspensionIntro || isShopifyPartsIntro;
     const wantsHuman = !isShopifyPrefillIntro && humanKeywords.some(kw => lowerText.includes(kw));
@@ -1425,9 +1426,13 @@ app.post('/webhook/whatsapp', async (req, res) => {
     if (isShopifyPrefillIntro) {
       console.log(`[Shopify Prefill Accepted] ${isShopifySuspensionIntro ? 'suspension' : 'parts'} | Company: ${companyId}`);
       botReply = isShopifySuspensionIntro
-        ? `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo con tu consulta de suspensión.
+        ? (isShopifySuspensionVehicleProvided
+          ? `👋 ¡Perfecto! Ya tengo los datos de tu vehículo: *${messageText.split(':').slice(1).join(':').trim() || 'los datos compartidos'}*.
 
-🚗 Compárteme la *marca, modelo y año* de tu vehículo para revisar la pieza correcta.`
+🔧 ¿Qué pieza de suspensión necesitas consultar? Escríbeme la pieza y continuaré con la búsqueda.`
+          : `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo con tu consulta de suspensión.
+
+🚗 Compárteme la *marca, modelo y año* de tu vehículo para revisar la pieza correcta.`)
         : `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo.
 
 🔧 ¿Qué pieza necesitas consultar? Compárteme la *marca, modelo y año* de tu vehículo para orientarte mejor.`;
