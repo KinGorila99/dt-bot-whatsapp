@@ -81,10 +81,10 @@ function canonicalWhatsAppConversationId(companyId, phone) {
 async function loadWhatsAppConversation(dbInstance, companyId, phone) {
   const canonicalId = canonicalWhatsAppConversationId(companyId, phone);
   const directSnap = await dbInstance.doc(`conversations/${canonicalId}`).get();
-  if (directSnap.exists) return { id: canonicalId, data: directSnap.data(), legacyIds: [] };
+  const directData = directSnap.exists ? directSnap.data() : null;
 
   const targetPhone = normalizeWhatsAppPhone(phone);
-  if (!targetPhone) return { id: canonicalId, data: null, legacyIds: [] };
+  if (!targetPhone) return { id: canonicalId, data: directData, legacyIds: [] };
 
   try {
     const snapshot = await dbInstance.collection('conversations')
@@ -96,9 +96,10 @@ async function loadWhatsAppConversation(dbInstance, companyId, phone) {
       const storedPhone = normalizeWhatsAppPhone(data.external_user_id || data.contact_phone);
       return storedPhone === targetPhone;
     });
-    if (!matches.length) return { id: canonicalId, data: null, legacyIds: [] };
+    if (!matches.length) return { id: canonicalId, data: directData, legacyIds: [] };
 
     const preferred = matches.find(doc => doc.id === canonicalId)
+      || (directData ? { id: canonicalId, data: () => directData } : null)
       || matches.slice().sort((a, b) => timestampMs((b.data() || {}).updated_at) - timestampMs((a.data() || {}).updated_at))[0];
     return {
       id: canonicalId,
@@ -107,7 +108,7 @@ async function loadWhatsAppConversation(dbInstance, companyId, phone) {
     };
   } catch (error) {
     console.warn('Could not resolve legacy WhatsApp conversation:', error.message);
-    return { id: canonicalId, data: null, legacyIds: [] };
+    return { id: canonicalId, data: directData, legacyIds: [] };
   }
 }
 
