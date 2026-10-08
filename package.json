@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js", "test:faq": "node tests/faq-eval.cjs", "test:faq:1000": "node tests/faq-eval-1000.cjs"
   },
   "dependencies": {
     "axios": "^1.7.9",
