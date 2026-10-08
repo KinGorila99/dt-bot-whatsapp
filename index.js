@@ -423,7 +423,7 @@ function isSprEngineSpecificationToken(token) {
 
 function findSprEngineMatches(items, lowerText) {
   const normalizedQuery = normalizeBotText(lowerText);
-  const stopWords = new Set(['quiero', 'quieres', 'busco', 'buscando', 'necesito', 'ocupo', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'engine', 'series', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo', 'producto', 'productos', 'catalogo', 'catalog', 'refaccion', 'refacciones', 'pieza', 'piezas', 'stock', 'completo', 'completa', 'todo', 'toda', 'todos', 'todas', 'ver', 'muestrame', 'muéstrame', 'informacion', 'información', 'que', 'qué', 'delantero', 'delantera', 'trasero', 'trasera', 'izquierdo', 'izquierda', 'derecho', 'derecha', 'lado', 'principal', 'niebla', 'antiniebla', 'no', 'sin', 'valvula', 'valvulas', 'cil', 'cilindro', 'cilindros', 'ocupo']);
+  const stopWords = new Set(['quiero', 'quieres', 'busco', 'buscando', 'necesito', 'ocupo', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'engine', 'series', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo', 'producto', 'productos', 'catalogo', 'catalog', 'refaccion', 'refacciones', 'pieza', 'piezas', 'stock', 'completo', 'completa', 'todo', 'toda', 'todos', 'todas', 'ver', 'muestrame', 'muéstrame', 'informacion', 'información', 'que', 'qué', 'delantero', 'delantera', 'trasero', 'trasera', 'izquierdo', 'izquierda', 'derecho', 'derecha', 'lado', 'principal', 'niebla', 'antiniebla', 'no', 'sin', 'valvula', 'valvulas', 'cil', 'cilindro', 'cilindros', 'con', 'abs', 'fwd', 'birlo', 'birlos', 'ocupo']);
   const tokens = normalizedQuery.split(' ').filter(token => token.length >= 3 && !stopWords.has(token));
   const categoryRules = [
     { key: 'motor', pattern: /\bmotor(?:es)?\b/ },
@@ -437,6 +437,7 @@ function findSprEngineMatches(items, lowerText) {
     { key: 'bomba', pattern: /\bbomba(?:s)?\b/ },
     { key: 'turbo', pattern: /\bturbo(?:s)?\b/ },
     { key: 'embrague', pattern: /\b(embrague|clutch)\b/ },
+    { key: 'maza', pattern: /\b(?:maza(?:s)?|balero(?:s)?(?:\s+de)?(?:\s+maza)?)\b/ },
     { key: 'soporte', pattern: /\bsoporte(?:s)?\b/ },
     { key: 'iluminacion', pattern: /\b(faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?)\b/ },
     { key: 'carroceria', pattern: /\b(parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria)\b/ }
@@ -606,16 +607,43 @@ function buildSprFocusedSearchQuery(value) {
     .trim();
   return focused || normalized;
 }
+
+// Shopify search is much more forgiving when the part and vehicle are sent
+// separately. Build a few bounded alternatives so natural language such as
+// "maza balero delantero derecho con ABS" can resolve the catalog title that
+// only uses "maza" while still preserving make, model and year.
+function buildSprCatalogSearchQueries(value) {
+  const normalized = normalizeBotText(value);
+  const focused = buildSprFocusedSearchQuery(value);
+  const partGroups = [
+    { pattern: /\b(?:maza(?:s)?|balero(?:s)?|balero(?:s)?\s+de\s+maza)\b/, terms: ['maza', 'balero'] },
+    { pattern: /\b(?:amortiguador(?:es)?|strut)\b/, terms: ['amortiguador', 'strut'] },
+    { pattern: /\b(?:faro(?:s)?|lampara(?:s)?)\b/, terms: ['faro', 'lampara'] },
+    { pattern: /\b(?:calavera(?:s)?|stop(?:s)?)\b/, terms: ['calavera', 'stop'] }
+  ];
+  const partGroup = partGroups.find(group => group.pattern.test(normalized));
+  const vehicleText = normalized
+    .replace(partGroup?.pattern || /$^/, ' ')
+    .replace(/\b(?:hola|vengo|spr|autopartes|asesoria|suspension|marca|modelo|ano|a[nñ]o|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atras|con|sin|abs|fwd|birlo|birlos)\b/g, ' ')
+    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const candidates = [focused];
+  if (partGroup && vehicleText) {
+    for (const term of partGroup.terms) candidates.push(`${term} ${vehicleText}`);
+  }
+  return [...new Set(candidates.map(query => String(query || '').replace(/\s+/g, ' ').trim()).filter(Boolean))].slice(0, 4);
+}
 // A short follow-up such as "delantero" or "izquierdo" is a refinement of
 // the customer's previous catalog request. Keep the vehicle and part from
 // that previous turn so a side/orientation answer cannot jump to another
 // make or model.
-const SPR_CATALOG_CONTEXT_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|producto(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carrocer[ií]a)\b/;
+const SPR_CATALOG_CONTEXT_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|producto(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|maza(?:s)?|balero(?:s)?|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carrocer[ií]a)\b/;
 const SPR_CATALOG_REFINEMENT_PATTERN = /\b(delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atr[aá]s|modelo|a[nñ]o|versi[oó]n|principal|niebla|antiniebla|motor)\b/;
 
 // Do not guess a vehicle from a generic part request. Ask for the vehicle
 // before searching so the bot cannot return an unrelated make or model.
-const SPR_CATALOG_GENERIC_WORDS_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|que|qué|por|favor|de|precio|precios|cuanto|cu[aá]nto|cuesta|costo|cotizacion|cotizaci[oó]n|cotizar|comprar|compra|nuevo|nueva|disponible|disponibilidad|stock|catalogo|cat[aá]logo|producto|productos|pieza|piezas|refaccion|refacciones|motor|motores|cabeza|cabezas|culata|engine|series|amortiguador|amortiguadores|suspension|freno|frenos|balata|balatas|pastilla|pastillas|aceite|lubricante|lubricantes|direccion|terminal|terminales|rotula|rotulas|radiador|radiadores|bomba|bombas|turbo|turbos|embrague|clutch|soporte|soportes|faro|faros|niebla|antiniebla|principal|calavera|calaveras|lampara|lamparas|luz|luces|espejo|espejos|parrilla|parrillas|defensa|defensas|cofre|salpicadera|salpicaderas|carroceria|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atras|modelo|ano|version|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|camiones|completo|completa|todo|toda|todos|todas|no|sin|evitar|ningun|ninguna)\b/gi;
+const SPR_CATALOG_GENERIC_WORDS_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|que|qué|por|favor|de|precio|precios|cuanto|cu[aá]nto|cuesta|costo|cotizacion|cotizaci[oó]n|cotizar|comprar|compra|nuevo|nueva|disponible|disponibilidad|stock|catalogo|cat[aá]logo|producto|productos|pieza|piezas|refaccion|refacciones|motor|motores|cabeza|cabezas|culata|engine|series|amortiguador|amortiguadores|suspension|freno|frenos|balata|balatas|pastilla|pastillas|aceite|lubricante|lubricantes|direccion|terminal|terminales|rotula|rotulas|radiador|radiadores|bomba|bombas|turbo|turbos|embrague|clutch|maza|mazas|balero|baleros|soporte|soportes|faro|faros|niebla|antiniebla|principal|calavera|calaveras|lampara|lamparas|luz|luces|espejo|espejos|parrilla|parrillas|defensa|defensas|cofre|salpicadera|salpicaderas|carroceria|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atras|modelo|ano|version|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|camiones|completo|completa|todo|toda|todos|todas|no|sin|evitar|ningun|ninguna)\b/gi;
 const SPR_VEHICLE_MAKES = new Set(['nissan', 'ford', 'chevrolet', 'chevy', 'volkswagen', 'vw', 'toyota', 'honda', 'kia', 'hyundai', 'dodge', 'chrysler', 'jeep', 'mazda', 'mitsubishi', 'suzuki', 'seat', 'renault', 'peugeot', 'fiat', 'ram', 'gmc', 'volvo', 'audi', 'bmw', 'mercedes', 'mercedesbenz', 'isuzu', 'subaru', 'lincoln', 'cadillac', 'buick', 'acura', 'infiniti', 'lexus', 'porsche', 'mg', 'byd']);
 
 function hasSprVehicleReference(value) {
@@ -666,7 +694,7 @@ function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
 function isGenericSprCatalogRequest(lowerText) {
   const query = normalizeBotText(lowerText);
   const asksGeneral = /\b(que productos|que tienen|que hay|catalogo|catalog|refacciones|productos|todo|completo)\b/.test(query);
-  const asksSpecific = /\b(motor(?:es)?|cabeza(?:s)?|culata|amortiguador(?:es)?|suspension|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite(?:s)?|refaccion(?:es)?|pieza(?:s)?|direccion|radiador(?:es)?|bomba(?:s)?|turbo(?:s)?|embrague(?:s)?|clutch|soporte(?:s)?|terminal(?:es)?|rotula(?:s)?|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria)\b/.test(query);
+  const asksSpecific = /\b(motor(?:es)?|cabeza(?:s)?|culata|amortiguador(?:es)?|suspension|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite(?:s)?|refaccion(?:es)?|pieza(?:s)?|direccion|radiador(?:es)?|bomba(?:s)?|turbo(?:s)?|embrague(?:s)?|clutch|maza(?:s)?|balero(?:s)?|soporte(?:s)?|terminal(?:es)?|rotula(?:s)?|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria)\b/.test(query);
   return asksGeneral && !asksSpecific;
 }
 
@@ -937,7 +965,7 @@ app.get('/api/status', (req, res) => {
     graph_api_version: GRAPH_API_VERSION,
     signature_verification: !!META_APP_SECRET ? 'enforced' : 'optional',
     database: db ? 'firebase_admin_authenticated' : 'uninitialized',
-    catalog_guard: '07330f6', catalog_search_guard: 'vehicle-token-normalization-20261008', marketing_promo_guard: 'halloween-october-20261007-promo-keyword',
+    catalog_guard: '07330f6', catalog_search_guard: 'part-alias-search-20261008', marketing_promo_guard: 'halloween-october-20261007-promo-keyword',
     unknown_product_guard: '7fb4779',
     greeting_guard: 'tenant-courtesy-20261006'
   });
@@ -1639,7 +1667,7 @@ Incluye:
             : 'No pude identificar el a\u00f1o. \u00bfCu\u00e1l es el a\u00f1o correcto para revisar esa pieza? \U0001F4C5';
         }
       }
-      const asksCatalogProduct = !isShopifyPrefillIntro && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera|carroceria)\b/.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText));
+      const asksCatalogProduct = !isShopifyPrefillIntro && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|maza(?:s)?|balero(?:s)?|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera|carroceria)\b/.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText));
       let sprCatalogReply = '';
       if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
@@ -1648,7 +1676,12 @@ Incluye:
           let sprMatches = findSprEngineMatches(catalogItems, catalogLowerText);
           sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
           if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
-            const focusedSearchQuery = buildSprFocusedSearchQuery(catalogQueryText); const searchedItems = await searchSprCatalog(focusedSearchQuery);
+            const searchQueries = buildSprCatalogSearchQueries(catalogQueryText);
+            const searchedSets = await Promise.all(searchQueries.map(query => searchSprCatalog(query).catch(searchError => {
+              console.warn(`SPR catalog alternative search failed for "${query}":`, searchError.message);
+              return [];
+            })));
+            const searchedItems = [...new Map(searchedSets.flat().map(item => [item.id || item.url || item.title, item])).values()];
             sprMatches = findSprEngineMatches(searchedItems, catalogLowerText);
             sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
             if (sprMatches.length) catalogItems = [...catalogItems, ...searchedItems];
