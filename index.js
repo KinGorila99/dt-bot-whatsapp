@@ -1145,7 +1145,14 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const wabaId = entry?.id ? String(entry.id).trim() : null;
     let customerPhone = normalizeWhatsAppPhone(message.from);
     let customerName = contact?.profile?.name || `Usuario WhatsApp (+${customerPhone})`;
-    
+    // Media is optional. Never let media parsing stop a normal text message
+    // from being saved or answered when Meta omits a media payload.
+    let inboundMedia = null;
+    try {
+      inboundMedia = extractInboundMedia(message);
+    } catch (mediaError) {
+      console.warn('Could not parse inbound WhatsApp media:', mediaError.message);
+    }
     const timestamp = message.timestamp ? new Date(parseInt(message.timestamp, 10) * 1000).toISOString() : new Date().toISOString();
 
     // 1. Strict Tenant Company & Credential Resolution
