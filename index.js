@@ -494,14 +494,14 @@ function findSprEngineMatches(items, lowerText) {
     { key: 'tornillo', pattern: /\b(?:tornillo(?:s)?|estabilizador(?:es)?|cacahuate(?:s)?)\b/ },
     { key: 'soporte', pattern: /\bsoporte(?:s)?\b/ },
     { key: 'iluminacion', pattern: /\b(faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?)\b/ },
-    { key: 'carroceria', pattern: /\b(parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria)\b/ }
+    { key: 'carroceria', pattern: /\b(parrilla(?:s)?|rejilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria)\b/ }
   ];
-  const requestedCategory = categoryRules.find(rule => rule.pattern.test(normalizedQuery));
+  let requestedCategory = categoryRules.find(rule => rule.pattern.test(normalizedQuery));
   const requestedYears = [...normalizedQuery.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => Number(match[0]));
   const requestedOrientation = normalizedQuery.match(/\b(izquierdo|izquierda|derecho|derecha|delantero|delantera|trasero|trasera)\b/)?.[1] || '';
-  const negativeFogRequest = /\b(?:no|sin|evitar|ningun|ninguna)\b(?:\s+\w+){0,8}\s+(?:faro\s+de\s+)?niebla\b/.test(normalizedQuery);
+  const negativeFogRequest = /\b(?:no|sin|evitar|ningun|ninguna)\b(?:\s+\w+){0,8}\s+(?:faro\s+de\s+)?niebla\b/.test(normalizedQuery); if (negativeFogRequest) { const nonLightingCategory = categoryRules.find(rule => rule.key !== 'iluminacion' && rule.pattern.test(normalizedQuery)); if (nonLightingCategory) requestedCategory = nonLightingCategory; }
   const asksFogLight = !negativeFogRequest && /\b(?:faro\s+de\s+niebla|niebla|antiniebla)\b/.test(normalizedQuery);
-  const asksMainLight = !asksFogLight && /\b(?:faro|faros|principal|delantero|delantera)\b/.test(normalizedQuery);
+  const asksMainLight = !negativeFogRequest && !asksFogLight && /\b(?:faro|faros|principal|delantero|delantera)\b/.test(normalizedQuery);
   const wantsHead = /\b(cabeza(?:s)?|culata(?:s)?)\b/.test(normalizedQuery);
   const wantsMotorAccessory = /\b(soporte(?:s)?|base(?:s)?|taco(?:s)?|montura(?:s)?|mount(?:s)?|sensor(?:es)?|accesorio(?:s)?)\b/.test(normalizedQuery);
   const wantsMotor = /\bmotor(?:es)?\b/.test(normalizedQuery) && !wantsHead && !wantsMotorAccessory;
@@ -536,7 +536,7 @@ function findSprEngineMatches(items, lowerText) {
   };
   const scored = items.map(item => {
     let score = 0;
-    const haystack = [item.normalizedTitle, normalizeBotText(item.vendor), normalizeBotText(item.productType), normalizeBotText(item.tags)].join(' ');
+    const haystack = canonicalizeSprPartSynonyms([item.normalizedTitle, normalizeBotText(item.vendor), normalizeBotText(item.productType), normalizeBotText(item.tags)].join(' '));
     const matchedTokens = [];
     for (const token of tokens) {
       if (sprTokenMatches(haystack, token)) {
@@ -624,7 +624,7 @@ function filterStrictSprVehicleMatches(matches, query) {
   if (!identityTokens.length && !requestedYears.length) return matches;
 
   return matches.filter(item => {
-    const haystack = [item.normalizedTitle, normalizeBotText(item.vendor), normalizeBotText(item.productType), normalizeBotText(item.tags)].join(' ');
+    const haystack = canonicalizeSprPartSynonyms([item.normalizedTitle, normalizeBotText(item.vendor), normalizeBotText(item.productType), normalizeBotText(item.tags)].join(' '));
     if (!identityTokens.every(token => sprTokenMatches(haystack, token))) return false;
     if (!requestedYears.length) return true;
     const source = [item.title, item.description, item.tags].map(value => String(value || '')).join(' ');
