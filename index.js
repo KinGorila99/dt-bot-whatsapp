@@ -391,11 +391,16 @@ async function getSprEngineCatalog() {
 
 async function searchSprCatalog(query) {
   const response = await axios.get('https://sprautopartes.mx/search/suggest.json', {
-    timeout: 9000,
+    // Allow the catalog a little more time to return a useful result. A
+    // missing hit here should not immediately become a false "no existe".
+    timeout: 12000,
     params: {
       q: String(query || '').trim(),
       'resources[type]': 'product',
-      'resources[limit]': 10
+      // The first ten Shopify suggestions can be dominated by nearby
+      // products. Fetch a wider window and apply our vehicle/part filters
+      // locally before deciding that nothing matches.
+      'resources[limit]': 24
     },
     headers: { 'User-Agent': 'DT Bot Core / SPR catalog search' }
   });
@@ -619,7 +624,11 @@ function buildSprCatalogSearchQueries(value) {
     { pattern: /\b(?:maza(?:s)?|balero(?:s)?|balero(?:s)?\s+de\s+maza)\b/, terms: ['maza', 'balero'] },
     { pattern: /\b(?:amortiguador(?:es)?|strut)\b/, terms: ['amortiguador', 'strut'] },
     { pattern: /\b(?:faro(?:s)?|lampara(?:s)?)\b/, terms: ['faro', 'lampara'] },
-    { pattern: /\b(?:calavera(?:s)?|stop(?:s)?)\b/, terms: ['calavera', 'stop'] }
+    { pattern: /\b(?:calavera(?:s)?|stop(?:s)?)\b/, terms: ['calavera', 'stop'] },
+    { pattern: /\b(?:freno(?:s)?|balata(?:s)?|pastilla(?:s)?)\b/, terms: ['freno', 'balata'] },
+    { pattern: /\b(?:direccion|terminal(?:es)?|rotula(?:s)?)\b/, terms: ['direccion', 'terminal'] },
+    { pattern: /\b(?:radiador(?:es)?|enfriamiento)\b/, terms: ['radiador'] },
+    { pattern: /\b(?:motor(?:es)?|cabeza(?:s)?|culata(?:s)?)\b/, terms: ['motor', 'cabeza'] }
   ];
   const partGroup = partGroups.find(group => group.pattern.test(normalized));
   const vehicleText = normalized
@@ -630,9 +639,17 @@ function buildSprCatalogSearchQueries(value) {
     .trim();
   const candidates = [focused];
   if (partGroup && vehicleText) {
-    for (const term of partGroup.terms) candidates.push(`${term} ${vehicleText}`);
+    for (const term of partGroup.terms) {
+      // Search in both word orders. Shopify does not consistently rank a
+      // title the same way when the part precedes or follows the vehicle.
+      candidates.push(`${term} ${vehicleText}`);
+      candidates.push(`${vehicleText} ${term}`);
+    }
   }
-  return [...new Set(candidates.map(query => String(query || '').replace(/\s+/g, ' ').trim()).filter(Boolean))].slice(0, 4);
+  // If the title omits the part alias or trim text, a vehicle-only pass lets
+  // the local matcher recover the requested part from the wider result set.
+  if (vehicleText) candidates.push(vehicleText);
+  return [...new Set(candidates.map(query => String(query || '').replace(/\s+/g, ' ').trim()).filter(Boolean))].slice(0, 8);
 }
 // A short follow-up such as "delantero" or "izquierdo" is a refinement of
 // the customer's previous catalog request. Keep the vehicle and part from
@@ -1677,11 +1694,23 @@ Incluye:
           sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
           if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
             const searchQueries = buildSprCatalogSearchQueries(catalogQueryText);
-            const searchedSets = await Promise.all(searchQueries.map(query => searchSprCatalog(query).catch(searchError => {
-              console.warn(`SPR catalog alternative search failed for "${query}":`, searchError.message);
-              return [];
-            })));
-            const searchedItems = [...new Map(searchedSets.flat().map(item => [item.id || item.url || item.title, item])).values()];
+            const searchedItemsByKey = new Map();
+            // Run the bounded query plan sequentially. This deliberately gives
+            // Shopify time to answer each useful variant before we conclude
+            // that the requested piece is missing. Results are deduplicated,
+            // then filtered against the original vehicle/part request.
+            for (const query of searchQueries) {
+              try {
+                const queryItems = await searchSprCatalog(query);
+                for (const item of queryItems) {
+                  const key = item.id || item.url || item.title;
+                  if (key && !searchedItemsByKey.has(key)) searchedItemsByKey.set(key, item);
+                }
+              } catch (searchError) {
+                console.warn(`SPR catalog alternative search failed for "${query}":`, searchError.message);
+              }
+            }
+            const searchedItems = [...searchedItemsByKey.values()];
             sprMatches = findSprEngineMatches(searchedItems, catalogLowerText);
             sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
             if (sprMatches.length) catalogItems = [...catalogItems, ...searchedItems];
