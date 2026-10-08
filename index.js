@@ -650,7 +650,7 @@ function getSprConfirmationPart(value) { const normalized = canonicalizeSprPartS
 // Search Shopify with useful vehicle and part terms instead of the full sentence.
 // The catalog search is sensitive to filler words and trim details, while make/model,
 // year, part and side are the terms that identify the item.
-const SPR_SEARCH_FILLER_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|me|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|por|favor|que|cotizacion|cotizar|precio|precios|cuanto|cuesta|costo|disponible|disponibilidad|stock|modelo|ano|version)\b/gi;
+const SPR_SEARCH_FILLER_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|me|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|por|favor|que|cotizacion|cotizar|precio|precios|cuanto|cuesta|costo|disponible|disponibilidad|stock|marca|modelo|ano|version|articulo|articulos|pieza|piezas|refaccion|refacciones|producto|productos|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|vengo|spr|autopartes|asesoria|hola|holi|hey|buen|buenos|buenas|dia|dias|puedes|pueden|podrias|podrian|consultar|consulta|ayuda|ayudar|dime|tambien|porfa|porfavor|de|a|y)\b/gi;
 function buildSprFocusedSearchQuery(value) {
   const normalized = canonicalizeSprPartSynonyms(value);
   const focused = normalized
@@ -683,7 +683,7 @@ function buildSprCatalogSearchQueries(value) {
     { pattern: /\b(?:bieleta(?:s)?|junta\s+homocinetica|espiga(?:s)?|horquilla(?:s)?|flecha(?:s)?|fascia(?:s)?|tornillo(?:s)?)\b/, terms: ['bieleta', 'junta', 'horquilla', 'flecha', 'fascia', 'tornillo'] }
   ];
   const partGroup = partGroups.find(group => group.pattern.test(normalized));
-  const vehicleText = normalized
+  const vehicleText = buildSprFocusedSearchQuery(normalized)
     .replace(partGroup?.pattern || /$^/, ' ')
     .replace(/\b(?:hola|vengo|spr|autopartes|asesoria|suspension|marca|modelo|ano|a[nñ]o|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atras|con|sin|abs|fwd|birlo|birlos)\b/g, ' ')
     .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
