@@ -405,9 +405,25 @@ async function searchSprCatalog(query) {
   return products.map(normalizeSprProduct).filter(item => item.title && item.regularPrice > 0);
 }
 
+// Compare catalog tokens without letting punctuation differences break a
+// valid vehicle match, such as `NP300` vs `NP-300`.
+function sprTokenMatches(haystack, token) {
+  const normalizedToken = normalizeBotText(token).trim();
+  if (!normalizedToken) return false;
+  if (haystack.includes(normalizedToken)) return true;
+  const compactToken = normalizedToken.replace(/[^a-z0-9]/g, '');
+  if (compactToken.length < 3) return false;
+  return haystack.replace(/[^a-z0-9]/g, '').includes(compactToken);
+}
+
+function isSprEngineSpecificationToken(token) {
+  const normalized = normalizeBotText(token).replace(/\s+/g, '');
+  return /^(?:\d+(?:\.\d+)?l?|\d+v|\d+cil|cilindros?|valvulas?|\d+(?:[-/]\d+)+|gasolina|diesel|manual|automatico|transmision)$/.test(normalized);
+}
+
 function findSprEngineMatches(items, lowerText) {
   const normalizedQuery = normalizeBotText(lowerText);
-  const stopWords = new Set(['quiero', 'quieres', 'busco', 'buscando', 'necesito', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'engine', 'series', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo', 'producto', 'productos', 'catalogo', 'catalog', 'refaccion', 'refacciones', 'pieza', 'piezas', 'stock', 'completo', 'completa', 'todo', 'toda', 'todos', 'todas', 'ver', 'muestrame', 'muéstrame', 'informacion', 'información', 'que', 'qué', 'delantero', 'delantera', 'trasero', 'trasera', 'izquierdo', 'izquierda', 'derecho', 'derecha', 'lado', 'principal', 'niebla', 'antiniebla', 'no', 'sin', 'quiero']);
+  const stopWords = new Set(['quiero', 'quieres', 'busco', 'buscando', 'necesito', 'ocupo', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'engine', 'series', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo', 'producto', 'productos', 'catalogo', 'catalog', 'refaccion', 'refacciones', 'pieza', 'piezas', 'stock', 'completo', 'completa', 'todo', 'toda', 'todos', 'todas', 'ver', 'muestrame', 'muéstrame', 'informacion', 'información', 'que', 'qué', 'delantero', 'delantera', 'trasero', 'trasera', 'izquierdo', 'izquierda', 'derecho', 'derecha', 'lado', 'principal', 'niebla', 'antiniebla', 'no', 'sin', 'valvula', 'valvulas', 'cil', 'cilindro', 'cilindros', 'ocupo']);
   const tokens = normalizedQuery.split(' ').filter(token => token.length >= 3 && !stopWords.has(token));
   const categoryRules = [
     { key: 'motor', pattern: /\bmotor(?:es)?\b/ },
@@ -468,7 +484,7 @@ function findSprEngineMatches(items, lowerText) {
     const haystack = [item.normalizedTitle, normalizeBotText(item.vendor), normalizeBotText(item.productType), normalizeBotText(item.tags)].join(' ');
     const matchedTokens = [];
     for (const token of tokens) {
-      if (haystack.includes(token)) {
+      if (sprTokenMatches(haystack, token)) {
         matchedTokens.push(token);
         score += item.normalizedTitle.includes(token) ? 5 : 2;
       }
@@ -518,7 +534,20 @@ function findSprEngineMatches(items, lowerText) {
     relevant = lightingMatches;
   }
 
-  // Every meaningful make/model token must appear in the same product. const vehicleTokens = tokens.filter(token => !categoryRules.some(rule => rule.pattern.test(token)) && !/^\d{4}$/.test(token)).filter(token => !SPR_OPTIONAL_VEHICLE_WORDS.has(token)).filter(token => token.length >= 3 && !['spr'].includes(token)); if (vehicleTokens.length) { const exactVehicleMatches = relevant.filter(row => vehicleTokens.every(token => row.haystack.includes(token))); if (!exactVehicleMatches.length) return []; relevant = exactVehicleMatches; }
+  // Every meaningful make/model token must appear in the same product.
+  // Engine specs such as `2.4`, `16V`, `4CIL` and `3-4` describe the
+  // requested configuration; they are useful for ranking but must not make
+  // us reject a product whose title formats them differently.
+  const vehicleTokens = tokens
+    .filter(token => !categoryRules.some(rule => rule.pattern.test(token)) && !/^\d{4}$/.test(token))
+    .filter(token => !SPR_OPTIONAL_VEHICLE_WORDS.has(token))
+    .filter(token => !isSprEngineSpecificationToken(token))
+    .filter(token => token.length >= 3 && !['spr'].includes(token));
+  if (vehicleTokens.length) {
+    const exactVehicleMatches = relevant.filter(row => vehicleTokens.every(token => sprTokenMatches(row.haystack, token)));
+    if (!exactVehicleMatches.length) return [];
+    relevant = exactVehicleMatches;
+  }
 
   return relevant.slice(0, 3).map(row => row.item);
 }
@@ -535,12 +564,13 @@ function filterStrictSprVehicleMatches(matches, query) {
     .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ').replace(SPR_OPTIONAL_VEHICLE_WORDS_PATTERN, ' ').replace(qualifierPattern, ' ')
     .replace(/\b\d{4}\b/g, ' ')
     .split(/\s+/)
-    .filter(token => (token.length >= 3 || (token.length >= 2 && /\d/.test(token))) && !['spr'].includes(token));
+    .filter(token => (token.length >= 3 || (token.length >= 2 && /\d/.test(token))) && !['spr', 'ocupo'].includes(token))
+    .filter(token => !isSprEngineSpecificationToken(token));
   if (!identityTokens.length && !requestedYears.length) return matches;
 
   return matches.filter(item => {
     const haystack = [item.normalizedTitle, normalizeBotText(item.vendor), normalizeBotText(item.productType), normalizeBotText(item.tags)].join(' ');
-    if (!identityTokens.every(token => haystack.includes(token))) return false;
+    if (!identityTokens.every(token => sprTokenMatches(haystack, token))) return false;
     if (!requestedYears.length) return true;
     const source = [item.title, item.description, item.tags].map(value => String(value || '')).join(' ');
     const explicitYears = [...source.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => Number(match[0]));
@@ -907,7 +937,7 @@ app.get('/api/status', (req, res) => {
     graph_api_version: GRAPH_API_VERSION,
     signature_verification: !!META_APP_SECRET ? 'enforced' : 'optional',
     database: db ? 'firebase_admin_authenticated' : 'uninitialized',
-    catalog_guard: '07330f6', catalog_search_guard: 'year-confirmation-20261007', marketing_promo_guard: 'halloween-october-20261007-promo-keyword',
+    catalog_guard: '07330f6', catalog_search_guard: 'vehicle-token-normalization-20261008', marketing_promo_guard: 'halloween-october-20261007-promo-keyword',
     unknown_product_guard: '7fb4779',
     greeting_guard: 'tenant-courtesy-20261006'
   });
@@ -1623,12 +1653,14 @@ Incluye:
             sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
             if (sprMatches.length) catalogItems = [...catalogItems, ...searchedItems];
           }
-          const strictEngineTokens = (/\b(motor(?:es)?|cabeza(?:s)?|culata)\b/.test(catalogLowerText) ? catalogLowerText.split(/\s+/).filter(token => /[a-z]/.test(token) && /\d/.test(token) && token.length >= 3 && !/^(19|20)\d{2}$/.test(token) && !["motor","motores","cabeza","cabezas","culata","engine","series"].includes(token)) : []);
+          const strictEngineTokens = (/\b(motor(?:es)?|cabeza(?:s)?|culata)\b/.test(catalogLowerText)
+            ? catalogLowerText.split(/\s+/).filter(token => /[a-z]/.test(token) && /\d/.test(token) && token.length >= 3 && !/^(19|20)\d{2}$/.test(token) && !["motor","motores","cabeza","cabezas","culata","engine","series"].includes(token) && !isSprEngineSpecificationToken(token))
+            : []);
           if (strictEngineTokens.length) {
             sprMatches = sprMatches.filter(item => {
               const haystack = normalizeBotText([item.title, item.description, item.productType, item.tags].filter(Boolean).join(" "));
               const words = haystack.split(/\s+/);
-              return strictEngineTokens.every(token => words.some(word => word === token || word.includes(token)));
+              return strictEngineTokens.every(token => sprTokenMatches(haystack, token));
             });
           }
           const aldoStockResult = isAldoStockCategoryQuery(catalogQueryText)
