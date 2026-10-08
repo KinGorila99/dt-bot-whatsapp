@@ -61,6 +61,83 @@ function timestampMs(value) {
   return Number.isFinite(time) ? time : 0;
 }
 
+// Meta puede entregar el mismo número mexicano como 521XXXXXXXXXX o
+// 52XXXXXXXXXX. Además, algunas conversaciones antiguas conservaron el
+// prefijo de una empresa migrada. Un único ID canónico evita crear otra ficha
+// para el mismo contacto.
+function normalizeWhatsAppPhone(value) {
+  let digits = String(value || '').replace(/[^0-9]/g, '');
+  if (/^521\d{10}$/.test(digits)) digits = `52${digits.slice(3)}`;
+  return digits;
+}
+
+function canonicalWhatsAppConversationId(companyId, phone) {
+  const normalized = normalizeWhatsAppPhone(phone);
+  return normalized
+    ? `conv_${companyId}_whatsapp_${normalized}`
+    : `conv_${companyId}_whatsapp_unknown`;
+}
+
+async function loadWhatsAppConversation(dbInstance, companyId, phone) {
+  const canonicalId = canonicalWhatsAppConversationId(companyId, phone);
+  const directSnap = await dbInstance.doc(`conversations/${canonicalId}`).get();
+  if (directSnap.exists) return { id: canonicalId, data: directSnap.data(), legacyIds: [] };
+
+  const targetPhone = normalizeWhatsAppPhone(phone);
+  if (!targetPhone) return { id: canonicalId, data: null, legacyIds: [] };
+
+  try {
+    const snapshot = await dbInstance.collection('conversations')
+      .where('company_id', '==', companyId)
+      .where('channel', '==', 'whatsapp')
+      .get();
+    const matches = snapshot.docs.filter(doc => {
+      const data = doc.data() || {};
+      const storedPhone = normalizeWhatsAppPhone(data.external_user_id || data.contact_phone);
+      return storedPhone === targetPhone;
+    });
+    if (!matches.length) return { id: canonicalId, data: null, legacyIds: [] };
+
+    const preferred = matches.find(doc => doc.id === canonicalId)
+      || matches.slice().sort((a, b) => timestampMs((b.data() || {}).updated_at) - timestampMs((a.data() || {}).updated_at))[0];
+    return {
+      id: canonicalId,
+      data: { ...(preferred.data() || {}), id: canonicalId },
+      legacyIds: matches.filter(doc => doc.id !== canonicalId).map(doc => doc.id)
+    };
+  } catch (error) {
+    console.warn('Could not resolve legacy WhatsApp conversation:', error.message);
+    return { id: canonicalId, data: null, legacyIds: [] };
+  }
+}
+
+async function migrateConversationMessages(dbInstance, legacyId, canonicalId) {
+  if (!legacyId || !canonicalId || legacyId === canonicalId) return;
+  try {
+    const oldMessages = await dbInstance.collection('messages')
+      .where('conversation_id', '==', legacyId)
+      .get();
+    if (!oldMessages.empty) {
+      let batch = dbInstance.batch();
+      let writes = 0;
+      for (const messageDoc of oldMessages.docs) {
+        batch.set(messageDoc.ref, { conversation_id: canonicalId }, { merge: true });
+        writes += 1;
+        if (writes === 450) {
+          await batch.commit();
+          batch = dbInstance.batch();
+          writes = 0;
+        }
+      }
+      if (writes) await batch.commit();
+    }
+    await dbInstance.doc(`conversations/${legacyId}`).delete();
+    console.log(`🧹 [Conversation Merge] ${legacyId} → ${canonicalId}`);
+  } catch (error) {
+    console.warn(`Could not merge legacy conversation ${legacyId}:`, error.message);
+  }
+}
+
 function shouldAutoReactivateBot(conversation, now = Date.now()) {
   if (!conversation || conversation.status === 'closed') return false;
   if (conversation.auto_reactivate_enabled === false) return false;
@@ -1065,10 +1142,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
     const phoneNumberId = metadata?.phone_number_id ? String(metadata.phone_number_id).trim() : null;
     const wabaId = entry?.id ? String(entry.id).trim() : null;
-    let customerPhone = message.from ? String(message.from).trim() : '';
-    // Meta may include Mexico's legacy WhatsApp routing digit (521XXXXXXXXXX).
-    // Graph API recipient addressing requires the canonical 52XXXXXXXXXX form.
-    if (/^521\d{10}$/.test(customerPhone)) customerPhone = `52${customerPhone.slice(3)}`;
+    let customerPhone = normalizeWhatsAppPhone(message.from);
     let customerName = contact?.profile?.name || `Usuario WhatsApp (+${customerPhone})`;
     
     const timestamp = message.timestamp ? new Date(parseInt(message.timestamp, 10) * 1000).toISOString() : new Date().toISOString();
@@ -1173,13 +1247,12 @@ app.post('/webhook/whatsapp', async (req, res) => {
     }
 
     // 4. Conversation State Management
-    const convId = `conv_${companyId}_whatsapp_${customerPhone}`;
-    let convData = null;
-
-    try {
-      const cSnap = await db.doc(`conversations/${convId}`).get();
-      if (cSnap.exists) convData = cSnap.data();
-    } catch (e) {}
+    const conversationLookup = await loadWhatsAppConversation(db, companyId, customerPhone);
+    const convId = conversationLookup.id;
+    let convData = conversationLookup.data;
+    for (const legacyId of conversationLookup.legacyIds || []) {
+      await migrateConversationMessages(db, legacyId, convId);
+    }
 
     // Preserve recent customer turns separately from the last rendered
     // message. The latter becomes the bot's reply after this handler runs,
