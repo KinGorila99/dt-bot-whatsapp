@@ -1,11 +1,14 @@
-﻿{
+{
   "name": "dt-bot-core-server",
   "version": "1.0.0",
   "description": "Standalone Backend Server for DT CRM Core & DT Bot Core — Native Meta WhatsApp Cloud API Integration",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js", "test:faq": "node tests/faq-eval.cjs", "test:faq:1000": "node tests/faq-eval-1000.cjs"
+    "dev": "nodemon index.js",
+    "test:faq": "node tests/faq-eval.cjs",
+    "test:faq:1000": "node tests/faq-eval-1000.cjs",
+    "test:catalog:full": "node tests/catalog-eval-full.cjs"
   },
   "dependencies": {
     "axios": "^1.7.9",
