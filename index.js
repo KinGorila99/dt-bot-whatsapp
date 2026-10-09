@@ -1464,6 +1464,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
     } catch (settingsError) {
       console.warn('Could not load bot settings before lead registration:', settingsError.message);
     }
+    const botGloballyEnabled = botSettings?.enabled !== false;
 
     // 2. Filter Synthetic / Meta Dashboard Sample Payloads
     // Do NOT create real CRM leads or attempt outbound Meta API calls for dummy dashboard test payloads
@@ -1655,6 +1656,29 @@ app.post('/webhook/whatsapp', async (req, res) => {
       convData.assigned_user_id = null;
       convData.assigned_user_name = null;
       console.log('🤖 [Auto Reactivation] Conversation [' + convId + '] resumed after ' + HUMAN_HANDOFF_IDLE_MINUTES + ' minutes without advisor activity.');
+    }
+
+    // The master toggle in DT Bot > Configuración must pause replies without
+    // dropping the inbound message or the conversation from the CRM. Keep a
+    // marker so re-enabling the bot can resume only conversations paused by
+    // this setting, while an intentional advisor handoff stays untouched.
+    if (!botGloballyEnabled && convData.human_handoff !== true) {
+      convData.human_handoff = true;
+      convData.bot_enabled = false;
+      convData.status = 'paused';
+      convData.bot_disabled_by_config = true;
+      convData.bot_disabled_at = new Date().toISOString();
+      console.log(`🛑 [Bot Disabled by Configuration] Company: ${companyId} | Conversation: ${convId}`);
+    } else if (botGloballyEnabled && convData.bot_disabled_by_config === true) {
+      convData.human_handoff = false;
+      convData.bot_enabled = true;
+      convData.status = 'active';
+      convData.bot_disabled_by_config = false;
+      convData.bot_reenabled_at = new Date().toISOString();
+      convData.human_handoff_started_at = null;
+      convData.assigned_user_id = null;
+      convData.assigned_user_name = null;
+      console.log(`🤖 [Bot Re-enabled by Configuration] Company: ${companyId} | Conversation: ${convId}`);
     }
 
     // If human handoff is still active, keep the bot silent.
