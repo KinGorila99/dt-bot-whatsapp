@@ -1436,6 +1436,18 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const { companyId, intDocId, accessToken } = tenant;
     console.log(`🏢 [Tenant Resolved] Company: ${companyId} | WhatsApp Integration: ${intDocId} | Phone ID: ${phoneNumberId}`);
 
+    // Load tenant bot settings before creating CRM records so the controls in
+    // DT Bot > Configuración have an effect on the live webhook. In
+    // particular, auto_create_leads can now be disabled per company without
+    // changing the WhatsApp connection.
+    let botSettings = null;
+    try {
+      const sSnap = await db.doc(`bot_settings/${companyId}`).get();
+      if (sSnap.exists) botSettings = sSnap.data();
+    } catch (settingsError) {
+      console.warn('Could not load bot settings before lead registration:', settingsError.message);
+    }
+
     // 2. Filter Synthetic / Meta Dashboard Sample Payloads
     // Do NOT create real CRM leads or attempt outbound Meta API calls for dummy dashboard test payloads
     if (isSyntheticMetaPayload(customerPhone)) {
@@ -1501,10 +1513,14 @@ app.post('/webhook/whatsapp', async (req, res) => {
       ultima_actividad: timestamp
     };
 
-    try {
-      await db.doc(`leads/${leadId}`).set(leadData, { merge: true });
-    } catch (e) {
-      console.warn('Error saving lead to Firestore:', e.message);
+    if (botSettings?.auto_create_leads !== false) {
+      try {
+        await db.doc(`leads/${leadId}`).set(leadData, { merge: true });
+      } catch (e) {
+        console.warn('Error saving lead to Firestore:', e.message);
+      }
+    } else {
+      console.log(`ℹ️ [Lead Capture Disabled] Company: ${companyId} has auto_create_leads disabled.`);
     }
 
     // 4. Conversation State Management
@@ -1640,13 +1656,6 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
       return;
     }
-
-    // Load Bot Settings for working hours & personality
-    let botSettings = null;
-    try {
-      const sSnap = await db.doc(`bot_settings/${companyId}`).get();
-      if (sSnap.exists) botSettings = sSnap.data();
-    } catch (e) {}
 
     // Resolve the display identity from the tenant selected by the verified
     // WhatsApp integration. This prevents a client account from inheriting
@@ -1938,7 +1947,10 @@ Incluye:
         const helpPrompt = isSprAutopartesTenant
           ? '\u00bfQu\u00e9 pieza o refacci\u00f3n est\u00e1s buscando? \uD83D\uDE97\uD83D\uDD27'
           : '\u00bfEn qu\u00e9 podemos ayudarte hoy?';
-        botReply = greetingPrefix + "\n\nGracias por escribir a *" + publicBusinessName + "*. Soy *" + publicBotName + "* y con gusto te ayudo.\n\n" + helpPrompt;
+        const configuredWelcome = String(botSettings?.welcome_message || '').trim();
+        botReply = configuredWelcome && configuredWelcome.length >= 8
+          ? configuredWelcome
+          : greetingPrefix + "\n\nGracias por escribir a *" + publicBusinessName + "*. Soy *" + publicBotName + "* y con gusto te ayudo.\n\n" + helpPrompt;
       } else if (isCourtesyMessage) {
         const courtesyFollowup = isSprAutopartesTenant
           ? 'Cuando necesites otra pieza, aqu\u00ed estaremos para ayudarte. \uD83D\uDE97\uD83D\uDD27'
