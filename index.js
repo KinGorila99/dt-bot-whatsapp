@@ -299,7 +299,12 @@ function canonicalizeSprPartSynonyms(value) {
   for (const replacer of SPR_PART_SYNONYM_REPLACERS) {
     normalized = normalized.replace(replacer.pattern, ` ${replacer.canonical} `);
   }
-  // Correct a small set of common vehicle-name typos only after the normal
+    // Voice transcription and quick typing frequently turn “Chevy” into
+  // “Chev soy” (or a close variant). Treat the phrase as the vehicle name
+  // before compacting model/year tokens; otherwise “soy 1985” becomes the
+  // unrelated model token “soy1985” and a valid grille is rejected.
+  normalized = normalized.replace(/\bchev\s+(?:soy|soi|boy|boi|hoy)\b/g, ' chevy ');
+// Correct a small set of common vehicle-name typos only after the normal
   // accent and part-synonym normalization. This keeps the matcher tolerant
   // without allowing unrelated words to be guessed as a make or model.
   const vehicleAliases = new Map([
@@ -595,6 +600,24 @@ async function searchSprCatalog(query) {
 function sprTokenMatches(haystack, token) {
   const normalizedToken = normalizeBotText(token).trim();
   if (!normalizedToken) return false;
+    // Chevrolet/Chevy are the same make in the SPR catalog. Accept the common
+  // abbreviated spelling “chev” as well, while keeping all other vehicle
+  // identity tokens strict.
+  const vehicleAliases = {
+    chevrolet: ['chevrolet', 'chevy', 'chev'],
+    chevy: ['chevrolet', 'chevy', 'chev'],
+    chev: ['chevrolet', 'chevy', 'chev'],
+    volkswagen: ['volkswagen', 'vw'],
+    vw: ['volkswagen', 'vw']
+  };
+  const aliases = vehicleAliases[normalizedToken];
+  if (aliases) {
+    return aliases.some(alias => {
+      if (haystack.includes(alias)) return true;
+      const compactAlias = alias.replace(/[^a-z0-9]/g, '');
+      return compactAlias.length >= 3 && haystack.replace(/[^a-z0-9]/g, '').includes(compactAlias);
+    });
+  }
   // Numeric model fragments must not match inside another number (e.g. model
   // L200 must not match the unrelated number 2500). Allow a letter boundary
   // so compact catalog handles such as `l200` still resolve correctly.
