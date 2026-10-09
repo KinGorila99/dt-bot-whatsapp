@@ -844,7 +844,125 @@ function filterStrictSprVehicleMatches(matches, query) {
   });
 }
 
+// Second-pass search plan. The first matcher is intentionally strict; before
+// declaring a product missing, ask the catalog with canonical part names,
+// customer synonyms and both word orders.
+function buildSprExhaustiveSearchQueries(value) {
+  const normalized = canonicalizeSprPartSynonyms(value);
+  const focused = buildSprFocusedSearchQuery(normalized);
+  const partGroups = SPR_PART_SYNONYM_GROUPS.filter(group => {
+    const terms = [group.canonical, ...group.aliases].map(term => normalizeBotText(term)).filter(Boolean);
+    return terms.some(term => new RegExp('\\b' + escapeSprRegex(term) + '\\b', 'i').test(normalized));
+  });
+  const allPartTerms = partGroups.flatMap(group => [group.canonical, ...group.aliases]).map(term => normalizeBotText(term)).filter(Boolean).sort((a, b) => b.length - a.length);
+  const partPattern = allPartTerms.length ? new RegExp('\\b(?:' + allPartTerms.map(escapeSprRegex).join('|') + ')\\b', 'gi') : /$^/;
+  const vehicleText = focused
+    .replace(partPattern, ' ')
+    .replace(/\\b(?:delantero|delantera|delanteros|delanteras|trasero|trasera|traseros|traseras|izquierdo|izquierda|izquierdos|izquierdas|derecho|derecha|derechos|derechas|lado|frente|atras|principal|niebla|antiniebla|piloto|chofer|conductor|pasajero|manual|electrico|electrica|electricos|electricas|con|sin|abs|fwd|birlo|birlos)\\b/gi, ' ')
+    .replace(SPR_OPTIONAL_VEHICLE_WORDS_PATTERN, ' ')
+    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
+    .replace(/\\s+/g, ' ')
+    .trim();
+  const queries = [...buildSprCatalogSearchQueries(value), focused];
+  if (vehicleText) queries.push(vehicleText);
+  for (const group of partGroups) {
+    const terms = [...new Set([group.canonical, ...group.aliases.map(term => normalizeBotText(term))])].filter(Boolean).slice(0, 6);
+    for (const term of terms) {
+      if (vehicleText) { queries.push(term + ' ' + vehicleText); queries.push(vehicleText + ' ' + term); }
+    }
+  }
+  return [...new Set(queries.map(query => String(query || '').replace(/\\s+/g, ' ').trim()).filter(Boolean))].slice(0, 16);
+}
+
+function sprLevenshteinDistance(left, right) {
+  const a = String(left || '');
+  const b = String(right || '');
+  const row = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= a.length; i += 1) {
+    let previous = row[0]; row[0] = i;
+    for (let j = 1; j <= b.length; j += 1) { const current = row[j]; row[j] = Math.min(row[j] + 1, row[j - 1] + 1, previous + (a[i - 1] === b[j - 1] ? 0 : 1)); previous = current; }
+  }
+  return row[b.length];
+}
+
+function sprInvestigativeTokenMatches(haystack, token) {
+  if (sprTokenMatches(haystack, token)) return true;
+  const normalizedToken = normalizeBotText(token).replace(/[^a-z0-9]/g, '');
+  if (normalizedToken.length < 5 || /\\d/.test(normalizedToken)) return false;
+  const words = normalizeBotText(haystack).split(/\\s+/).map(word => word.replace(/[^a-z0-9]/g, '')).filter(word => word.length >= 5);
+  return words.some(word => Math.abs(word.length - normalizedToken.length) <= 1 && sprLevenshteinDistance(word, normalizedToken) <= 1);
+}
+
+// Last local pass before the public "No tenemos..." response. Category,
+// vehicle identity and compatible year remain mandatory; only catalog wording
+// and a single alphabetic typo are relaxed.
+function findSprExhaustiveMatches(items, query) {
+  const normalized = canonicalizeSprPartSynonyms(query);
+  const exact = filterStrictSprVehicleMatches(findSprEngineMatches(items, normalized), normalized);
+  if (exact.length) return exact;
+  const categoryRules = [
+    ['motor', /\\b(?:motor|engine(?:\\s+series)?)\\b/], ['cabeza', /\\b(?:cabeza|culata)\\b/],
+    ['amortiguador', /\\bamortiguador\\b/], ['suspension', /\\bsuspension\\b/],
+    ['freno', /\\b(?:freno|balata|pastilla)\\b/], ['aceite', /\\b(?:aceite|lubricante|motul|valvoline|pentosin)\\b/],
+    ['direccion', /\\b(?:direccion|terminal|rotula|caja de direccion)\\b/], ['radiador', /\\b(?:radiador|enfriamiento|cooling)\\b/],
+    ['bomba', /\\bbomba\\b/], ['turbo', /\\bturbo\\b/], ['embrague', /\\b(?:embrague|clutch)\\b/],
+    ['maza', /\\b(?:maza|balero)\\b/], ['bieleta', /\\bbieleta\\b/], ['junta', /\\b(?:junta homocinetica|espiga)\\b/],
+    ['horquilla', /\\bhorquilla\\b/], ['flecha', /\\b(?:flecha|semieje)\\b/], ['fascia', /\\bfascia\\b/],
+    ['tornillo', /\\btornillo\\b/], ['soporte', /\\bsoporte(?: de motor)?\\b/],
+    ['iluminacion', /\\b(?:faro|calavera|lampara|luz|luces|espejo)\\b/], ['carroceria', /\\b(?:parrilla|rejilla|defensa|cofre|salpicadera|carroceria)\\b/]
+  ];
+  const requestedGroup = SPR_PART_SYNONYM_GROUPS.find(group => new RegExp('\\b' + escapeSprRegex(group.canonical) + '\\b', 'i').test(normalized));
+  const requestedCategory = requestedGroup ? { key: requestedGroup.canonical, pattern: new RegExp('\\b' + escapeSprRegex(requestedGroup.canonical) + '\\b', 'i') } : (() => { const found = categoryRules.find(rule => rule[1].test(normalized)); return found ? { key: found[0], pattern: found[1] } : null; })();
+  const requestedYears = [...normalized.matchAll(/\\b(?:19|20)\\d{2}\\b/g)].map(match => Number(match[0]));
+  const focused = buildSprFocusedSearchQuery(normalized);
+  const partTerms = [...SPR_PART_SYNONYM_GROUPS.flatMap(group => [group.canonical, ...group.aliases]), 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'engine', 'series'].map(term => normalizeBotText(term)).filter(Boolean).sort((a, b) => b.length - a.length);
+  const partPattern = new RegExp('\\b(?:' + partTerms.map(escapeSprRegex).join('|') + ')\\b', 'gi');
+  const coreTokens = focused.replace(partPattern, ' ').replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ').replace(SPR_CATALOG_EXTRA_FILLER_PATTERN, ' ').replace(SPR_OPTIONAL_VEHICLE_WORDS_PATTERN, ' ').replace(/\\b(?:19|20)\\d{2}\\b/g, ' ').replace(/\\b(?:delantero|delantera|delanteros|delanteras|trasero|trasera|traseros|traseras|izquierdo|izquierda|izquierdos|izquierdas|derecho|derecha|derechos|derechas|lado|frente|atras|principal|niebla|antiniebla|piloto|chofer|conductor|pasajero|manual|electrico|electrica|electricos|electricas|con|sin|abs|fwd|birlo|birlos)\\b/gi, ' ').split(/\\s+/).filter(token => (token.length >= 3 || /\\d/.test(token)) && !isSprEngineSpecificationToken(token));
+  const requestedSide = /\\b(?:izquierdo|izquierda|piloto|chofer|conductor)\\b/.test(normalized) ? 'left' : /\\b(?:derecho|derecha|pasajero|copiloto)\\b/.test(normalized) ? 'right' : '';
+  const requestedPosition = /\\b(?:delantero|delantera|frontal|delant)\\b/.test(normalized) ? 'front' : /\\b(?:trasero|trasera|posterior|tras)\\b/.test(normalized) ? 'rear' : '';
+  const negativeFogRequest = /\\b(?:no|sin|evitar|ningun|ninguna)\\b(?:\\s+\\w+){0,8}\\s+(?:faro\\s+de\\s+)?niebla\\b/.test(normalized);
+  const asksFogLight = !negativeFogRequest && /\\b(?:faro\\s+de\\s+)?(?:niebla|antiniebla)\\b/.test(normalized);
+  const asksMainLight = !negativeFogRequest && !asksFogLight && /\\b(?:faro|principal|delantero|delantera)\\b/.test(normalized);
+  const matchesYear = item => { if (!requestedYears.length) return true; const source = [item.title, item.description, item.tags].map(value => String(value || '')).join(' '); const years = [...source.matchAll(/\\b(?:19|20)\\d{2}\\b/g)].map(match => Number(match[0])); const ranges = [...source.matchAll(/\\b((?:19|20)\\d{2})\\s*[-–/]\\s*((?:19|20)\\d{2})\\b/g)].map(match => [Number(match[1]), Number(match[2])]); return requestedYears.some(year => years.includes(year) || ranges.some(([start, end]) => year >= Math.min(start, end) && year <= Math.max(start, end))); };
+  const rows = items.map(item => {
+    const haystack = canonicalizeSprPartSynonyms([item.normalizedTitle, item.title, item.vendor, item.productType, item.tags, item.description, item.handle].filter(Boolean).join(' '));
+    if (requestedCategory && !requestedCategory.pattern.test(haystack)) return null;
+    if (coreTokens.length && !coreTokens.every(token => sprInvestigativeTokenMatches(haystack, token))) return null;
+    if (!matchesYear(item)) return null;
+    if (requestedSide && !(/\\bamb[oa]s(?:\\s+lados?)?\\b/.test(haystack) || (requestedSide === 'left' ? /\\bizquierd[oa]\\b/.test(haystack) : /\\bderech[oa]\\b/.test(haystack)))) return null;
+    if (requestedPosition === 'front' && !(/\\b(?:delanter[oa]s?|frontal(?:es)?|delant)\\b/.test(haystack) || (requestedCategory?.key === 'iluminacion' && !/\\b(?:calavera|stop|rear lamp)\\b/.test(haystack)))) return null;
+    if (requestedPosition === 'rear' && !(/\\b(?:traser[oa]s?|posterior(?:es)?|tras)\\b/.test(haystack) || /\\b(?:calavera|stop|rear lamp)\\b/.test(haystack))) return null;
+    if (requestedCategory?.key === 'iluminacion') { const isFog = /\\b(?:niebla|antiniebla)\\b/.test(haystack); if (asksFogLight !== isFog || (asksMainLight && isFog)) return null; }
+    if (requestedCategory?.key === 'motor') { const wantsHead = /\\b(?:cabeza|culata)\\b/.test(normalized); const wantsAccessory = /\\b(?:soporte|base|taco|montura|mount|sensor|accesorio)\\b/.test(normalized); if (!wantsHead && !wantsAccessory && (!item.discountEligible || !/\\b(?:motor|engine(?:\\s+series)?)\\b/.test(haystack) || /\\b(?:cabeza|culata|soporte|base|taco|montura|mount|sensor|accesorio)\\b/.test(haystack))) return null; }
+    return { item, score: (coreTokens.length * 10) + (requestedYears.length ? 12 : 0) + (requestedCategory ? 18 : 0) + (item.available ? 1 : 0) };
+  }).filter(Boolean).sort((a, b) => b.score - a.score || a.item.title.localeCompare(b.item.title));
+  return rows.slice(0, 3).map(row => row.item);
+}
+
+async function searchSprCatalogExhaustively(catalogItems, query) {
+  const merged = new Map();
+  for (const item of Array.isArray(catalogItems) ? catalogItems : []) { const key = item.id || item.url || item.handle || item.title; if (key) merged.set(String(key), item); }
+  const queries = buildSprExhaustiveSearchQueries(query);
+  const results = await Promise.allSettled(queries.map(searchQuery => searchSprCatalog(searchQuery)));
+  for (const result of results) { if (result.status !== 'fulfilled') continue; for (const item of result.value || []) { const key = item.id || item.url || item.handle || item.title; if (key && !merged.has(String(key))) merged.set(String(key), item); } }
+  const items = [...merged.values()];
+  let matches = filterStrictSprVehicleMatches(findSprEngineMatches(items, query), query);
+  if (!matches.length) matches = findSprExhaustiveMatches(items, query);
+  return { items, matches, queries };
+}
+
 function getSprYearClarification(value) {
+            if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
+            // A first miss is never enough to tell the customer that a piece is absent.
+            const exhaustive = await searchSprCatalogExhaustively(catalogItems, catalogQueryText);
+            catalogItems = exhaustive.items;
+            sprMatches = exhaustive.matches;
+          }
+
+    buildSprExhaustiveSearchQueries,
+
+        findSprExhaustiveMatches,
+
   const normalized = normalizeBotText(value);
   const invalidYears = [...normalized.matchAll(/\b(?!19|20)\d{4}\b/g)].map(match => match[0]);
   if (!invalidYears.length) return null;
