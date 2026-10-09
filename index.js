@@ -285,6 +285,23 @@ function formatWhatsAppReply(value) {
   return lines.join('\n');
 }
 
+// Apply the safe, deterministic subset of the DT Bot configuration to live
+// replies. Free-form instructions remain tenant data; only explicit style
+// directives are interpreted so a typo in the field cannot change catalog
+// matching or invent product information.
+function applyBotConfiguration(value, settings) {
+  let text = String(value || '').trim();
+  if (!text || !settings) return text;
+
+  const instructions = normalizeBotText(settings.custom_instructions || '');
+  const noEmojis = /\b(?:sin|no)\s+emojis?\b/.test(instructions);
+  const useEmojis = /\b(?:usar|usa|con)\s+emojis?\b/.test(instructions);
+  if (noEmojis) text = text.replace(/[\p{Extended_Pictographic}\uFE0F]/gu, '').replace(/\s{2,}/g, ' ').trim();
+  if (settings.personality === 'cercano' && useEmojis && !/\p{Extended_Pictographic}/u.test(text)) text = `🙂 ${text}`;
+  if (settings.personality === 'directo') text = text.replace(/\n{3,}/g, '\n\n').trim();
+  return text;
+}
+
 
 const SPR_ENGINE_COLLECTION_URL = process.env.SPR_FULL_CATALOG_URL || process.env.SPR_ENGINE_COLLECTION_URL || 'https://sprautopartes.mx/products.json?limit=250';
 const SPR_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_CATALOG_TTL_MS || 60000));
@@ -1989,6 +2006,7 @@ Escribe el nombre del servicio o pon *asesor* y te comunicamos con nuestro equip
       }
     }
 
+    botReply = applyBotConfiguration(botReply, botSettings);
     botReply = formatWhatsAppReply(botReply);
 
     // 6. Send Outbound WhatsApp Reply via Meta Graph API
