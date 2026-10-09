@@ -170,6 +170,95 @@ function isCourtesyText(value) {
     || /^(?:(?:te|le)\s+)?agradezco\b/.test(text);
 }
 
+// Commercial stages are advanced by evidence from the conversation. The bot
+// never regresses a lead and never overwrites the two terminal stages selected
+// by a person in the CRM.
+const LEAD_STAGE_RANK = Object.freeze({
+  'Nuevo Lead': 0,
+  'Contactado': 1,
+  'Interesado': 2,
+  'Cotización enviada': 3,
+  'Seguimiento pendiente': 4,
+  'Cliente ganado': 5,
+  'Cliente perdido': 5
+});
+
+function leadStageRank(stage) {
+  return Object.prototype.hasOwnProperty.call(LEAD_STAGE_RANK, stage)
+    ? LEAD_STAGE_RANK[stage]
+    : 0;
+}
+
+function detectAutomaticLeadStage({ messageText = '', botReply = '', humanHandoff = false, outboundSuccess = false, source = 'bot' } = {}) {
+  const message = normalizeBotText(messageText);
+  const reply = normalizeBotText(botReply);
+  const rawReply = String(botReply || '').toLowerCase();
+
+  if (source === 'agent' || humanHandoff) return 'Seguimiento pendiente';
+
+  // Only use a strong purchase phrase for conversion. “Me interesa” is still
+  // an interested prospect and must not create a client prematurely.
+  if (/\b(quiero comprar|lo compro|la compro|confirmo (?:la )?compra|hacer (?:un )?pedido|realizar (?:un )?pedido|pasame los datos para pagar|datos para pagar|para pagar|ordenar)\b/.test(message)) {
+    return 'Cliente ganado';
+  }
+
+  const productInterest = /\b(motor(?:es)?|cabeza(?:s)?|culata(?:s)?|amortiguador(?:es)?|suspension|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|fascia(?:s)?|cofre|salpicadera|carroceria|pieza(?:s)?|refaccion(?:es)?|balata(?:s)?|pastilla(?:s)?|freno(?:s)?|radiador|bomba|turbo|embrague|clutch|maza(?:s)?|balero(?:s)?|bieleta(?:s)?|horquilla(?:s)?|flecha(?:s)?|terminal(?:es)?|rotula(?:s)?|direccion|soporte|precio|cotiza(?:r|cion)?|disponible|existencia|stock|busco|necesito|quiero|me interesa)\b/.test(message);
+  const quoteReply = outboundSuccess && (
+    /sprautopartes\.mx\/products/i.test(rawReply)
+    || /(?:encontre estas opciones|precio (?:normal|vigente)|cotizacion|disponibilidad|disponible|existencia por confirmar)/.test(reply)
+  );
+
+  if (quoteReply && productInterest) return 'Cotización enviada';
+  if (productInterest) return 'Interesado';
+  return 'Contactado';
+}
+
+function shouldAdvanceLeadStage(currentStage, targetStage) {
+  if (!targetStage || currentStage === 'Cliente ganado' || currentStage === 'Cliente perdido') return false;
+  return leadStageRank(targetStage) > leadStageRank(currentStage);
+}
+
+async function advanceLeadStageAutomatically(dbInstance, {
+  leadId,
+  messageText = '',
+  botReply = '',
+  humanHandoff = false,
+  outboundSuccess = false,
+  source = 'bot',
+  currentStage = ''
+} = {}) {
+  if (!dbInstance || !leadId) return null;
+
+  let stage = currentStage || 'Nuevo Lead';
+  const leadRef = dbInstance.doc(`leads/${leadId}`);
+  try {
+    const leadSnap = await leadRef.get();
+    if (leadSnap.exists) stage = String(leadSnap.data()?.estado || stage).trim() || stage;
+  } catch (error) {
+    console.warn(`Could not read lead stage for ${leadId}:`, error.message);
+  }
+
+  const targetStage = detectAutomaticLeadStage({ messageText, botReply, humanHandoff, outboundSuccess, source });
+  if (!shouldAdvanceLeadStage(stage, targetStage)) return stage;
+
+  const now = new Date().toISOString();
+  try {
+    await leadRef.set({
+      estado: targetStage,
+      estado_actualizado_por: 'DT Bot Core',
+      estado_actualizado_at: now,
+      estado_actualizacion_automatica: true,
+      ultima_actividad: now,
+      ultima_interaccion: String(messageText || '').trim().slice(0, 500)
+    }, { merge: true });
+    console.log(`📌 [Lead Stage Auto] ${leadId}: ${stage} → ${targetStage}`);
+    return targetStage;
+  } catch (error) {
+    console.warn(`Could not update automatic lead stage for ${leadId}:`, error.message);
+    return stage;
+  }
+}
+
 // Customer language varies widely by region and by shop. Keep these aliases
 // in one place so the catalog matcher can search the canonical part name while
 // still accepting the wording a customer actually uses.
@@ -1522,6 +1611,17 @@ app.post('/webhook/whatsapp', async (req, res) => {
     // 3. Register / Update Lead in CRM
     const cleanPhoneDigits = customerPhone.replace(/[^0-9]/g, '');
     const leadId = `lead_wa_${cleanPhoneDigits.slice(-10) || Date.now()}`;
+    let currentLeadStage = 'Nuevo Lead';
+    if (botSettings?.auto_create_leads !== false) {
+      try {
+        const existingLeadSnap = await db.doc(`leads/${leadId}`).get();
+        if (existingLeadSnap.exists) {
+          currentLeadStage = String(existingLeadSnap.data()?.estado || currentLeadStage).trim() || currentLeadStage;
+        }
+      } catch (leadReadError) {
+        console.warn(`Could not read existing lead ${leadId}:`, leadReadError.message);
+      }
+    }
 
     const leadData = {
       id: leadId,
@@ -1532,7 +1632,9 @@ app.post('/webhook/whatsapp', async (req, res) => {
       empresa: contact?.profile?.name || 'Contacto WhatsApp Directo',
       servicio: 'Atención WhatsApp Cloud API',
       fuente: 'WhatsApp',
-      estado: 'Nuevo Lead',
+      // Preserve a stage already selected by an advisor or administrator.
+      // The automatic classifier advances it after the interaction is known.
+      estado: currentLeadStage,
       responsable: 'DT Bot Core',
       prioridad: 'Alta',
       valor_estimado: null,
@@ -1697,6 +1799,17 @@ app.post('/webhook/whatsapp', async (req, res) => {
       
       try {
         await db.doc(`conversations/${convId}`).set(convData, { merge: true });
+        // A configuration pause should not look like a commercial follow-up;
+        // an actual advisor assignment should.
+        if (!convData.bot_disabled_by_config && botSettings?.auto_create_leads !== false) {
+          await advanceLeadStageAutomatically(db, {
+            leadId,
+            messageText,
+            humanHandoff: true,
+            source: 'bot',
+            currentStage: currentLeadStage
+          });
+        }
         await db.doc(`webhook_events/event_${messageId}`).set({
           status: 'completed',
           completed_at: new Date().toISOString(),
@@ -2082,6 +2195,21 @@ Escribe el nombre del servicio o pon *asesor* y te comunicamos con nuestro equip
       }
     }
 
+    // Move the CRM lead only after the interaction has been classified. A
+    // catalog/price reply becomes “Cotización enviada” only when Meta accepted
+    // the outbound message; a failed send remains an interested prospect.
+    if (botSettings?.auto_create_leads !== false) {
+      await advanceLeadStageAutomatically(db, {
+        leadId,
+        messageText,
+        botReply,
+        humanHandoff: convData.human_handoff === true,
+        outboundSuccess,
+        source: 'bot',
+        currentStage: currentLeadStage
+      });
+    }
+
     // Record Outbound Message in Firestore
     let dbSaveError = null;
     if (outboundSuccess) {
@@ -2273,6 +2401,7 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
   }
 
   const cleanPhone = to_phone.replace(/[^0-9]/g, '');
+  let conversationLeadId = null;
 
   // 4. Strict Conversation Verification (must exist, match company, and match recipient)
   if (conversation_id) {
@@ -2308,6 +2437,7 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
         error: 'Acceso denegado: La conversación indicada pertenece a otra empresa o no tiene empresa asignada.'
       });
     }
+    conversationLeadId = convData.lead_id || null;
 
     // Validate recipient matching between request and conversation
     const convTarget = (convData.external_user_id || convData.contact_phone || '').replace(/[^0-9]/g, '');
@@ -2508,6 +2638,15 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
           human_handoff_started_at: agentTimestamp,
           last_agent_message_at: agentTimestamp
         }, { merge: true });
+        if (conversationLeadId) {
+          await advanceLeadStageAutomatically(db, {
+            leadId: conversationLeadId,
+            messageText: message_text,
+            humanHandoff: true,
+            outboundSuccess: true,
+            source: 'agent'
+          });
+        }
       } catch (e) {
         console.error('⚠️ Warning: Message sent to Meta, but Firestore recording failed:', e.message);
         firestorePersistError = e.message;
@@ -2721,6 +2860,8 @@ module.exports = {
   normalizeBotText,
   isFriendlyGreetingText,
   isCourtesyText,
+  detectAutomaticLeadStage,
+  shouldAdvanceLeadStage,
   canonicalizeSprPartSynonyms,
   buildSprFocusedSearchQuery,
   buildSprCatalogSearchQueries,
