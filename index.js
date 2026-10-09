@@ -294,11 +294,21 @@ function applyBotConfiguration(value, settings) {
   if (!text || !settings) return text;
 
   const instructions = normalizeBotText(settings.custom_instructions || '');
+  const personality = String(settings.personality || '').toLowerCase();
   const noEmojis = /\b(?:sin|no)\s+emojis?\b/.test(instructions);
-  const useEmojis = /\b(?:usar|usa|con)\s+emojis?\b/.test(instructions);
-  if (noEmojis) text = text.replace(/[\p{Extended_Pictographic}\uFE0F]/gu, '').replace(/\s{2,}/g, ' ').trim();
-  if (settings.personality === 'cercano' && useEmojis && !/\p{Extended_Pictographic}/u.test(text)) text = `🙂 ${text}`;
-  if (settings.personality === 'directo') text = text.replace(/\n{3,}/g, '\n\n').trim();
+  const explicitUseEmojis = /\b(?:usar|usa|con)\s+emojis?\b/.test(instructions);
+  const stripEmoji = () => {
+    text = text.replace(/[\p{Extended_Pictographic}\uFE0F]/gu, '').replace(/\s{2,}/g, ' ').trim();
+  };
+  if (noEmojis || (personality === 'profesional' && !explicitUseEmojis)) stripEmoji();
+  if ((personality === 'cercano' || explicitUseEmojis) && !noEmojis && !/\p{Extended_Pictographic}/u.test(text)) text = `🙂 ${text}`;
+  if (personality === 'directo') text = text.replace(/\n{3,}/g, '\n\n').trim();
+  if (personality === 'comercial' && !/[¿?]/.test(text) && !/(no tenemos|no contamos|fuera de horario|asesor|cotizaci[oó]n)/i.test(text)) {
+    text += '\n\n¿Te preparo una cotización?';
+  }
+  if (personality === 'tecnico' && /(cat[aá]logo|pieza|faro|motor|amortiguador|precio)/i.test(text) && !/marca,?\s*modelo\s*y\s*a[nñ]o/i.test(text)) {
+    text += '\n\nPara validar compatibilidad, confirma marca, modelo y año.';
+  }
   return text;
 }
 
