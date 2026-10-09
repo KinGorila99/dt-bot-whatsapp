@@ -52,7 +52,7 @@ const MASTER_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'dt_crm_whatsap
 const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || 'v26.0';
 const META_APP_SECRET = process.env.META_APP_SECRET || '';
 // Auto-reactivate the bot after an advisor has been idle.
-const HUMAN_HANDOFF_IDLE_MINUTES = Math.max(5, Number(process.env.HUMAN_HANDOFF_IDLE_MINUTES || 30));
+const HUMAN_HANDOFF_IDLE_MINUTES = Math.max(5, Number(process.env.HUMAN_HANDOFF_IDLE_MINUTES || 10));
 
 function timestampMs(value) {
   if (!value) return 0;
