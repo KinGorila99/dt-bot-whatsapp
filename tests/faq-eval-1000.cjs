@@ -87,6 +87,31 @@ const parts = [
   ['guia de fascia delantera derecha', 'guia']
 ];
 
+// Las mismas pruebas alternan el nombre técnico con la forma coloquial que
+// usan los clientes. Cada variante debe terminar resolviendo al mismo producto.
+const partQueries = [
+  { canonical: 'amortiguador delantero izquierdo', query: 'amortiguador delantero izquierdo' },
+  { canonical: 'amortiguador delantero izquierdo', query: 'amort delantero izquierdo' },
+  { canonical: 'amortiguador delantero izquierdo', query: 'strut delantero izquierdo' },
+  { canonical: 'amortiguador delantero izquierdo', query: 'shock delantero izquierdo' },
+  { canonical: 'amortiguador delantero izquierdo', query: 'pierna delantera izquierda' },
+  { canonical: 'faro principal derecho', query: 'faro principal derecho' },
+  { canonical: 'faro principal derecho', query: 'faro derecho' },
+  { canonical: 'faro principal derecho', query: 'headlamp derecho' },
+  { canonical: 'faro de niebla izquierdo', query: 'faro de niebla izquierdo' },
+  { canonical: 'faro de niebla izquierdo', query: 'faro niebla izquierdo' },
+  { canonical: 'motor remanufacturado', query: 'motor remanufacturado' },
+  { canonical: 'motor remanufacturado', query: 'motor' },
+  { canonical: 'cabeza de motor nueva', query: 'cabeza de motor nueva' },
+  { canonical: 'cabeza de motor nueva', query: 'cabeza motor nueva' },
+  { canonical: 'radiador', query: 'radiador' },
+  { canonical: 'bieleta delantera', query: 'bieleta delantera' },
+  { canonical: 'bieleta delantera', query: 'canilla delantera' },
+  { canonical: 'bieleta delantera', query: 'link delantero' },
+  { canonical: 'guia de fascia delantera derecha', query: 'guia de fascia delantera derecha' },
+  { canonical: 'guia de fascia delantera derecha', query: 'guia de facia delantera derecha' }
+];
+
 // 100 greeting cases (20 variants × 5 harmless wrappers).
 const greetings = ['Hola', 'Holi', 'Hey', 'Buenos días', 'Buenas tardes', 'Buenas noches', 'Buen día', 'Inicio'];
 for (let i = 0; i < 85; i += 1) {
@@ -125,10 +150,10 @@ for (let i = 0; i < 15; i += 1) {
 // remove conversational filler before any Shopify request is made.
 for (let i = 0; i < 150; i += 1) {
   const [make, model, year] = vehicles[i % vehicles.length];
-  const [part] = parts[i % parts.length];
+  const { canonical, query: part } = partQueries[i % partQueries.length];
   const input = `${i % 2 ? 'Hola, necesito' : 'Estoy buscando'} ${part} para mi ${make} ${model} modelo ${year}, por favor`;
   const focused = buildSprFocusedSearchQuery(input);
-  expect(`keywords conserva pieza ${i}`, focused.includes(canonicalizeSprPartSynonyms(part).split(' ')[0]));
+  expect(`keywords conserva pieza ${i}`, focused.includes(canonicalizeSprPartSynonyms(canonical).split(' ')[0]));
   expect(`keywords conserva marca ${i}`, focused.includes(normalizeBotText(make)));
   expect(`keywords conserva modelo ${i}`, focused.includes(normalizeBotText(model)));
   expect(`keywords conserva año ${i}`, focused.includes(String(year)));
@@ -142,8 +167,8 @@ for (let i = 0; i < 150; i += 1) {
 // make/model/year or wrong part cannot pass by returning a nearby product.
 for (let i = 0; i < 150; i += 1) {
   const [make, model, year] = vehicles[i % vehicles.length];
-  const [part] = parts[i % parts.length];
-  const fixture = item(`${part.toUpperCase()} ${make.toUpperCase()} ${model.toUpperCase()} ${year}`, { engine: /motor|cabeza/.test(part) });
+  const { canonical, query: part } = partQueries[i % partQueries.length];
+  const fixture = item(`${canonical.toUpperCase()} ${make.toUpperCase()} ${model.toUpperCase()} ${year}`, { engine: /motor|cabeza/.test(canonical) });
   const query = `Quiero ${part} para ${make} ${model} año ${year}`;
   const matches = findSprEngineMatches([fixture], query);
   expect(`catálogo coincide ${i}`, matches.length === 1 && matches[0].id === fixture.id, JSON.stringify({ query, matches }));
