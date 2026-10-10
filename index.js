@@ -53,9 +53,9 @@ if (!admin.apps.length) {
 const MASTER_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'dt_crm_whatsapp_verify_token_2026';
 const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || 'v26.0';
 const META_APP_SECRET = process.env.META_APP_SECRET || '';
-// Tenant-safe defaults are applied to every new client. They keep each bot
-// isolated, require its own Meta connection, and route uncertain requests to
-// an advisor instead of sending an unverified inventory denial.
+// Defaults that are applied to every tenant when a bot has not yet been
+// configured. They keep the assistant tenant-scoped and prevent an uncertain
+// catalog result from becoming an incorrect "out of stock" claim.
 const TENANT_POLICY_VERSION = 'tenant-safe-defaults-20261010';
 const TENANT_SAFE_ONBOARDING_POLICY = Object.freeze({
   tenant_isolation_required: true,
@@ -76,6 +76,8 @@ function getTenantSafeBotDefaults(tenant = {}) {
     policy_version: TENANT_POLICY_VERSION,
     silent_uncertain_fallback: true,
     onboarding_policy: { ...TENANT_SAFE_ONBOARDING_POLICY },
+    welcome_message: `¡Hola! 👋 Gracias por comunicarte con ${name}. Soy tu asistente virtual y con gusto te ayudo.`,
+    out_of_hours_message: `¡Hola! Gracias por escribir a ${name}. En este momento estamos fuera de horario; registré tu consulta para que un asesor la revise.`,
     fallback_message: '',
     custom_instructions: `Eres el asistente oficial de ${name}. Responde con amabilidad y precisión. Busca por palabras clave y usa marca, modelo, año y pieza para verificar la solicitud antes de responder. No inventes precios, compatibilidad ni existencias. Si no puedes confirmar la información con seguridad, marca la conversación para revisión de un asesor y no envíes una respuesta automática. Mantén siempre el nombre e identidad de esta empresa y no menciones otras empresas o cuentas.`
   };
@@ -94,7 +96,7 @@ function mergeTenantSafeBotSettings(tenant, settings) {
   };
 }
 // Auto-reactivate the bot after an advisor has been idle.
-const HUMAN_HANDOFF_IDLE_MINUTES = Math.max(5, Number(process.env.HUMAN_HANDOFF_IDLE_MINUTES || 10));
+const HUMAN_HANDOFF_IDLE_MINUTES = Math.max(5, Number(process.env.HUMAN_HANDOFF_IDLE_MINUTES || 30));
 
 function timestampMs(value) {
   if (!value) return 0;
@@ -107,10 +109,9 @@ function createUniqueId(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-// Meta puede entregar el mismo número mexicano como 521XXXXXXXXXX o
-// 52XXXXXXXXXX. Además, algunas conversaciones antiguas conservaron el
-// prefijo de una empresa migrada. Un único ID canónico evita crear otra ficha
-// para el mismo contacto.
+// Meta normally sends the canonical international number, but older webhook
+// deliveries and migrated conversations may still contain Mexico's legacy
+// 521XXXXXXXXXX form. Always use one key for the same WhatsApp contact.
 function normalizeWhatsAppPhone(value) {
   let digits = String(value || '').replace(/[^0-9]/g, '');
   if (/^521\d{10}$/.test(digits)) digits = `52${digits.slice(3)}`;
@@ -124,19 +125,20 @@ function canonicalWhatsAppConversationId(companyId, phone) {
     : `conv_${companyId}_whatsapp_unknown`;
 }
 
+/**
+ * Find a legacy conversation created with a different phone representation.
+ * This prevents a new webhook from opening a second inbox card for the same
+ * company/contact while preserving the canonical document id going forward.
+ */
 async function loadWhatsAppConversation(dbInstance, companyId, phone) {
   const canonicalId = canonicalWhatsAppConversationId(companyId, phone);
   const directSnap = await dbInstance.doc(`conversations/${canonicalId}`).get();
-  const directData = directSnap.exists ? directSnap.data() : null;
+  if (directSnap.exists) return { id: canonicalId, data: directSnap.data(), legacyIds: [] };
 
   const targetPhone = normalizeWhatsAppPhone(phone);
-  if (!targetPhone) return { id: canonicalId, data: directData, legacyIds: [] };
+  if (!targetPhone) return { id: canonicalId, data: null, legacyIds: [] };
 
   try {
-    // New conversations carry a normalized phone field, so lookups remain
-    // bounded even when a tenant has hundreds of thousands of conversations.
-    // The capped legacy scan is only for records written before this field
-    // existed and is removed after the first successful migration.
     let snapshot = await dbInstance.collection('conversations')
       .where('contact_phone_normalized', '==', targetPhone)
       .limit(20)
@@ -158,10 +160,9 @@ async function loadWhatsAppConversation(dbInstance, companyId, phone) {
       const storedPhone = normalizeWhatsAppPhone(data.external_user_id || data.contact_phone);
       return storedPhone === targetPhone;
     });
-    if (!matches.length) return { id: canonicalId, data: directData, legacyIds: [] };
+    if (!matches.length) return { id: canonicalId, data: null, legacyIds: [] };
 
     const preferred = matches.find(doc => doc.id === canonicalId)
-      || (directData ? { id: canonicalId, data: () => directData } : null)
       || matches.slice().sort((a, b) => timestampMs((b.data() || {}).updated_at) - timestampMs((a.data() || {}).updated_at))[0];
     return {
       id: canonicalId,
@@ -170,7 +171,7 @@ async function loadWhatsAppConversation(dbInstance, companyId, phone) {
     };
   } catch (error) {
     console.warn('Could not resolve legacy WhatsApp conversation:', error.message);
-    return { id: canonicalId, data: directData, legacyIds: [] };
+    return { id: canonicalId, data: null, legacyIds: [] };
   }
 }
 
@@ -221,185 +222,43 @@ function normalizeBotText(value) {
     .trim();
 }
 
-function isFriendlyGreetingText(value) {
-  const text = normalizeBotText(value);
-  return /^(?:(?:hola|holi|hey|hello)\s+)?(?:hola|holi|hey|hello|buen|buen dia|buenos|buenos dias|buenas|buenas tardes|buenas noches|inicio)$/.test(text);
-}
+// Customers often type collision parts phonetically or with one missing
+// letter. Normalize only well-known catalog variants in the query so a typo
+// such as "facia"/"kickn" does not turn an exact catalog match into a false
+// out-of-stock answer. Product titles remain unchanged and are still checked
+// strictly against the normalized query.
+const SPR_CATALOG_TERM_ALIASES = new Map([
+  ['facia', 'fascia'],
+  ['fasia', 'fascia'],
+  ['faccia', 'fascia'],
+  ['kickn', 'kicks'],
+  ['kiccks', 'kicks'],
+  ['kikcs', 'kicks']
+]);
 
-function isCourtesyText(value) {
-  const text = normalizeBotText(value);
-  return /^(?:(?:muchas|muchisimas|mil)\s+)?gracias(?:\s+(?:por|igualmente|de todos modos|todo|tu|su|te|le)\b.*)?$/.test(text)
-    || /^(?:(?:te|le)\s+)?agradezco\b/.test(text);
-}
-
-// Large pickups use different suspension/body configurations for 4x4 and
-// 4x2. Route these requests to an advisor before catalog matching so the bot
-// never rejects a valid part or sends a quote for the wrong configuration.
-function normalizeSprLargePickupText(value) {
+function normalizeSprCatalogText(value) {
   return normalizeBotText(value)
-    .replace(/\bf\s*[- ]?\s*(150|250|350)\b/g, 'f$1')
-    .replace(/\b4\s*x\s*([24])\b/g, '4x$1')
-    .replace(/\b(pick)\s+up\b/g, '$1up');
+    .split(' ')
+    .map(token => SPR_CATALOG_TERM_ALIASES.get(token) || token)
+    .join(' ')
+    .trim();
 }
 
-function isSprLargePickupRequest(value) {
-  const text = normalizeSprLargePickupText(value);
-  const namedLargePickup = /\b(?:lobo|f150|f250|f350|silverado|cheyenne|sierra|ram(?:\s*(?:1500|2500|3500))?|tundra|titan)\b/.test(text);
-  const genericLargePickup = /\b(?:camioneta(?:s)?\s+grande(?:s)?|pickup(?:s)?|pickup\s+grande(?:s)?)\b/.test(text);
-  return namedLargePickup || genericLargePickup;
-}
-
-function getSprLargePickupDriveType(value) {
-  const text = normalizeSprLargePickupText(value);
-  if (/\b(?:4x4|4wd|cuatro\s+x\s+cuatro|doble\s+traccion)\b/.test(text)) return '4x4';
-  if (/\b(?:4x2|2wd|cuatro\s+x\s+dos)\b/.test(text)) return '4x2';
-  return null;
-}
-
-// Commercial stages are advanced by evidence from the conversation. The bot
-// never regresses a lead and never overwrites the two terminal stages selected
-// by a person in the CRM.
-const LEAD_STAGE_RANK = Object.freeze({
-  'Nuevo Lead': 0,
-  'Contactado': 1,
-  'Interesado': 2,
-  'Cotización enviada': 3,
-  'Seguimiento pendiente': 4,
-  'Cliente ganado': 5,
-  'Cliente perdido': 5
-});
-
-function leadStageRank(stage) {
-  return Object.prototype.hasOwnProperty.call(LEAD_STAGE_RANK, stage)
-    ? LEAD_STAGE_RANK[stage]
-    : 0;
-}
-
-function detectAutomaticLeadStage({ messageText = '', botReply = '', humanHandoff = false, outboundSuccess = false, source = 'bot' } = {}) {
-  const message = normalizeBotText(messageText);
-  const reply = normalizeBotText(botReply);
-  const rawReply = String(botReply || '').toLowerCase();
-
-  if (source === 'agent' || humanHandoff) return 'Seguimiento pendiente';
-
-  // Only use a strong purchase phrase for conversion. “Me interesa” is still
-  // an interested prospect and must not create a client prematurely.
-  if (/\b(quiero comprar|lo compro|la compro|confirmo (?:la )?compra|hacer (?:un )?pedido|realizar (?:un )?pedido|pasame los datos para pagar|datos para pagar|para pagar|ordenar)\b/.test(message)) {
-    return 'Cliente ganado';
+// "Dirección" is also a very common automotive part (steering rack/assembly).
+// Only treat it as the business address when the customer clearly asks for the
+// location of the store or uses an explicit location phrase.
+function isCustomerLocationQuestion(value) {
+  const normalized = normalizeBotText(value);
+  if (/\b(ubicacion|ubicados|donde estan|donde se encuentran|sucursal|domicilio|horarios?)\b/.test(normalized)) {
+    return true;
   }
-
-  const productInterest = /\b(motor(?:es)?|cabeza(?:s)?|culata(?:s)?|amortiguador(?:es)?|suspension|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|fascia(?:s)?|cofre|salpicadera|carroceria|pieza(?:s)?|refaccion(?:es)?|balata(?:s)?|pastilla(?:s)?|freno(?:s)?|radiador|bomba|turbo|embrague|clutch|maza(?:s)?|balero(?:s)?|bieleta(?:s)?|horquilla(?:s)?|flecha(?:s)?|terminal(?:es)?|rotula(?:s)?|direccion|soporte|precio|cotiza(?:r|cion)?|disponible|existencia|stock|busco|necesito|quiero|me interesa)\b/.test(message);
-  const quoteReply = outboundSuccess && (
-    /sprautopartes\.mx\/products/i.test(rawReply)
-    || /(?:encontre estas opciones|precio (?:normal|vigente)|cotizacion|disponibilidad|disponible|existencia por confirmar)/.test(reply)
+  if (!/\bdireccion\b/.test(normalized)) return false;
+  return (
+    /\b(?:cual es|dime|me compartes|me das|compartenos|comparteme)\s+(?:la\s+|su\s+)?direccion\b/.test(normalized)
+    || /\bsu\s+direccion\b/.test(normalized)
+    || /\bdireccion\s+(?:del|de la)\s+(?:local|sucursal|negocio|tienda|oficina|empresa)\b/.test(normalized)
+    || /\bdireccion\s+(?:de|del)\s+(?:spr|ustedes|la empresa|el negocio|la tienda)\b/.test(normalized)
   );
-
-  if (quoteReply && productInterest) return 'Cotización enviada';
-  if (productInterest) return 'Interesado';
-  return 'Contactado';
-}
-
-function shouldAdvanceLeadStage(currentStage, targetStage) {
-  if (!targetStage || currentStage === 'Cliente ganado' || currentStage === 'Cliente perdido') return false;
-  return leadStageRank(targetStage) > leadStageRank(currentStage);
-}
-
-async function advanceLeadStageAutomatically(dbInstance, {
-  leadId,
-  messageText = '',
-  botReply = '',
-  humanHandoff = false,
-  outboundSuccess = false,
-  source = 'bot',
-  currentStage = ''
-} = {}) {
-  if (!dbInstance || !leadId) return null;
-
-  let stage = currentStage || 'Nuevo Lead';
-  const leadRef = dbInstance.doc(`leads/${leadId}`);
-  try {
-    const leadSnap = await leadRef.get();
-    if (leadSnap.exists) stage = String(leadSnap.data()?.estado || stage).trim() || stage;
-  } catch (error) {
-    console.warn(`Could not read lead stage for ${leadId}:`, error.message);
-  }
-
-  const targetStage = detectAutomaticLeadStage({ messageText, botReply, humanHandoff, outboundSuccess, source });
-  if (!shouldAdvanceLeadStage(stage, targetStage)) return stage;
-
-  const now = new Date().toISOString();
-  try {
-    await leadRef.set({
-      estado: targetStage,
-      estado_actualizado_por: 'DT Bot Core',
-      estado_actualizado_at: now,
-      estado_actualizacion_automatica: true,
-      ultima_actividad: now,
-      ultima_interaccion: String(messageText || '').trim().slice(0, 500)
-    }, { merge: true });
-    console.log(`📌 [Lead Stage Auto] ${leadId}: ${stage} → ${targetStage}`);
-    return targetStage;
-  } catch (error) {
-    console.warn(`Could not update automatic lead stage for ${leadId}:`, error.message);
-    return stage;
-  }
-}
-
-// Customer language varies widely by region and by shop. Keep these aliases
-// in one place so the catalog matcher can search the canonical part name while
-// still accepting the wording a customer actually uses.
-const SPR_PART_SYNONYM_GROUPS = [
-  { canonical: 'amortiguador', aliases: ['amortiguador', 'amortiguadores', 'amort', 'pierna completa', 'piernas', 'pierna', 'strut', 'shock', 'shocks'] },
-  { canonical: 'base de amortiguador', aliases: ['base de amortiguador', 'bases de amortiguador', 'base amortiguador', 'bases amortiguador', 'base amort', 'bases amort', 'base de pierna', 'bases de pierna'] },
-  { canonical: 'bieleta', aliases: ['bieleta', 'canilla', 'canillas', 'link'] },
-  { canonical: 'terminal', aliases: ['terminal interior', 'terminal exterior', 'terminales'] },
-  { canonical: 'rotula', aliases: ['rotula direccion exterior'] },
-  { canonical: 'junta homocinetica', aliases: ['junta homocinetica', 'espiga', 'espigas', 'punta homocinetica', 'punta de flecha'] },
-  { canonical: 'horquilla', aliases: ['horquilla', 'brazo de suspension', 'brazo de control', 'tijera', 'meseta'] },
-  { canonical: 'caja de direccion', aliases: ['caja de direccion', 'cremallera', 'steering'] },
-  { canonical: 'balero', aliases: ['balero', 'rodamiento', 'bearing'] },
-  { canonical: 'maza', aliases: ['maza', 'cubo', 'hub'] },
-  { canonical: 'flecha', aliases: ['flecha', 'semieje', 'eje homocinetico'] },
-  { canonical: 'faro', aliases: ['faro delantero', 'faro', 'headlamp'] },
-  { canonical: 'calavera', aliases: ['calavera', 'mica trasera', 'stop', 'rear lamp'] },
-  { canonical: 'fascia', aliases: ['fascia', 'facia', 'fasia', 'faccia', 'defensa', 'bumper'] },
-  { canonical: 'espejo', aliases: ['espejo', 'retrovisor'] },
-  { canonical: 'soporte de motor', aliases: ['soporte de motor', 'base de motor', 'taco de motor'] },
-  { canonical: 'embrague', aliases: ['embrague', 'clutch', 'repset'] },
-  { canonical: 'tornillo', aliases: ['tornillo', 'estabilizador', 'cacahuate', 'cachuate', 'cahuate', 'cacuate'] }
-];
-
-function escapeSprRegex(value) {
-  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-const SPR_PART_SYNONYM_REPLACERS = SPR_PART_SYNONYM_GROUPS.map(group => {
-  const aliases = [...new Set(group.aliases.map(alias => normalizeBotText(alias)))]
-    .sort((a, b) => b.length - a.length)
-    .map(escapeSprRegex);
-  return { canonical: group.canonical, pattern: new RegExp(`\\b(?:${aliases.join('|')})\\b`, 'g') };
-});
-
-function canonicalizeSprPartSynonyms(value) {
-  let normalized = normalizeBotText(value);
-  for (const replacer of SPR_PART_SYNONYM_REPLACERS) {
-    normalized = normalized.replace(replacer.pattern, ` ${replacer.canonical} `);
-  }
-  // Voice transcription and quick typing frequently turn “Chevy” into
-  // “Chev soy” (or a close variant). Treat the phrase as the vehicle name
-  // before compacting model/year tokens; otherwise “soy 1985” becomes the
-  // unrelated model token “soy1985” and a valid grille is rejected.
-  normalized = normalized.replace(/\bchev\s+(?:soy|soi|boy|boi|hoy)\b/g, ' chevy ');
-  // Correct a small set of common vehicle-name typos only after the normal
-  // accent and part-synonym normalization. This keeps the matcher tolerant
-  // without allowing unrelated words to be guessed as a make or model.
-  const vehicleAliases = new Map([
-    ['kickn', 'kicks'],
-    ['kikcs', 'kicks'],
-    ['kiccks', 'kicks']
-  ]);
-  normalized = normalized.split(/\s+/).map(token => vehicleAliases.get(token) || token).join(' ');
-  return normalized.replace(/\s+/g, ' ').trim();
 }
 
 
@@ -414,7 +273,8 @@ function decorateWhatsAppKeywordLine(line) {
     [/^\s*(env[ií]o|env[ií]os|entrega)\b/i, '🚚'],
     [/^\s*(garant[ií]a)\b/i, '🛡️'],
     [/^\s*(asesor|asesora|equipo comercial)\b/i, '🧑‍💼'],
-    [/^\s*(ubicaci[oó]n|direcci[oó]n|sucursal)\b/i, '📍'],
+    [/^\s*(direcci[oó]n|terminal|r[oó]tula|caja de direcci[oó]n)\b/i, '🔧'],
+    [/^\s*(ubicaci[oó]n|ubicados|sucursal|domicilio)\b/i, '📍'],
     [/^\s*(motor|motores|cabeza|cabezas|culata)\b/i, '🔩'],
     [/^\s*(paquete|crm core|whatsapp|api chat bot)\b/i, '🚀']
   ];
@@ -465,76 +325,16 @@ function formatWhatsAppReply(value) {
   return lines.join('\n');
 }
 
-// Apply the safe, deterministic subset of the DT Bot configuration to live
-// replies. Free-form instructions remain tenant data; only explicit style
-// directives are interpreted so a typo in the field cannot change catalog
-// matching or invent product information.
-function applyBotConfiguration(value, settings) {
-  let text = String(value || '').trim();
-  if (!text || !settings) return text;
-
-  const instructions = normalizeBotText(settings.custom_instructions || '');
-  const personality = String(settings.personality || '').toLowerCase();
-  const noEmojis = /\b(?:sin|no)\s+emojis?\b/.test(instructions);
-  const explicitUseEmojis = /\b(?:usar|usa|con)\s+emojis?\b/.test(instructions);
-  const stripEmoji = () => {
-    text = text.replace(/[\p{Extended_Pictographic}\uFE0F]/gu, '').replace(/\s{2,}/g, ' ').trim();
-  };
-  if (noEmojis || (personality === 'profesional' && !explicitUseEmojis)) stripEmoji();
-  if ((personality === 'cercano' || explicitUseEmojis) && !noEmojis && !/\p{Extended_Pictographic}/u.test(text)) text = `🙂 ${text}`;
-  if (personality === 'directo') text = text.replace(/\n{3,}/g, '\n\n').trim();
-  if (personality === 'comercial' && !/[¿?]/.test(text) && !/(no tenemos|no contamos|fuera de horario|asesor|cotizaci[oó]n)/i.test(text)) {
-    text += '\n\n¿Te preparo una cotización?';
-  }
-  if (personality === 'tecnico' && /(cat[aá]logo|pieza|faro|motor|amortiguador|precio)/i.test(text) && !/marca,?\s*modelo\s*y\s*a[nñ]o/i.test(text)) {
-    text += '\n\nPara validar compatibilidad, confirma marca, modelo y año.';
-  }
-  return text;
-}
-
-const KNOWLEDGE_CACHE_TTL_MS = Math.max(5000, Number(process.env.KNOWLEDGE_CACHE_TTL_MS || 15000));
-const knowledgeCache = new Map();
-const knowledgeFetches = new Map();
-
-async function getTenantKnowledgeBase(dbInstance, companyId) {
-  const key = String(companyId || '').trim();
-  if (!dbInstance || !key) return [];
-  const now = Date.now();
-  const cached = knowledgeCache.get(key);
-  if (cached && now - cached.fetchedAt < KNOWLEDGE_CACHE_TTL_MS) return cached.items;
-  if (knowledgeFetches.has(key)) return knowledgeFetches.get(key);
-  const fetchPromise = (async () => {
-    try {
-      const kbSnap = await dbInstance.collection('knowledge_base')
-        .where('company_id', '==', key)
-        .where('enabled', '==', true)
-        .get();
-      const items = kbSnap.docs.map(doc => doc.data());
-      knowledgeCache.set(key, { fetchedAt: Date.now(), items });
-      if (knowledgeCache.size > 500) {
-        const oldestKey = knowledgeCache.keys().next().value;
-        if (oldestKey) knowledgeCache.delete(oldestKey);
-      }
-      return items;
-    } catch (error) {
-      console.warn(`Could not load knowledge base for ${key}:`, error.message);
-      return cached?.items || [];
-    } finally {
-      knowledgeFetches.delete(key);
-    }
-  })();
-  knowledgeFetches.set(key, fetchPromise);
-  return fetchPromise;
-}
-
 
 const SPR_ENGINE_COLLECTION_URL = process.env.SPR_FULL_CATALOG_URL || process.env.SPR_ENGINE_COLLECTION_URL || 'https://sprautopartes.mx/products.json?limit=250';
 const SPR_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_CATALOG_TTL_MS || 60000));
-// Shopify product titles may omit trim/package words included in natural-language requests.
-// Keep make/model, year, part and side strict while treating these descriptors as optional.
-const SPR_OPTIONAL_VEHICLE_WORDS = new Set(['gl','gls','gle','glx','lt','ls','le','lx','ex','se','sv','sr','slt','xlt','xl','xle','xse','mind','mild','sport','touring','limited','premium','plus','classic','sedan','hatchback','hb','coupe','convertible','cabina','cab','sencilla','doble','pickup','pick','up','2wd','4wd','4x2','4x4']);
-const SPR_OPTIONAL_VEHICLE_WORDS_PATTERN = /\b(gl|gls|gle|glx|lt|ls|le|lx|ex|se|sv|sr|slt|xlt|xl|xle|xse|mind|mild|sport|touring|limited|premium|plus|classic|sedan|hatchback|hb|coupe|convertible|cabina|cab|sencilla|doble|pickup|pick|up|2wd|4wd|4x2|4x4)\b/gi;
-// Promoción de septiembre desactivada: el bot muestra únicamente el precio normal.
+// Shopify product titles usually omit trim/package words that customers include
+// in natural language (for example, "GL" or "Mind"). Keep the vehicle model,
+// year and requested part strict while treating these descriptors as optional.
+const SPR_OPTIONAL_VEHICLE_WORDS = new Set(['gl', 'gls', 'gle', 'glx', 'lt', 'ls', 'le', 'lx', 'ex', 'se', 'sv', 'sr', 'slt', 'xlt', 'xl', 'xle', 'xse', 'mind', 'mild', 'sport', 'touring', 'limited', 'premium', 'plus', 'classic', 'sedan', 'hatchback', 'hb', 'coupe', 'convertible']);
+const SPR_OPTIONAL_VEHICLE_WORDS_PATTERN = /\b(gl|gls|gle|glx|lt|ls|le|lx|ex|se|sv|sr|slt|xlt|xl|xle|xse|mind|mild|sport|touring|limited|premium|plus|classic|sedan|hatchback|hb|coupe|convertible)\b/gi;
+// La promoción de septiembre quedó desactivada: el bot debe mostrar únicamente
+// el precio normal de motores y cabezas de motor.
 const SPR_SEPTEMBER_DISCOUNT_PERCENT = 0;
 let sprCatalogCache = { fetchedAt: 0, items: [] };
 let sprCatalogFetchPromise = null;
@@ -551,7 +351,7 @@ const ALDO_STOCK_CATEGORY_PATTERN = /\b(colision|choque|faro(?:s)?|niebla|calave
 const aldoStockCache = new Map();
 
 function isAldoStockCategoryQuery(value) {
-  return ALDO_STOCK_CATEGORY_PATTERN.test(canonicalizeSprPartSynonyms(value));
+  return ALDO_STOCK_CATEGORY_PATTERN.test(normalizeSprCatalogText(value));
 }
 
 function parseAldoStockResponse(data, query) {
@@ -602,7 +402,6 @@ async function searchAldoStock(query) {
     }
   }
   aldoStockCache.set(cacheKey, { fetchedAt: now, result });
-  // Keep user-entered queries from growing one Render instance forever.
   if (aldoStockCache.size > 500) {
     const oldestKey = aldoStockCache.keys().next().value;
     if (oldestKey) aldoStockCache.delete(oldestKey);
@@ -625,22 +424,6 @@ function stripSprHtml(value) {
 
 function isSeptemberInMexico() {
   return Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Mexico_City', month: 'numeric' }).format(new Date())) === 9;
-}
-
-function getMexicoCityDateParts(value = new Date()) {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Mexico_City',
-    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
-  }).formatToParts(value).reduce((result, part) => {
-    if (part.type !== 'literal') result[part.type] = part.value;
-    return result;
-  }, {});
-  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
-}
-
-function isOctoberDtMarketingPromotionActive(value = new Date()) {
-  const mexicoNow = getMexicoCityDateParts(value);
-  return mexicoNow >= '2026-10-01T00:00:00' && mexicoNow < '2026-10-30T12:00:00';
 }
 
 function normalizeSprProduct(product) {
@@ -673,7 +456,6 @@ function normalizeSprProduct(product) {
     id: product?.id || handle,
     title,
     normalizedTitle: normalizeBotText(title),
-    handle,
     vendor,
     productType,
     tags,
@@ -707,18 +489,48 @@ async function getSprEngineCatalog() {
   return sprCatalogFetchPromise;
 }
 
+const KNOWLEDGE_CACHE_TTL_MS = Math.max(5000, Number(process.env.KNOWLEDGE_CACHE_TTL_MS || 15000));
+const knowledgeCache = new Map();
+const knowledgeFetches = new Map();
+
+async function getTenantKnowledgeBase(dbInstance, companyId) {
+  const key = String(companyId || '').trim();
+  if (!dbInstance || !key) return [];
+  const now = Date.now();
+  const cached = knowledgeCache.get(key);
+  if (cached && now - cached.fetchedAt < KNOWLEDGE_CACHE_TTL_MS) return cached.items;
+  if (knowledgeFetches.has(key)) return knowledgeFetches.get(key);
+  const fetchPromise = (async () => {
+    try {
+      const kbSnap = await dbInstance.collection('knowledge_base')
+        .where('company_id', '==', key)
+        .where('enabled', '==', true)
+        .get();
+      const items = kbSnap.docs.map(doc => doc.data());
+      knowledgeCache.set(key, { fetchedAt: Date.now(), items });
+      if (knowledgeCache.size > 500) {
+        const oldestKey = knowledgeCache.keys().next().value;
+        if (oldestKey) knowledgeCache.delete(oldestKey);
+      }
+      return items;
+    } catch (error) {
+      console.warn(`Could not load knowledge base for ${key}:`, error.message);
+      return cached?.items || [];
+    } finally {
+      knowledgeFetches.delete(key);
+    }
+  })();
+  knowledgeFetches.set(key, fetchPromise);
+  return fetchPromise;
+}
+
 async function searchSprCatalog(query) {
   const response = await axios.get('https://sprautopartes.mx/search/suggest.json', {
-    // Allow the catalog a little more time to return a useful result. A
-    // missing hit here should not immediately become a false "no existe".
-    timeout: 12000,
+    timeout: 9000,
     params: {
       q: String(query || '').trim(),
       'resources[type]': 'product',
-      // The first ten Shopify suggestions can be dominated by nearby
-      // products. Fetch a wider window and apply our vehicle/part filters
-      // locally before deciding that nothing matches.
-      'resources[limit]': 24
+      'resources[limit]': 10
     },
     headers: { 'User-Agent': 'DT Bot Core / SPR catalog search' }
   });
@@ -728,51 +540,9 @@ async function searchSprCatalog(query) {
   return products.map(normalizeSprProduct).filter(item => item.title && item.regularPrice > 0);
 }
 
-// Compare catalog tokens without letting punctuation differences break a
-// valid vehicle match, such as `NP300` vs `NP-300`.
-function sprTokenMatches(haystack, token) {
-  const normalizedToken = normalizeBotText(token).trim();
-  if (!normalizedToken) return false;
-  // Chevrolet/Chevy are the same make in the SPR catalog. Accept the common
-  // abbreviated spelling “chev” as well, while keeping all other vehicle
-  // identity tokens strict.
-  const vehicleAliases = {
-    chevrolet: ['chevrolet', 'chevy', 'chev'],
-    chevy: ['chevrolet', 'chevy', 'chev'],
-    chev: ['chevrolet', 'chevy', 'chev'],
-    volkswagen: ['volkswagen', 'vw'],
-    vw: ['volkswagen', 'vw']
-  };
-  const aliases = vehicleAliases[normalizedToken];
-  if (aliases) {
-    return aliases.some(alias => {
-      if (haystack.includes(alias)) return true;
-      const compactAlias = alias.replace(/[^a-z0-9]/g, '');
-      return compactAlias.length >= 3 && haystack.replace(/[^a-z0-9]/g, '').includes(compactAlias);
-    });
-  }
-  // Numeric model fragments must not match inside another number (e.g. model
-  // L200 must not match the unrelated number 2500). Allow a letter boundary
-  // so compact catalog handles such as `l200` still resolve correctly.
-  if (/^\d+$/.test(normalizedToken)) {
-    return new RegExp(`(?:^|[^0-9])${normalizedToken}(?:$|[^0-9])`).test(haystack);
-  }
-  if (haystack.includes(normalizedToken)) return true;
-  const compactToken = normalizedToken.replace(/[^a-z0-9]/g, '');
-  if (compactToken.length < 3) return false;
-  return haystack.replace(/[^a-z0-9]/g, '').includes(compactToken);
-}
-
-function isSprEngineSpecificationToken(token) {
-  const normalized = normalizeBotText(token).replace(/\s+/g, '');
-  return /^(?:\d+(?:\.\d+)?l?|\d+v|\d+cil|cilindros?|valvulas?|\d+(?:[-/]\d+)+|gasolina|diesel|manual|automatico|transmision)$/.test(normalized);
-}
-
 function findSprEngineMatches(items, lowerText) {
-  // Match against the focused request so greetings, courtesy and question
-  // wording cannot become accidental vehicle/model tokens.
-  const normalizedQuery = buildSprFocusedSearchQuery(lowerText);
-  const stopWords = new Set(['quiero', 'quieres', 'busco', 'buscando', 'necesito', 'ocupo', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'engine', 'series', 'de', 'del', 'es', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo', 'producto', 'productos', 'catalogo', 'catalog', 'refaccion', 'refacciones', 'pieza', 'piezas', 'stock', 'completo', 'completa', 'todo', 'toda', 'todos', 'todas', 'ver', 'muestrame', 'muéstrame', 'informacion', 'información', 'que', 'qué', 'marca', 'modelo', 'ano', 'año', 'version', 'delantero', 'delantera', 'delanteros', 'delanteras', 'trasero', 'trasera', 'traseros', 'traseras', 'izquierdo', 'izquierda', 'izquierdos', 'izquierdas', 'derecho', 'derecha', 'derechos', 'derechas', 'lado', 'principal', 'niebla', 'antiniebla', 'no', 'sin', 'valvula', 'valvulas', 'cil', 'cilindro', 'cilindros', 'con', 'abs', 'fwd', 'birlo', 'birlos', 'piloto', 'chofer', 'conductor', 'pasajero', 'cabina', 'cab', 'sencilla', 'doble', 'ocupo']);
+  const normalizedQuery = normalizeSprCatalogText(lowerText);
+  const stopWords = new Set(['quiero', 'quieres', 'busco', 'buscando', 'necesito', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'engine', 'series', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo', 'producto', 'productos', 'catalogo', 'catalog', 'refaccion', 'refacciones', 'pieza', 'piezas', 'stock', 'completo', 'completa', 'todo', 'toda', 'todos', 'todas', 'ver', 'muestrame', 'muéstrame', 'informacion', 'información', 'que', 'qué', 'delantero', 'delantera', 'trasero', 'trasera', 'izquierdo', 'izquierda', 'derecho', 'derecha', 'lado', 'principal', 'niebla', 'antiniebla', 'no', 'sin', 'quiero']);
   const tokens = normalizedQuery.split(' ').filter(token => token.length >= 3 && !stopWords.has(token));
   const categoryRules = [
     { key: 'motor', pattern: /\bmotor(?:es)?\b/ },
@@ -786,55 +556,20 @@ function findSprEngineMatches(items, lowerText) {
     { key: 'bomba', pattern: /\bbomba(?:s)?\b/ },
     { key: 'turbo', pattern: /\bturbo(?:s)?\b/ },
     { key: 'embrague', pattern: /\b(embrague|clutch)\b/ },
-    { key: 'maza', pattern: /\b(?:maza(?:s)?|balero(?:s)?(?:\s+de)?(?:\s+maza)?)\b/ },
-    { key: 'bieleta', pattern: /\b(?:bieleta(?:s)?|canilla(?:s)?|link)\b/ },
-    { key: 'junta', pattern: /\b(?:junta\s+homocinetica|espiga(?:s)?|punta\s+(?:homocinetica|de\s+flecha))\b/ },
-    { key: 'horquilla', pattern: /\b(?:horquilla(?:s)?|brazo\s+(?:de\s+)?(?:suspension|control)|tijera(?:s)?|meseta(?:s)?)\b/ },
-    { key: 'flecha', pattern: /\b(?:flecha(?:s)?|semieje(?:s)?|eje\s+homocinetico)\b/ },
-    { key: 'fascia', pattern: /\b(?:fascia(?:s)?|defensa(?:s)?|bumper(?:s)?)\b/ },
-    { key: 'tornillo', pattern: /\b(?:tornillo(?:s)?|estabilizador(?:es)?|cacahuate(?:s)?|cachuate(?:s)?|cahuate(?:s)?|cacuate(?:s)?)\b/ },
     { key: 'soporte', pattern: /\bsoporte(?:s)?\b/ },
     { key: 'iluminacion', pattern: /\b(faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?)\b/ },
-    { key: 'carroceria', pattern: /\b(parrilla(?:s)?|rejilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria|puerta(?:s)?)\b/ }
+    { key: 'colision', pattern: /\b(guia(?:s)?|fascia(?:s)?|moldura(?:s)?|defensa(?:s)?|parrilla(?:s)?|cofre|salpicadera(?:s)?)\b/ },
+    { key: 'carroceria', pattern: /\b(parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria)\b/ }
   ];
-  let requestedCategory = categoryRules.find(rule => rule.pattern.test(normalizedQuery));
-  // A vehicle engine specification can appear alongside the requested part
-  // (for example: "amortiguadores ... motor 4.6 2v"). Prefer the explicit
-  // part category so the word "motor" does not route the request to engines.
-  const explicitNonEngineCategory = categoryRules.find(rule => !['motor', 'cabeza'].includes(rule.key) && rule.pattern.test(normalizedQuery));
-  if (requestedCategory?.key === 'motor' && explicitNonEngineCategory) requestedCategory = explicitNonEngineCategory;
+  const requestedCategory = categoryRules.find(rule => rule.pattern.test(normalizedQuery));
   const requestedYears = [...normalizedQuery.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => Number(match[0]));
-  const requestedOrientation = normalizedQuery.match(/\b(izquierdo|izquierda|izquierdos|izquierdas|derecho|derecha|derechos|derechas|delantero|delantera|delanteros|delanteras|trasero|trasera|traseros|traseras|piloto|chofer|conductor|pasajero|copiloto)\b/)?.[1] || '';
-  const sideSemanticContext = /\b(?:lado|costado)\b/.test(normalizedQuery) || requestedCategory?.key === 'iluminacion';
-  const requestedSide = /\b(?:izquierdo|izquierda|izquierdos|izquierdas)\b/.test(normalizedQuery)
-    ? 'left'
-    : /\b(?:derecho|derecha|derechos|derechas)\b/.test(normalizedQuery)
-      ? 'right'
-      : sideSemanticContext && /\b(?:piloto|chofer|conductor)\b/.test(normalizedQuery)
-        ? 'left'
-        : sideSemanticContext && /\b(?:pasajero|copiloto)\b/.test(normalizedQuery)
-          ? 'right'
-      : '';
-  const requestedPosition = /\b(?:delantero|delantera|delanteros|delanteras|frontal|delant)\b/.test(normalizedQuery)
-    ? 'front'
-    : /\b(?:trasero|trasera|traseros|traseras|posterior|tras)\b/.test(normalizedQuery)
-      ? 'rear'
-      : '';
+  const requestedOrientation = normalizedQuery.match(/\b(izquierdo|izquierda|derecho|derecha|delantero|delantera|trasero|trasera)\b/)?.[1] || '';
   const negativeFogRequest = /\b(?:no|sin|evitar|ningun|ninguna)\b(?:\s+\w+){0,8}\s+(?:faro\s+de\s+)?niebla\b/.test(normalizedQuery);
-  // In a request such as "rejilla sin faro de niebla", the fog phrase is a
-  // negative feature of the grille. It must not turn the request into a fog
-  // lamp search or discard the grille as an unrelated lighting product.
-  if (negativeFogRequest) {
-    const nonLightingCategory = categoryRules.find(rule => rule.key !== 'iluminacion' && rule.pattern.test(normalizedQuery));
-    if (nonLightingCategory) requestedCategory = nonLightingCategory;
-  }
   const asksFogLight = !negativeFogRequest && /\b(?:faro\s+de\s+niebla|niebla|antiniebla)\b/.test(normalizedQuery);
-  const asksMainLight = !negativeFogRequest && !asksFogLight && /\b(?:faro|faros|principal|delantero|delantera)\b/.test(normalizedQuery);
-  const requestsManual = /\bmanual(?:es)?\b/.test(normalizedQuery);
-  const requestsElectric = /\b(?:electrico|electrica|electricos|electricas)\b/.test(normalizedQuery);
+  const asksMainLight = !asksFogLight && /\b(?:faro|faros|principal|delantero|delantera)\b/.test(normalizedQuery);
   const wantsHead = /\b(cabeza(?:s)?|culata(?:s)?)\b/.test(normalizedQuery);
   const wantsMotorAccessory = /\b(soporte(?:s)?|base(?:s)?|taco(?:s)?|montura(?:s)?|mount(?:s)?|sensor(?:es)?|accesorio(?:s)?)\b/.test(normalizedQuery);
-  const wantsMotor = requestedCategory?.key === 'motor' && /\bmotor(?:es)?\b/.test(normalizedQuery) && !wantsHead && !wantsMotorAccessory;
+  const wantsMotor = /\bmotor(?:es)?\b/.test(normalizedQuery) && !wantsHead && !wantsMotorAccessory;
   const motorAccessoryPattern = /\b(soporte(?:s)?|base(?:s)?|taco(?:s)?|montura(?:s)?|mount(?:s)?|sensor(?:es)?|accesorio(?:s)?)\b/;
   // A request for a motor must never be answered with a cylinder head. The
   // catalog uses both words in some titles (for example, "cabeza motor"), so
@@ -856,21 +591,20 @@ function findSprEngineMatches(items, lowerText) {
     return requestedYears.some(year => explicitYears.includes(year) || ranges.some(([start, end]) => year >= Math.min(start, end) && year <= Math.max(start, end)));
   };
   const itemMatchesRequestedOrientation = item => {
+    if (!requestedOrientation) return true;
     const title = item.normalizedTitle || '';
-    const bilateral = /\bamb[oa]s\s+lados?\b/.test(title) || /\bamb[oa]s\b/.test(title);
-    const titleIsRearLamp = /\b(?:calavera|stop|rear\s+lamp)\b/.test(title);
-    if (requestedSide === 'left' && !(/\bizquierd[oa]\b/.test(title) || bilateral)) return false;
-    if (requestedSide === 'right' && !(/\bderech[oa]\b/.test(title) || bilateral)) return false;
-    if (requestedPosition === 'front' && !(/\b(?:delanter[oa]s?|frontal(?:es)?|delant)\b/.test(title) || (requestedCategory?.key === 'iluminacion' && !titleIsRearLamp))) return false;
-    if (requestedPosition === 'rear' && !(/\b(?:traser[oa]s?|posterior(?:es)?|tras)\b/.test(title) || titleIsRearLamp)) return false;
+    if (requestedOrientation.startsWith('izquier')) return /\bizquierd[oa]\b/.test(title);
+    if (requestedOrientation.startsWith('derech')) return /\bderech[oa]\b/.test(title);
+    if (requestedOrientation.startsWith('delanter')) return /\b(?:delanter[oa]|frontal)\b/.test(title);
+    if (requestedOrientation.startsWith('traser')) return /\btraser[oa]\b/.test(title);
     return true;
   };
   const scored = items.map(item => {
     let score = 0;
-    const haystack = canonicalizeSprPartSynonyms([item.normalizedTitle, normalizeBotText(item.vendor), normalizeBotText(item.productType), normalizeBotText(item.tags), normalizeBotText(item.description), normalizeBotText(item.handle)].join(' '));
+    const haystack = [item.normalizedTitle, normalizeBotText(item.vendor), normalizeBotText(item.productType), normalizeBotText(item.tags)].join(' ');
     const matchedTokens = [];
     for (const token of tokens) {
-      if (sprTokenMatches(haystack, token)) {
+      if (haystack.includes(token)) {
         matchedTokens.push(token);
         score += item.normalizedTitle.includes(token) ? 5 : 2;
       }
@@ -920,28 +654,16 @@ function findSprEngineMatches(items, lowerText) {
     relevant = lightingMatches;
   }
 
-  // Features such as manual/electric are refinements. Prefer an exact feature
-  // match when the catalog has one, but do not turn a valid vehicle/part hit
-  // into a false negative when the title omits that qualifier.
-  if (requestsManual) {
-    const manualMatches = relevant.filter(row => /\bmanual(?:es)?\b/.test(row.haystack));
-    if (manualMatches.length) relevant = manualMatches;
-  } else if (requestsElectric) {
-    const electricMatches = relevant.filter(row => /\belectr(?:ico|ica|icos|icas)\b/.test(row.haystack));
-    if (electricMatches.length) relevant = electricMatches;
-  }
-
-  // Every meaningful make/model token must appear in the same product.
-  // Engine specs such as `2.4`, `16V`, `4CIL` and `3-4` describe the
-  // requested configuration; they are useful for ranking but must not make
-  // us reject a product whose title formats them differently.
+  // Every meaningful make/model token must appear in the same product. A
+  // previous implementation accepted any one token (for example, the make
+  // only), which let a request for a missing engine return another part from
+  // the same make. Orientation and year are checked separately above.
   const vehicleTokens = tokens
     .filter(token => !categoryRules.some(rule => rule.pattern.test(token)) && !/^\d{4}$/.test(token))
     .filter(token => !SPR_OPTIONAL_VEHICLE_WORDS.has(token))
-    .filter(token => !isSprEngineSpecificationToken(token))
     .filter(token => token.length >= 3 && !['spr'].includes(token));
   if (vehicleTokens.length) {
-    const exactVehicleMatches = relevant.filter(row => vehicleTokens.every(token => sprTokenMatches(row.haystack, token)));
+    const exactVehicleMatches = relevant.filter(row => vehicleTokens.every(token => row.haystack.includes(token)));
     if (!exactVehicleMatches.length) return [];
     relevant = exactVehicleMatches;
   }
@@ -952,329 +674,70 @@ function findSprEngineMatches(items, lowerText) {
 // Keep a specific vehicle request tied to the same vehicle in every catalog
 // path, including the live Shopify search fallback. This is a final guard in
 // case the search provider returns broad results for a query such as
-// \"Chevrolet Corsa 2005 motor remanufacturado\".
+// "Chevrolet Corsa 2005 motor remanufacturado".
 function filterStrictSprVehicleMatches(matches, query) {
-  const normalized = compactSprVehicleModelTokens(canonicalizeSprPartSynonyms(query));
+  const normalized = normalizeSprCatalogText(query);
   const requestedYears = [...normalized.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => Number(match[0]));
   const qualifierPattern = /\b(remanufacturad[oa]s?|reconstruid[oa]s?|usad[oa]s?|nuev[oa]s?|complet[oa]s?|original(?:es)?|generico(?:s)?|generica(?:s)?)\b/g;
   const identityTokens = normalized
-    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ').replace(SPR_CATALOG_EXTRA_FILLER_PATTERN, ' ').replace(SPR_OPTIONAL_VEHICLE_WORDS_PATTERN, ' ').replace(qualifierPattern, ' ')
-    .replace(/\b\d{4}\b/g, ' ')
+    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
+    .replace(SPR_OPTIONAL_VEHICLE_WORDS_PATTERN, ' ')
+    .replace(qualifierPattern, ' ')
+    .replace(/\b(?:19|20)\d{2}\b/g, ' ')
     .split(/\s+/)
-    .filter(token => (token.length >= 3 || (token.length >= 2 && /\d/.test(token))) && !['spr', 'ocupo'].includes(token))
-    .filter(token => !isSprEngineSpecificationToken(token));
+    .filter(token => (token.length >= 3 || (token.length >= 2 && /\d/.test(token))) && !['spr'].includes(token));
   if (!identityTokens.length && !requestedYears.length) return matches;
 
   return matches.filter(item => {
-    const haystack = canonicalizeSprPartSynonyms([item.normalizedTitle, normalizeBotText(item.vendor), normalizeBotText(item.productType), normalizeBotText(item.tags), normalizeBotText(item.description), normalizeBotText(item.handle)].join(' '));
-    if (!identityTokens.every(token => sprTokenMatches(haystack, token))) return false;
+    const haystack = [item.normalizedTitle, normalizeBotText(item.vendor), normalizeBotText(item.productType), normalizeBotText(item.tags)].join(' ');
+    if (!identityTokens.every(token => haystack.includes(token))) return false;
     if (!requestedYears.length) return true;
     const source = [item.title, item.description, item.tags].map(value => String(value || '')).join(' ');
     const explicitYears = [...source.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => Number(match[0]));
-    const ranges = [...source.matchAll(/\b((?:19|20)\d{2})\s*[-/]\s*((?:19|20)\d{2})\b/g)]
+    const ranges = [...source.matchAll(/\b((?:19|20)\d{2})\s*[-–/]\s*((?:19|20)\d{2})\b/g)]
       .map(match => [Number(match[1]), Number(match[2])]);
     return requestedYears.some(year => explicitYears.includes(year) || ranges.some(([start, end]) => year >= Math.min(start, end) && year <= Math.max(start, end)));
   });
 }
 
-// Second-pass search plan. The first matcher is intentionally strict; before
-// declaring a product missing, ask the catalog with canonical part names,
-// customer synonyms and both word orders.
-function buildSprExhaustiveSearchQueries(value) {
-  const normalized = canonicalizeSprPartSynonyms(value);
-  const focused = buildSprFocusedSearchQuery(normalized);
-  const partGroups = SPR_PART_SYNONYM_GROUPS.filter(group => {
-    const terms = [group.canonical, ...group.aliases]
-      .map(term => normalizeBotText(term))
-      .filter(Boolean);
-    return terms.some(term => new RegExp('\\b' + escapeSprRegex(term) + '\\b', 'i').test(normalized));
-  });
-  const allPartTerms = partGroups
-    .flatMap(group => [group.canonical, ...group.aliases])
-    .map(term => normalizeBotText(term))
-    .filter(Boolean)
-    .sort((a, b) => b.length - a.length);
-  const partPattern = allPartTerms.length
-    ? new RegExp('\\b(?:' + allPartTerms.map(escapeSprRegex).join('|') + ')\\b', 'gi')
-    : /$^/;
-  const vehicleText = focused
-    .replace(partPattern, ' ')
-    .replace(/\b(?:delantero|delantera|delanteros|delanteras|trasero|trasera|traseros|traseras|izquierdo|izquierda|izquierdos|izquierdas|derecho|derecha|derechos|derechas|lado|frente|atras|principal|niebla|antiniebla|piloto|chofer|conductor|pasajero|manual|electrico|electrica|electricos|electricas|con|sin|abs|fwd|birlo|birlos)\b/gi, ' ')
-    .replace(SPR_OPTIONAL_VEHICLE_WORDS_PATTERN, ' ')
-    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  const queries = [...buildSprCatalogSearchQueries(value), focused];
-  if (vehicleText) queries.push(vehicleText);
-  for (const group of partGroups) {
-    const terms = [...new Set([group.canonical, ...group.aliases.map(term => normalizeBotText(term))])]
-      .filter(Boolean)
-      .slice(0, 6);
-    for (const term of terms) {
-      if (vehicleText) {
-        queries.push(term + ' ' + vehicleText);
-        queries.push(vehicleText + ' ' + term);
-      }
-    }
-  }
-  return [...new Set(queries.map(query => String(query || '').replace(/\s+/g, ' ').trim()).filter(Boolean))].slice(0, 16);
-}
+// Search Shopify with the useful vehicle and part terms instead of the full
+// sentence. The catalog search is sensitive to filler words and trim details,
+// while make/model, year, part and side are the terms that identify the item.
+const SPR_SEARCH_FILLER_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|me|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|por|favor|que|qué|de|del|cotizacion|cotización|cotizar|precio|precios|cuanto|cuánto|cuesta|costo|disponible|disponibilidad|stock|modelo|año|ano|version|versión)\b/gi;
 
-function sprLevenshteinDistance(left, right) {
-  const a = String(left || '');
-  const b = String(right || '');
-  const row = Array.from({ length: b.length + 1 }, (_, index) => index);
-  for (let i = 1; i <= a.length; i += 1) {
-    let previous = row[0];
-    row[0] = i;
-    for (let j = 1; j <= b.length; j += 1) {
-      const current = row[j];
-      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, previous + (a[i - 1] === b[j - 1] ? 0 : 1));
-      previous = current;
-    }
-  }
-  return row[b.length];
-}
-
-function sprInvestigativeTokenMatches(haystack, token) {
-  if (sprTokenMatches(haystack, token)) return true;
-  const normalizedToken = normalizeBotText(token).replace(/[^a-z0-9]/g, '');
-  // Do not guess numeric model/year fragments. One-character tolerance is
-  // limited to long alphabetic words where transcription typos are plausible.
-  if (normalizedToken.length < 5 || /\d/.test(normalizedToken)) return false;
-  const words = normalizeBotText(haystack).split(/\s+/)
-    .map(word => word.replace(/[^a-z0-9]/g, ''))
-    .filter(word => word.length >= 5);
-  return words.some(word => Math.abs(word.length - normalizedToken.length) <= 1
-    && sprLevenshteinDistance(word, normalizedToken) <= 1);
-}
-
-// Last local pass before handing an uncertain request to an advisor. Category,
-// vehicle identity and compatible year remain mandatory; only catalog wording
-// and a single alphabetic typo are relaxed.
-function findSprExhaustiveMatches(items, query) {
-  const normalized = canonicalizeSprPartSynonyms(query);
-  const exact = filterStrictSprVehicleMatches(findSprEngineMatches(items, normalized), normalized);
-  if (exact.length) return exact;
-  const categoryRules = [
-    ['motor', /\b(?:motor|engine(?:\s+series)?)\b/],
-    ['cabeza', /\b(?:cabeza|culata)\b/],
-    ['amortiguador', /\bamortiguador\b/],
-    ['suspension', /\bsuspension\b/],
-    ['freno', /\b(?:freno|balata|pastilla)\b/],
-    ['aceite', /\b(?:aceite|lubricante|motul|valvoline|pentosin)\b/],
-    ['direccion', /\b(?:direccion|terminal|rotula|caja de direccion)\b/],
-    ['radiador', /\b(?:radiador|enfriamiento|cooling)\b/],
-    ['bomba', /\bbomba\b/], ['turbo', /\bturbo\b/],
-    ['embrague', /\b(?:embrague|clutch)\b/],
-    ['maza', /\b(?:maza|balero)\b/], ['bieleta', /\bbieleta\b/],
-    ['junta', /\b(?:junta homocinetica|espiga)\b/],
-    ['horquilla', /\bhorquilla\b/], ['flecha', /\b(?:flecha|semieje)\b/],
-    ['fascia', /\bfascia\b/], ['tornillo', /\btornillo\b/],
-    ['soporte', /\bsoporte(?: de motor)?\b/],
-    ['iluminacion', /\b(?:faro|calavera|lampara|luz|luces|espejo)\b/],
-    ['carroceria', /\b(?:parrilla|rejilla|defensa|cofre|salpicadera|carroceria)\b/]
-  ];
-  const requestedGroup = SPR_PART_SYNONYM_GROUPS.find(group => new RegExp('\\b' + escapeSprRegex(group.canonical) + '\\b', 'i').test(normalized));
-  const requestedCategory = requestedGroup
-    ? { key: requestedGroup.canonical, pattern: new RegExp('\\b' + escapeSprRegex(requestedGroup.canonical) + '\\b', 'i') }
-    : (() => {
-      const found = categoryRules.find(rule => rule[1].test(normalized));
-      return found ? { key: found[0], pattern: found[1] } : null;
-    })();
-  const requestedYears = [...normalized.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => Number(match[0]));
-  const focused = buildSprFocusedSearchQuery(normalized);
-  const partTerms = [
-    ...SPR_PART_SYNONYM_GROUPS.flatMap(group => [group.canonical, ...group.aliases]),
-    'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'engine', 'series'
-  ].map(term => normalizeBotText(term)).filter(Boolean).sort((a, b) => b.length - a.length);
-  const partPattern = new RegExp('\\b(?:' + partTerms.map(escapeSprRegex).join('|') + ')\\b', 'gi');
-  const coreTokens = focused
-    .replace(partPattern, ' ')
-    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
-    .replace(SPR_CATALOG_EXTRA_FILLER_PATTERN, ' ')
-    .replace(SPR_OPTIONAL_VEHICLE_WORDS_PATTERN, ' ')
-    .replace(/\b(?:19|20)\d{2}\b/g, ' ')
-    .replace(/\b(?:delantero|delantera|delanteros|delanteras|trasero|trasera|traseros|traseras|izquierdo|izquierda|izquierdos|izquierdas|derecho|derecha|derechos|derechas|lado|frente|atras|principal|niebla|antiniebla|piloto|chofer|conductor|pasajero|manual|electrico|electrica|electricos|electricas|con|sin|abs|fwd|birlo|birlos)\b/gi, ' ')
-    .split(/\s+/)
-    .filter(token => (token.length >= 3 || /\d/.test(token)) && !isSprEngineSpecificationToken(token));
-  const requestedSide = /\b(?:izquierdo|izquierda|piloto|chofer|conductor)\b/.test(normalized) ? 'left'
-    : /\b(?:derecho|derecha|pasajero|copiloto)\b/.test(normalized) ? 'right' : '';
-  const requestedPosition = /\b(?:delantero|delantera|frontal|delant)\b/.test(normalized) ? 'front'
-    : /\b(?:trasero|trasera|posterior|tras)\b/.test(normalized) ? 'rear' : '';
-  const negativeFogRequest = /\b(?:no|sin|evitar|ningun|ninguna)\b(?:\s+\w+){0,8}\s+(?:faro\s+de\s+)?niebla\b/.test(normalized);
-  const asksFogLight = !negativeFogRequest && /\b(?:faro\s+de\s+)?(?:niebla|antiniebla)\b/.test(normalized);
-  const asksMainLight = !negativeFogRequest && !asksFogLight && /\b(?:faro|principal|delantero|delantera)\b/.test(normalized);
-  const matchesYear = item => {
-    if (!requestedYears.length) return true;
-    const source = [item.title, item.description, item.tags].map(value => String(value || '')).join(' ');
-    const years = [...source.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => Number(match[0]));
-    const ranges = [...source.matchAll(/\b((?:19|20)\d{2})\s*[-–/]\s*((?:19|20)\d{2})\b/g)]
-      .map(match => [Number(match[1]), Number(match[2])]);
-    return requestedYears.some(year => years.includes(year) || ranges.some(([start, end]) => year >= Math.min(start, end) && year <= Math.max(start, end)));
-  };
-  const rows = items.map(item => {
-    const haystack = canonicalizeSprPartSynonyms([
-      item.normalizedTitle, item.title, item.vendor, item.productType, item.tags, item.description, item.handle
-    ].filter(Boolean).join(' '));
-    if (requestedCategory && !requestedCategory.pattern.test(haystack)) return null;
-    if (coreTokens.length && !coreTokens.every(token => sprInvestigativeTokenMatches(haystack, token))) return null;
-    if (!matchesYear(item)) return null;
-    if (requestedSide && !(/\bamb[oa]s(?:\s+lados?)?\b/.test(haystack)
-      || (requestedSide === 'left' ? /\bizquierd[oa]\b/.test(haystack) : /\bderech[oa]\b/.test(haystack)))) return null;
-    if (requestedPosition === 'front' && !(/\b(?:delanter[oa]s?|frontal(?:es)?|delant)\b/.test(haystack)
-      || (requestedCategory?.key === 'iluminacion' && !/\b(?:calavera|stop|rear lamp)\b/.test(haystack)))) return null;
-    if (requestedPosition === 'rear' && !(/\b(?:traser[oa]s?|posterior(?:es)?|tras)\b/.test(haystack)
-      || /\b(?:calavera|stop|rear lamp)\b/.test(haystack))) return null;
-    if (requestedCategory?.key === 'iluminacion') {
-      const isFog = /\b(?:niebla|antiniebla)\b/.test(haystack);
-      if (asksFogLight !== isFog || (asksMainLight && isFog)) return null;
-    }
-    if (requestedCategory?.key === 'motor') {
-      const wantsHead = /\b(?:cabeza|culata)\b/.test(normalized);
-      const wantsAccessory = /\b(?:soporte|base|taco|montura|mount|sensor|accesorio)\b/.test(normalized);
-      if (!wantsHead && !wantsAccessory && (!item.discountEligible
-        || !/\b(?:motor|engine(?:\s+series)?)\b/.test(haystack)
-        || /\b(?:cabeza|culata|soporte|base|taco|montura|mount|sensor|accesorio)\b/.test(haystack))) return null;
-    }
-    return { item, score: (coreTokens.length * 10) + (requestedYears.length ? 12 : 0) + (requestedCategory ? 18 : 0) + (item.available ? 1 : 0) };
-  }).filter(Boolean).sort((a, b) => b.score - a.score || a.item.title.localeCompare(b.item.title));
-  return rows.slice(0, 3).map(row => row.item);
-}
-
-async function searchSprCatalogExhaustively(catalogItems, query) {
-  const merged = new Map();
-  for (const item of Array.isArray(catalogItems) ? catalogItems : []) {
-    const key = item.id || item.url || item.handle || item.title;
-    if (key) merged.set(String(key), item);
-  }
-  const queries = buildSprExhaustiveSearchQueries(query);
-  const results = await Promise.allSettled(queries.map(searchQuery => searchSprCatalog(searchQuery)));
-  for (const result of results) {
-    if (result.status !== 'fulfilled') continue;
-    for (const item of result.value || []) {
-      const key = item.id || item.url || item.handle || item.title;
-      if (key && !merged.has(String(key))) merged.set(String(key), item);
-    }
-  }
-  const items = [...merged.values()];
-  let matches = filterStrictSprVehicleMatches(findSprEngineMatches(items, query), query);
-  if (!matches.length) matches = findSprExhaustiveMatches(items, query);
-  return { items, matches, queries };
-}
-
-function getSprYearClarification(value) {
-  const normalized = normalizeBotText(value);
-  const invalidYears = [...normalized.matchAll(/\b(?!19|20)\d{4}\b/g)].map(match => match[0]);
-  if (!invalidYears.length) return null;
-  const invalidYear = invalidYears[0];
-  const numeric = Number(invalidYear);
-  const suggestedYear = numeric >= 3000 && numeric <= 3999 ? String(2000 + (numeric % 100)) : '';
-  return { invalidYear, suggestedYear };
-}
-function getSprConfirmationPart(value) { const normalized = canonicalizeSprPartSynonyms(value); const rules = [['la cabeza de motor', /\b(?:cabeza(?:s)?(?:\s+de)?\s+motor|culata(?:s)?)\b/], ['el motor', /\bmotor(?:es)?\b/], ['la tolva', /\btolva(?:s)?\b/], ['el faro de niebla', /\bfaro(?:s)?\s+(?:de\s+)?niebla\b/], ['el faro principal', /\bfaro(?:s)?\s+(?:principal|delantero|delantera)\b/], ['el faro', /\bfaro(?:s)?\b/], ['la calavera', /\bcalavera(?:s)?\b/], ['la lampara', /\blampara(?:s)?\b/], ['el espejo', /\bespejo(?:s)?\b/], ['la parrilla', /\bparrilla(?:s)?\b/], ['la defensa', /\b(?:defensa|fascia)(?:s)?\b/], ['el cofre', /\bcofre\b/], ['la salpicadera', /\bsalpicadera(?:s)?\b/], ['el amortiguador', /\bamortiguador(?:es)?\b/], ['la suspension', /\bsuspension\b/], ['el freno', /\bfreno(?:s)?\b/], ['la balata', /\bbalata(?:s)?\b/], ['el aceite', /\baceite(?:s)?\b/], ['la caja de direccion', /\bcaja\s+de\s+direccion\b/], ['la direccion', /\bdireccion\b/], ['la terminal', /\bterminal(?:es)?\b/], ['la rotula', /\brotula(?:s)?\b/], ['la maza', /\bmaza(?:s)?\b/], ['el balero', /\bbalero(?:s)?\b/], ['la bieleta', /\bbieleta(?:s)?\b/], ['la junta homocinetica', /\bjunta\s+homocinetica\b/], ['la horquilla', /\bhorquilla(?:s)?\b/], ['la flecha', /\bflecha(?:s)?\b/], ['el tornillo', /\btornillo(?:s)?\b/], ['el radiador', /\bradiador(?:es)?\b/], ['la bomba', /\bbomba(?:s)?\b/], ['el turbo', /\bturbo(?:s)?\b/], ['el embrague', /\b(?:embrague|clutch)\b/], ['el soporte', /\bsoporte(?:s)?\b/], ['la pieza', /\bpieza(?:s)?\b/]]; const match = rules.find(([, pattern]) => pattern.test(normalized)); return match ? match[0] : 'la pieza'; } function isSprYearConfirmation(value) {
-  return /\b(si|correcto|correcta|exacto|exacta|afirmativo|asi)\b/.test(normalizeBotText(value));
-}
-// Search Shopify with useful vehicle and part terms instead of the full sentence.
-// The catalog search is sensitive to filler words and trim details, while make/model,
-// year, part and side are the terms that identify the item.
-// Shopify recibe únicamente términos que identifican el artículo. Descartar
-// la redacción de la pregunta evita que el buscador interprete "para mi carro"
-// o "marca/modelo/año" como parte del nombre del producto.
-const SPR_SEARCH_FILLER_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|me|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|por|favor|que|cotizacion|cotizar|precio|precios|cuanto|cuesta|costo|disponible|disponibilidad|stock|marca|modelo|ano|version|articulo|articulos|pieza|piezas|refaccion|refacciones|producto|productos|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|vengo|spr|autopartes|asesoria|hola|holi|hey|buen|buenos|buenas|dia|dias|puedes|pueden|podrias|podrian|consultar|consulta|ayuda|ayudar|dime|tambien|porfa|porfavor|del|es|cabina|cab|sencilla|doble|de|y)\b/gi;
-function compactSprVehicleModelTokens(value) {
-  return String(value || '').replace(/\b([a-z]{1,3})\s+(\d{2,4})\b/gi, (match, prefix, number) => {
-    if (['ano', 'modelo', 'version'].includes(String(prefix).toLowerCase())) return match;
-    return `${prefix}${number}`;
-  });
-}
 function buildSprFocusedSearchQuery(value) {
-  const normalized = compactSprVehicleModelTokens(canonicalizeSprPartSynonyms(value));
+  const normalized = normalizeSprCatalogText(value);
   const focused = normalized
     .replace(SPR_SEARCH_FILLER_PATTERN, ' ')
     .replace(SPR_OPTIONAL_VEHICLE_WORDS_PATTERN, ' ')
-        .replace(/\b(?!19|20)\d{4}\b/g, ' ')
-.replace(/\s+/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
   return focused || normalized;
 }
 
-// Shopify search is much more forgiving when the part and vehicle are sent
-// separately. Build a few bounded alternatives so natural language such as
-// "maza balero delantero derecho con ABS" can resolve the catalog title that
-// only uses "maza" while still preserving make, model and year.
-function buildSprCatalogSearchQueries(value) {
-  const originalNormalized = normalizeBotText(value);
-  const normalized = canonicalizeSprPartSynonyms(value);
-  const focused = buildSprFocusedSearchQuery(value);
-  const originalFocused = originalNormalized === normalized ? focused : buildSprFocusedSearchQuery(originalNormalized);
-  const partGroups = [
-    { pattern: /\b(?:maza(?:s)?|balero(?:s)?|balero(?:s)?\s+de\s+maza)\b/, terms: ['maza', 'balero'] },
-    { pattern: /\b(?:amortiguador(?:es)?|strut)\b/, terms: ['amortiguador', 'strut'] },
-    { pattern: /\b(?:faro(?:s)?|lampara(?:s)?)\b/, terms: ['faro', 'lampara'] },
-    { pattern: /\b(?:calavera(?:s)?|stop(?:s)?)\b/, terms: ['calavera', 'stop'] },
-    { pattern: /\b(?:freno(?:s)?|balata(?:s)?|pastilla(?:s)?)\b/, terms: ['freno', 'balata'] },
-    { pattern: /\b(?:direccion|terminal(?:es)?|rotula(?:s)?)\b/, terms: ['direccion', 'terminal'] },
-    { pattern: /\b(?:radiador(?:es)?|enfriamiento)\b/, terms: ['radiador'] },
-    { pattern: /\b(?:motor(?:es)?|cabeza(?:s)?|culata(?:s)?)\b/, terms: ['motor', 'cabeza'] },
-    { pattern: /\b(?:espejo(?:s)?|retrovisor(?:es)?)\b/, terms: ['espejo', 'retrovisor'] },
-    { pattern: /\b(?:bieleta(?:s)?|junta\s+homocinetica|espiga(?:s)?|horquilla(?:s)?|flecha(?:s)?|fascia(?:s)?|tornillo(?:s)?|estabilizador(?:es)?|cacahuate(?:s)?|cachuate(?:s)?)\b/, terms: ['bieleta', 'junta', 'horquilla', 'flecha', 'fascia', 'tornillo', 'tornillo estabilizador'] }
-  ];
-  const partGroup = partGroups.find(group => group.pattern.test(normalized));
-  const vehicleText = buildSprFocusedSearchQuery(normalized)
-    .replace(partGroup?.pattern || /$^/, ' ')
-    .replace(/\b(?:hola|vengo|spr|autopartes|asesoria|suspension|marca|modelo|ano|a[nñ]o|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atras|del|es|piloto|chofer|conductor|pasajero|manual|cabina|cab|sencilla|doble|con|sin|abs|fwd|birlo|birlos)\b/g, ' ')
-    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  const requestedPartTerm = partGroup?.terms.find(term => new RegExp(`\\b${escapeSprRegex(term)}\\b`).test(normalized));
-  const relatedPartTerms = requestedPartTerm === 'tornillo' && partGroup?.terms.includes('tornillo estabilizador')
-    ? ['tornillo estabilizador']
-    : [];
-  const orderedPartTerms = requestedPartTerm
-    ? [requestedPartTerm, ...relatedPartTerms, ...partGroup.terms.filter(term => term !== requestedPartTerm && !relatedPartTerms.includes(term))]
-    : (partGroup?.terms || []);
-  const candidates = [focused, originalFocused];
-  if (partGroup && vehicleText) {
-    for (const term of orderedPartTerms) {
-      // Search in both word orders. Shopify does not consistently rank a
-      // title the same way when the part precedes or follows the vehicle.
-      candidates.push(`${term} ${vehicleText}`);
-      candidates.push(`${vehicleText} ${term}`);
-    }
-  }
-  // If the title omits the part alias or trim text, a vehicle-only pass lets
-  // the local matcher recover the requested part from the wider result set.
-  if (vehicleText) candidates.push(vehicleText);
-  return [...new Set(candidates.map(query => String(query || '').replace(/\s+/g, ' ').trim()).filter(Boolean))].slice(0, 8);
-}
 // A short follow-up such as "delantero" or "izquierdo" is a refinement of
 // the customer's previous catalog request. Keep the vehicle and part from
 // that previous turn so a side/orientation answer cannot jump to another
 // make or model.
-const SPR_CATALOG_CONTEXT_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|producto(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|maza(?:s)?|balero(?:s)?|bieleta(?:s)?|junta\s+homocinetica|horquilla(?:s)?|flecha(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|tornillo(?:s)?|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera|carrocer[ií]a|puerta(?:s)?)\b/;
+const SPR_CATALOG_CONTEXT_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|producto(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carrocer[ií]a)\b/;
 const SPR_CATALOG_REFINEMENT_PATTERN = /\b(delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atr[aá]s|modelo|a[nñ]o|versi[oó]n|principal|niebla|antiniebla|motor)\b/;
 
 // Do not guess a vehicle from a generic part request. Ask for the vehicle
 // before searching so the bot cannot return an unrelated make or model.
-const SPR_CATALOG_GENERIC_WORDS_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|que|qué|por|favor|de|precio|precios|cuanto|cu[aá]nto|cuesta|costo|cotizacion|cotizaci[oó]n|cotizar|comprar|compra|nuevo|nueva|disponible|disponibilidad|stock|catalogo|cat[aá]logo|producto|productos|pieza|piezas|refaccion|refacciones|motor|motores|cabeza|cabezas|culata|engine|series|amortiguador|amortiguadores|suspension|freno|frenos|balata|balatas|pastilla|pastillas|aceite|lubricante|lubricantes|direccion|terminal|terminales|rotula|rotulas|radiador|radiadores|bomba|bombas|turbo|turbos|embrague|clutch|maza|mazas|balero|baleros|bieleta|bieletas|junta|homocinetica|horquilla|horquillas|flecha|flechas|guia|guias|fascia|fascias|soporte|soportes|faro|faros|niebla|antiniebla|principal|calavera|calaveras|lampara|lamparas|luz|luces|espejo|espejos|parrilla|parrillas|defensa|defensas|tornillo|tornillos|cofre|salpicadera|salpicaderas|carroceria|puerta|puertas|delantero|delantera|delanteros|delanteras|trasero|trasera|traseros|traseras|izquierdo|izquierda|izquierdos|izquierdas|derecho|derecha|derechos|derechas|lado|frente|atras|modelo|ano|version|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|camiones|completo|completa|todo|toda|todos|todas|no|sin|evitar|ningun|ninguna)\b/gi;
-// Conversational words are removed only from vehicle-identity checks. They
-// must never make a valid catalog request look like a different vehicle.
-const SPR_CATALOG_EXTRA_FILLER_PATTERN = /\b(hola|holi|hey|hello|buen|buenos|buenas|dia|dias|vengo|spr|autopartes|asesoria|marca|modelo|ano|version|puedes|pueden|podrias|podrian|consultar|consulta|ayuda|ayudar|dime|tambien|porfa|porfavor|articulo|articulos|refaccion|refacciones|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|camiones|del|es|piloto|chofer|conductor|pasajero|manual|cabina|cab|sencilla|doble|remanufacturad[oa]s?|reconstruid[oa]s?|usad[oa]s?|nuev[oa]s?|complet[oa]s?|original(?:es)?|generico(?:s)?|generica(?:s)?|de|a|y)\b/gi;
+const SPR_CATALOG_GENERIC_WORDS_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|que|qué|por|favor|de|precio|precios|cuanto|cu[aá]nto|cuesta|costo|cotizacion|cotizaci[oó]n|cotizar|comprar|compra|nuevo|nueva|disponible|disponibilidad|stock|catalogo|cat[aá]logo|producto|productos|pieza|piezas|refaccion|refacciones|motor|motores|cabeza|cabezas|culata|engine|series|amortiguador|amortiguadores|suspension|freno|frenos|balata|balatas|pastilla|pastillas|aceite|lubricante|lubricantes|direccion|terminal|terminales|rotula|rotulas|radiador|radiadores|bomba|bombas|turbo|turbos|embrague|clutch|soporte|soportes|faro|faros|niebla|antiniebla|principal|calavera|calaveras|lampara|lamparas|luz|luces|espejo|espejos|guia|guias|fascia|fascias|moldura|molduras|parrilla|parrillas|defensa|defensas|cofre|salpicadera|salpicaderas|carroceria|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atras|modelo|ano|version|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|camiones|completo|completa|todo|toda|todos|todas|no|sin|evitar|ningun|ninguna)\b/gi;
 const SPR_VEHICLE_MAKES = new Set(['nissan', 'ford', 'chevrolet', 'chevy', 'volkswagen', 'vw', 'toyota', 'honda', 'kia', 'hyundai', 'dodge', 'chrysler', 'jeep', 'mazda', 'mitsubishi', 'suzuki', 'seat', 'renault', 'peugeot', 'fiat', 'ram', 'gmc', 'volvo', 'audi', 'bmw', 'mercedes', 'mercedesbenz', 'isuzu', 'subaru', 'lincoln', 'cadillac', 'buick', 'acura', 'infiniti', 'lexus', 'porsche', 'mg', 'byd']);
 
 function hasSprVehicleReference(value) {
   const normalized = normalizeBotText(value)
     .replace(/\b(?:19|20)\d{2}\b/g, ' ')
-    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
-    .replace(SPR_CATALOG_EXTRA_FILLER_PATTERN, ' ');
+    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ');
   const vehicleTokens = normalized.split(/\s+/).filter(token => token.length >= 2);
   if (!vehicleTokens.length || vehicleTokens.every(token => SPR_VEHICLE_MAKES.has(token))) return false;
   return true;
 }
 
 function isAmbiguousSprCatalogRequest(value) {
-  const normalized = canonicalizeSprPartSynonyms(value);
+  const normalized = normalizeBotText(value);
   return SPR_CATALOG_CONTEXT_PATTERN.test(normalized) && !hasSprVehicleReference(normalized);
 }
 
@@ -1283,13 +746,13 @@ function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
   const previous = (Array.isArray(previousCustomerMessages) ? previousCustomerMessages : [])
     .map(value => String(value || '').trim())
     .filter(Boolean);
-  const currentNormalized = canonicalizeSprPartSynonyms(current);
-  const previousNormalized = canonicalizeSprPartSynonyms(previous.join(' '));
+  const currentNormalized = normalizeBotText(current);
+  const previousNormalized = normalizeBotText(previous.join(' '));
   const isFollowUpRefinement = SPR_CATALOG_REFINEMENT_PATTERN.test(currentNormalized)
     && !SPR_CATALOG_CONTEXT_PATTERN.test(currentNormalized.replace(/\b(delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atr[aá]s|modelo|a[nñ]o|versi[oó]n|principal|niebla|antiniebla)\b/g, ''));
 
   const previousCatalogMessage = [...previous].reverse().find(value => {
-    const normalized = canonicalizeSprPartSynonyms(value);
+    const normalized = normalizeBotText(value);
     return SPR_CATALOG_CONTEXT_PATTERN.test(normalized) && hasSprVehicleReference(normalized);
   });
   const currentHasVehicle = hasSprVehicleReference(currentNormalized);
@@ -1310,53 +773,25 @@ function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
 }
 
 function isGenericSprCatalogRequest(lowerText) {
-  const query = canonicalizeSprPartSynonyms(lowerText);
+  const query = normalizeBotText(lowerText);
   const asksGeneral = /\b(que productos|que tienen|que hay|catalogo|catalog|refacciones|productos|todo|completo)\b/.test(query);
-  const asksSpecific = /\b(motor(?:es)?|cabeza(?:s)?|culata|amortiguador(?:es)?|suspension|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite(?:s)?|refaccion(?:es)?|pieza(?:s)?|direccion|radiador(?:es)?|bomba(?:s)?|turbo(?:s)?|embrague(?:s)?|clutch|maza(?:s)?|balero(?:s)?|soporte(?:s)?|terminal(?:es)?|rotula(?:s)?|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria|puerta(?:s)?)\b/.test(query);
+  const asksSpecific = /\b(motor(?:es)?|cabeza(?:s)?|culata|amortiguador(?:es)?|suspension|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite(?:s)?|refaccion(?:es)?|pieza(?:s)?|direccion|radiador(?:es)?|bomba(?:s)?|turbo(?:s)?|embrague(?:s)?|clutch|soporte(?:s)?|terminal(?:es)?|rotula(?:s)?|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|guia(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria)\b/.test(query);
   return asksGeneral && !asksSpecific;
 }
 
-// Route unknown automotive purchase questions through the catalog so an advisor
-// can verify them instead of the bot guessing or rejecting the request.
+// Route purchase questions about an unknown automotive item through the SPR
+// catalog so a likely product request gets a focused lookup before any human
+// review. An empty result is handled by the silent advisor-review policy below.
 function isUnlistedSprProductRequest(value) {
-  const query = canonicalizeSprPartSynonyms(value);
+  const query = normalizeBotText(value);
   const purchaseIntent = /\b(busco|buscando|necesito|ocupo|quiero|tienen|tendrian|tendran|hay|venden|manejan|consiguen|cotizar|cotizacion)\b/.test(query);
-  const automotiveContext = /\b(carro|auto|vehiculo|coche|tienda|refaccion|refacciones|pieza|producto|articulo|accesorio|puerta|rayon|rayones|compatibilidad)\b/.test(query);
+  const automotiveContext = /\b(carro|auto|vehiculo|coche|tienda|refaccion|refacciones|pieza|producto|articulo|accesorio|rayon|rayones|compatibilidad)\b/.test(query);
   if (!purchaseIntent || !automotiveContext || SPR_CATALOG_CONTEXT_PATTERN.test(query)) return false;
-  const residual = query.replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ').replace(SPR_CATALOG_EXTRA_FILLER_PATTERN, ' ').replace(/\s+/g, ' ').trim();
+  const residual = query
+    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   return residual.split(' ').filter(token => token.length >= 3).length >= 1;
-}
-
-function isSprStoreLocationQuestion(value) {
-  const query = normalizeBotText(value);
-  const asksLocation = /\b(ubicacion|ubicados|donde estan|donde se encuentran|sucursal|domicilio|local|tienda|oficina|como llego)\b/.test(query)
-    || /\bdireccion\s+(?:del|de la)\s+(?:local|sucursal|negocio|tienda|oficina|empresa)\b/.test(query)
-    || /\b(?:cual es|dime|me compartes|me das|comparteme|compartenos)\s+(?:la\s+|su\s+)?direccion\b/.test(query);
-  if (!asksLocation) return false;
-  // “Dirección de Honda Passport modelo 98” is a requested part, not the
-  // address of the store. Preserve that distinction before answering FAQ.
-  return !(SPR_CATALOG_CONTEXT_PATTERN.test(query) && hasSprVehicleReference(query) && !/\b(local|sucursal|negocio|tienda|oficina|empresa)\b/.test(query));
-}
-
-function buildSprFaqReply(value, isSprAutopartesTenant) {
-  if (!isSprAutopartesTenant) return '';
-  const query = normalizeBotText(value);
-  if (isSprStoreLocationQuestion(query)) {
-    return '📍 *Estamos ubicados en Querétaro, México.* 🚚 Realizamos envíos a todo México.';
-  }
-  if (/\b(horario|horarios|hora|horas|abren|cierran|abierto|abiertos|atienden|atencion)\b/.test(query)) {
-    return 'Atendemos de *Lunes a Sábado* de *9:00 am* a *7:30 pm*. ✅\nNuestro canal de WhatsApp y redes sociales recibe consultas las *24 horas*. 🕑';
-  }
-  if (/\b(envio|envios|enviamos|mandan|mandamos|entrega|entregan|cobertura|nacional|foraneo|foraneos|foranea|foraneas|otro estado|todo mexico)\b/.test(query)) {
-    return '🚚 Sí, realizamos envíos a todo México. Compárteme la pieza, marca, modelo y año para revisar tu cotización.';
-  }
-  return '';
-}
-
-function isIncompleteSprCatalogRequest(value) {
-  const query = canonicalizeSprPartSynonyms(value);
-  if (SPR_CATALOG_CONTEXT_PATTERN.test(query)) return false;
-  return /\b(precio|precios|cuanto|cuesta|costo|cotizacion|cotizar|cotiza|disponible|disponibilidad|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|principal|niebla|antiniebla)\b/.test(query);
 }
 
 function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult = null) {
@@ -1378,9 +813,6 @@ function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult
   if (isAmbiguousSprCatalogRequest(lowerText)) {
     return '🛠️ *Catálogo de SPR Autopartes*\n\nPara buscar la pieza correcta necesito algunos datos adicionales. 🔎\n\n¿De qué *marca, modelo y año* es tu vehículo?\n🔧 También dime qué pieza necesitas y, si aplica, el lado (izquierdo o derecho).\n\nEjemplo: *faro delantero para Nissan Versa 2015*.';
   }
-  if (isIncompleteSprCatalogRequest(lowerText)) {
-    return '🔎 Para preparar una cotización necesito la pieza exacta y los datos del vehículo: *marca, modelo y año*. Si aplica, indícame también el lado.';
-  }
   if (!matches.length) {
     return '';
   }
@@ -1395,7 +827,7 @@ function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult
     }
     const stockLine = stockResult?.status === 'in_stock'
       ? '✅ Disponible para cotización'
-      : '🔎 Un asesor verificará la existencia actual';
+      : '🔎 Disponibilidad por confirmar';
     lines.push(stockLine);
     lines.push('🔗 ' + item.url);
   }
@@ -1497,7 +929,7 @@ function isSyntheticMetaPayload(from) {
 /**
  * Strictly resolve company tenant & access token by Phone Number ID.
  * Multi-tenant Isolation Rule:
- * 1. Strictly look up by phone_number_id. If different companies share the same phone ID, reject as ambiguous; duplicate records for one company use the connected record.
+ * 1. Strictly look up by phone_number_id. If multiple integrations share the same phone ID, reject as ambiguous.
  * 2. Lookup by WABA ID ONLY if phone_number_id was omitted. If multiple integrations match the WABA ID, reject as ambiguous.
  * 3. Reject unknown IDs without fallback to prevent cross-tenant leaks.
  */
@@ -1514,31 +946,9 @@ async function resolveTenant(dbInstance, phoneNumberId, wabaId) {
       .get();
     if (!snapByPhone.empty) {
       let candidateDocs = snapByPhone.docs;
-      const candidateCompanyIds = new Set(
-        candidateDocs
-          .map(doc => String(doc.data()?.company_id || '').trim())
-          .filter(Boolean)
-      );
-      // A Phone Number ID is globally unique in Meta. If Firestore contains
-      // the same ID under different companies, fail closed instead of
-      // selecting by recency and routing a customer to the wrong tenant.
-      if (candidateCompanyIds.size > 1) {
-        console.error(`🛑 [Ambiguous Phone Number ID: ${phoneNumberId}] Multiple companies are registered for the same WhatsApp number. Rejecting webhook.`);
-        return null;
-      }
       if (candidateDocs.length > 1) {
-        candidateDocs = [...candidateDocs].sort((a, b) => {
-          const ad = a.data();
-          const bd = b.data();
-          const score = d => (d.status === 'connected' ? 4 : 0) + (d.outbound_verified === true ? 2 : 0) + (d.webhook_verified === true ? 1 : 0);
-          const scoreDiff = score(bd) - score(ad);
-          if (scoreDiff) return scoreDiff;
-          const bDate = String(bd.updated_at || bd.last_sync_at || bd.created_at || '');
-          const aDate = String(ad.updated_at || ad.last_sync_at || ad.created_at || '');
-          return bDate.localeCompare(aDate);
-        });
-        const selected = candidateDocs[0];
-        console.warn(`⚠️ [Duplicate Phone Number ID: ${phoneNumberId}] ${candidateDocs.length} integrations found; selecting ${selected.id} (${selected.data().company_id}) by active status and recency.`);
+        console.error(`🛑 [Duplicate Phone Number ID: ${phoneNumberId}] ${candidateDocs.length} integrations found. Rejecting the webhook to prevent cross-tenant delivery.`);
+        return null;
       }
       const selectedDoc = candidateDocs[0];
       intDoc = selectedDoc.data();
@@ -1588,7 +998,28 @@ async function resolveTenant(dbInstance, phoneNumberId, wabaId) {
   };
 }
 
-/* 1. HEALTH & DIAGNOSTIC STATUS ENDPOINTS */
+// WhatsApp media messages carry the binary file behind a short-lived Meta
+// media id. Keep the id and its metadata in Firestore; the CRM media route
+// below fetches the binary with the tenant's token when the conversation is
+// opened, so no Meta access token is ever exposed to the browser.
+function extractInboundMedia(message) {
+  const type = String(message?.type || '').trim().toLowerCase();
+  if (!['image', 'video', 'audio', 'document', 'sticker'].includes(type)) return null;
+  const payload = message?.[type] && typeof message[type] === 'object' ? message[type] : {};
+  const mediaId = payload.id ? String(payload.id).trim() : '';
+  if (!mediaId) return null;
+  return {
+    media_id: mediaId,
+    media_type: type,
+    media_mime_type: payload.mime_type ? String(payload.mime_type).trim() : null,
+    media_caption: payload.caption ? String(payload.caption).trim() : null,
+    media_filename: payload.filename ? String(payload.filename).trim() : null
+  };
+}
+
+/**
+ * 1. HEALTH & DIAGNOSTIC STATUS ENDPOINTS
+ */
 app.get('/', (req, res) => {
   res.json({
     status: 'online',
@@ -1612,59 +1043,16 @@ app.get('/api/status', (req, res) => {
     server_time: new Date().toISOString(),
     graph_api_version: GRAPH_API_VERSION,
     signature_verification: !!META_APP_SECRET ? 'enforced' : 'optional',
-    database: db ? 'firebase_admin_authenticated' : 'uninitialized',
-    catalog_guard: '07330f6', catalog_search_guard: 'colloquial-synonyms-20261008', marketing_promo_guard: 'halloween-october-20261007-promo-keyword',
-    unknown_product_guard: '7fb4779',
-    greeting_guard: 'tenant-courtesy-20261006'
+    database: db ? 'firebase_admin_authenticated' : 'uninitialized'
   });
 });
 
-app.get('/api/whatsapp/media/:mediaId', async (req, res) => {
-  const mediaId = String(req.params.mediaId || '').trim();
-  if (!mediaId || !db) return res.status(404).send('Media not found');
-
-  try {
-    const messageSnap = await db.collection('messages')
-      .where('media_id', '==', mediaId)
-      .limit(1)
-      .get();
-    if (messageSnap.empty) return res.status(404).send('Media not found');
-
-    const messageData = messageSnap.docs[0].data() || {};
-    const tenant = await resolveTenant(db, messageData.phone_number_id, messageData.waba_id);
-    if (!tenant?.accessToken) return res.status(503).send('WhatsApp media is not configured');
-
-    const metaResponse = await axios.get(
-      `https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(mediaId)}`,
-      { headers: { Authorization: `Bearer ${tenant.accessToken}` }, timeout: 10000 }
-    );
-    const mediaUrl = metaResponse.data?.url;
-    if (!mediaUrl) return res.status(404).send('Media URL not available');
-
-    const mediaResponse = await axios.get(mediaUrl, {
-      headers: { Authorization: `Bearer ${tenant.accessToken}` },
-      responseType: 'stream',
-      timeout: 20000
-    });
-    const contentType = messageData.media_mime_type || metaResponse.data?.mime_type || 'application/octet-stream';
-    res.set('Content-Type', contentType);
-    res.set('Cache-Control', 'private, max-age=300');
-    if (metaResponse.data?.file_size) res.set('Content-Length', String(metaResponse.data.file_size));
-    mediaResponse.data.on('error', error => {
-      console.warn(`WhatsApp media stream failed for ${mediaId}:`, error.message);
-      if (!res.headersSent) res.status(502).end();
-    });
-    mediaResponse.data.pipe(res);
-} catch (error) {
-    const status = error.response?.status === 404 || error.response?.status === 400 ? 404 : 502;
-    console.warn(`WhatsApp media lookup failed for ${mediaId}:`, error.response?.data?.error?.message || error.message);
-    if (!res.headersSent) res.status(status).send(status === 404 ? 'Media not found' : 'Media temporarily unavailable');
-}
-});
-
 /**
- * 2. META WEBHOOK VERIFICATION HANDSHAKE
- app.get('/api/whatsapp/media/:mediaId', async (req, res) => {
+ * Stream an inbound WhatsApp attachment to the CRM without exposing the
+ * tenant's Meta access token. The message record supplies the phone number
+ * that owns the media id, which keeps this endpoint tenant-aware.
+ */
+app.get('/api/whatsapp/media/:mediaId', async (req, res) => {
   const mediaId = String(req.params.mediaId || '').trim();
   if (!mediaId || !db) return res.status(404).send('Media not found');
 
@@ -1707,7 +1095,9 @@ app.get('/api/whatsapp/media/:mediaId', async (req, res) => {
   }
 });
 
-* GET /webhook/whatsapp
+/**
+ * 2. META WEBHOOK VERIFICATION HANDSHAKE
+ * GET /webhook/whatsapp
  */
 app.get('/webhook/whatsapp', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -1851,24 +1241,19 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const wabaId = entry?.id ? String(entry.id).trim() : null;
     let customerPhone = normalizeWhatsAppPhone(message.from);
     let customerName = contact?.profile?.name || `Usuario WhatsApp (+${customerPhone})`;
-    // Media is optional. Never let media parsing stop a normal text message
-    // from being saved or answered when Meta omits a media payload.
-    let inboundMedia = null;
-    try {
-      inboundMedia = extractInboundMedia(message);
-    } catch (mediaError) {
-      console.warn('Could not parse inbound WhatsApp media:', mediaError.message);
-    }
-    const timestamp = message.timestamp ? new Date(parseInt(message.timestamp, 10) * 1000).toISOString() : new Date().toISOString();
-
-    // 1. Strict Tenant Company & Credential Resolution
-
+    // Media is optional. Never let a missing parser stop the entire webhook.
+    const inboundMedia = typeof extractInboundMedia === 'function'
+      ? extractInboundMedia(message)
+      : null;
     let messageText = message.text?.body || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || inboundMedia?.media_caption || '';
     if (!messageText && inboundMedia) {
       const mediaLabels = { image: '📷 Imagen recibida', video: '🎥 Video recibido', audio: '🎙️ Audio recibido', document: '📄 Documento recibido', sticker: '🧩 Sticker recibido' };
       messageText = mediaLabels[inboundMedia.media_type] || '📎 Archivo recibido';
     }
+    const timestamp = message.timestamp ? new Date(parseInt(message.timestamp, 10) * 1000).toISOString() : new Date().toISOString();
 
+    // 1. Strict Tenant Company & Credential Resolution
+    // Webhook events must ONLY be routed to a company that owns this verified phone_number_id.
     // Fallback to random companies or arbitrary WhatsApp records is strictly prohibited to prevent cross-tenant leakage.
     const tenant = await resolveTenant(db, phoneNumberId, wabaId);
 
@@ -1888,19 +1273,6 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
     const { companyId, intDocId, accessToken } = tenant;
     console.log(`🏢 [Tenant Resolved] Company: ${companyId} | WhatsApp Integration: ${intDocId} | Phone ID: ${phoneNumberId}`);
-
-    // Load tenant bot settings before creating CRM records so the controls in
-    // DT Bot > Configuración have an effect on the live webhook. In
-    // particular, auto_create_leads can now be disabled per company without
-    // changing the WhatsApp connection.
-    let botSettings = null;
-    try {
-      const sSnap = await db.doc(`bot_settings/${companyId}`).get();
-      if (sSnap.exists) botSettings = sSnap.data();
-    } catch (settingsError) {
-      console.warn('Could not load bot settings before lead registration:', settingsError.message);
-    }
-    const botGloballyEnabled = botSettings?.enabled !== false;
 
     // 2. Filter Synthetic / Meta Dashboard Sample Payloads
     // Do NOT create real CRM leads or attempt outbound Meta API calls for dummy dashboard test payloads
@@ -1949,28 +1321,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const cleanPhoneDigits = customerPhone.replace(/[^0-9]/g, '');
     const phoneKey = cleanPhoneDigits.slice(-10) || String(Date.now());
     const companyKey = String(companyId || 'tenant').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80) || 'tenant';
-    const legacyLeadId = `lead_wa_${phoneKey}`;
-    let leadId = `lead_${companyKey}_wa_${phoneKey}`;
-    let currentLeadStage = 'Nuevo Lead';
-    if (botSettings?.auto_create_leads !== false) {
-      try {
-        let existingLeadSnap = await db.doc(`leads/${leadId}`).get();
-        // Preserve existing conversations created before tenant-scoped lead
-        // IDs, while every new company gets a collision-proof ID.
-        if (!existingLeadSnap.exists && legacyLeadId !== leadId) {
-          const legacySnap = await db.doc(`leads/${legacyLeadId}`).get();
-          if (legacySnap.exists && legacySnap.data()?.company_id === companyId) {
-            leadId = legacyLeadId;
-            existingLeadSnap = legacySnap;
-          }
-        }
-        if (existingLeadSnap.exists) {
-          currentLeadStage = String(existingLeadSnap.data()?.estado || currentLeadStage).trim() || currentLeadStage;
-        }
-      } catch (leadReadError) {
-        console.warn(`Could not read existing lead ${leadId}:`, leadReadError.message);
-      }
-    }
+    const leadId = `lead_${companyKey}_wa_${phoneKey}`;
 
     const leadData = {
       id: leadId,
@@ -1981,9 +1332,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
       empresa: contact?.profile?.name || 'Contacto WhatsApp Directo',
       servicio: 'Atención WhatsApp Cloud API',
       fuente: 'WhatsApp',
-      // Preserve a stage already selected by an advisor or administrator.
-      // The automatic classifier advances it after the interaction is known.
-      estado: currentLeadStage,
+      estado: 'Nuevo Lead',
       responsable: 'DT Bot Core',
       prioridad: 'Alta',
       valor_estimado: null,
@@ -1992,20 +1341,20 @@ app.post('/webhook/whatsapp', async (req, res) => {
       ultima_actividad: timestamp
     };
 
-    if (botSettings?.auto_create_leads !== false) {
-      try {
-        await db.doc(`leads/${leadId}`).set(leadData, { merge: true });
-      } catch (e) {
-        console.warn('Error saving lead to Firestore:', e.message);
-      }
-    } else {
-      console.log(`ℹ️ [Lead Capture Disabled] Company: ${companyId} has auto_create_leads disabled.`);
+    try {
+      await db.doc(`leads/${leadId}`).set(leadData, { merge: true });
+    } catch (e) {
+      console.warn('Error saving lead to Firestore:', e.message);
     }
 
     // 4. Conversation State Management
     const conversationLookup = await loadWhatsAppConversation(db, companyId, customerPhone);
     const convId = conversationLookup.id;
     let convData = conversationLookup.data;
+
+    // If this contact was stored previously with a legacy id/phone format,
+    // move its messages to the canonical conversation before appending the new
+    // turn. This keeps the inbox as one continuous chat.
     for (const legacyId of conversationLookup.legacyIds || []) {
       await migrateConversationMessages(db, legacyId, convId);
     }
@@ -2096,7 +1445,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
       external_message_id: messageId,
       sender_type: 'customer',
       created_at: timestamp,
-            delivery_status: 'delivered',
+      delivery_status: 'delivered',
       phone_number_id: phoneNumberId,
       waba_id: wabaId,
       ...(inboundMedia || {})
@@ -2123,46 +1472,12 @@ app.post('/webhook/whatsapp', async (req, res) => {
       console.log('🤖 [Auto Reactivation] Conversation [' + convId + '] resumed after ' + HUMAN_HANDOFF_IDLE_MINUTES + ' minutes without advisor activity.');
     }
 
-    // The master toggle in DT Bot > Configuración must pause replies without
-    // dropping the inbound message or the conversation from the CRM. Keep a
-    // marker so re-enabling the bot can resume only conversations paused by
-    // this setting, while an intentional advisor handoff stays untouched.
-    if (!botGloballyEnabled && convData.human_handoff !== true) {
-      convData.human_handoff = true;
-      convData.bot_enabled = false;
-      convData.status = 'paused';
-      convData.bot_disabled_by_config = true;
-      convData.bot_disabled_at = new Date().toISOString();
-      console.log(`🛑 [Bot Disabled by Configuration] Company: ${companyId} | Conversation: ${convId}`);
-    } else if (botGloballyEnabled && convData.bot_disabled_by_config === true) {
-      convData.human_handoff = false;
-      convData.bot_enabled = true;
-      convData.status = 'active';
-      convData.bot_disabled_by_config = false;
-      convData.bot_reenabled_at = new Date().toISOString();
-      convData.human_handoff_started_at = null;
-      convData.assigned_user_id = null;
-      convData.assigned_user_name = null;
-      console.log(`🤖 [Bot Re-enabled by Configuration] Company: ${companyId} | Conversation: ${convId}`);
-    }
-
     // If human handoff is still active, keep the bot silent.
     if (convData.human_handoff === true || convData.bot_enabled === false) {
       console.log(`🛑 Conversation [${convId}] is assigned to a human advisor. Bot will NOT reply.`);
-
+      
       try {
         await db.doc(`conversations/${convId}`).set(convData, { merge: true });
-        // A configuration pause should not look like a commercial follow-up;
-        // an actual advisor assignment should.
-        if (!convData.bot_disabled_by_config && botSettings?.auto_create_leads !== false) {
-          await advanceLeadStageAutomatically(db, {
-            leadId,
-            messageText,
-            humanHandoff: true,
-            source: 'bot',
-            currentStage: currentLeadStage
-          });
-        }
         await db.doc(`webhook_events/event_${messageId}`).set({
           status: 'completed',
           completed_at: new Date().toISOString(),
@@ -2174,6 +1489,13 @@ app.post('/webhook/whatsapp', async (req, res) => {
       return;
     }
 
+    // Load Bot Settings for working hours & personality
+    let botSettings = null;
+    try {
+      const sSnap = await db.doc(`bot_settings/${companyId}`).get();
+      if (sSnap.exists) botSettings = sSnap.data();
+    } catch (e) {}
+
     // Resolve the display identity from the tenant selected by the verified
     // WhatsApp integration. This prevents a client account from inheriting
     // the platform owner's DT Marketing welcome text.
@@ -2184,80 +1506,34 @@ app.post('/webhook/whatsapp', async (req, res) => {
     } catch (e) {
       console.warn('Could not load tenant company profile:', e.message);
     }
-    // Preserve tenant-specific configuration while filling any missing global
-    // safety defaults. This makes the same onboarding contract apply to every
-    // future client without replacing a client's own branding or messages.
+    // Fill only missing policy fields so an existing tenant's intentional
+    // branding and messages remain intact while every tenant receives the
+    // same safety and isolation defaults.
     botSettings = mergeTenantSafeBotSettings(
-      tenantCompany || { id: companyId, nombre: 'nuestro negocio' },
+      tenantCompany || { id: companyId, nombre: botSettings?.business_name || 'nuestro negocio' },
       botSettings
     );
     const tenantDisplayName = String(
       tenantCompany?.nombre || botSettings?.business_name || botSettings?.business_description || 'nuestro negocio'
     ).trim();
-    const tenantRoutingIdentity = `${tenantDisplayName} ${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase();
-    const tenantAppearsSprAutopartes = /spr\s*(bot|autopartes|engine)/i.test(tenantRoutingIdentity) || /spr autopartes/i.test(tenantRoutingIdentity);
 
     // Check for Human Handoff Intent
     const lowerText = normalizeBotText(messageText);
     const humanKeywords = ['asesor', 'humano', 'persona', 'agente', 'ejecutivo', 'hablar con alguien', 'representante', 'ayuda humana', 'transferir'];
-    // Shopify prefills can arrive with punctuation or small wording variations.
-    // Normalize them before any catalog, knowledge-base, or human-handoff rule.
-    const isShopifySuspensionIntro = /^hola\s+vengo\s+de\s+spr\s+autopartes\s+y\s+necesito\s+asesoria\s+para\s+suspension(?:\s+marca\s+modelo\s+y\s+ano(?:\s+.+)?)?$/.test(lowerText);
-    const isShopifySuspensionVehicleProvided = /^hola\s+vengo\s+de\s+spr\s+autopartes\s+y\s+necesito\s+asesoria\s+para\s+suspension\s+marca\s+modelo\s+y\s+ano\s+.+$/.test(lowerText);
-    const isShopifyPartsIntro = /^hola\s+vengo\s+de\s+spr\s+autopartes\s+y\s+me\s+gustaria\s+consultar\s+sobre\s+(?:algunas|unas|varias)?\s*piezas?$/.test(lowerText);
+    const wantsHuman = humanKeywords.some(kw => lowerText.includes(kw));
+    // Greetings and courtesy messages must be answered before business-hours rules.
+    // A greeting such as “Hola, buenos días” is still a greeting, not a request
+    // for schedules or a catalog search.
+    const isFriendlyGreeting = /^(?:(?:hola|holi|hey|hello)\s+)?(?:hola|holi|hey|hello|buen dia|buenos dias|buenas tardes|buenas noches|inicio)$/.test(lowerText);
+    const isCourtesyMessage = /^(?:(?:muchas|mil)\s+)?gracias(?:\s+(?:por|igualmente|de todos modos|todo)\b.*)?$/.test(lowerText)
+      || /^(?:(?:te|le)\s+)?agradezco\b/.test(lowerText);
+    const isShopifySuspensionIntro = /^hola vengo de spr autopartes y necesito asesoria para suspension marca modelo y ano$/.test(lowerText);
+    const isShopifyPartsIntro = /^hola vengo de spr autopartes y me gustaria consultar sobre algunas piezas$/.test(lowerText);
     const isShopifyPrefillIntro = isShopifySuspensionIntro || isShopifyPartsIntro;
-    const isSprLargePickupRequestMessage = tenantAppearsSprAutopartes && !isShopifyPrefillIntro && isSprLargePickupRequest(messageText);
-    const sprLargePickupDriveType = isSprLargePickupRequestMessage ? getSprLargePickupDriveType(messageText) : null;
-    const wantsHuman = !isShopifyPrefillIntro && humanKeywords.some(kw => lowerText.includes(kw));
-    const isFriendlyGreeting = isFriendlyGreetingText(messageText);
-    const isCourtesyMessage = isCourtesyText(messageText);
-    const isCommonFaqQuestion = /\b(horario|horarios|hora|horas|abren|cierran|ubicacion|ubicados|donde|sucursal|domicilio|local|tienda|oficina|direccion|envio|envios|entrega|cobertura|todo mexico)\b/.test(lowerText);
 
     let botReply = '';
 
-    if (isShopifyPrefillIntro) {
-      console.log(`[Shopify Prefill Accepted] ${isShopifySuspensionIntro ? 'suspension' : 'parts'} | Company: ${companyId}`);
-      botReply = isShopifySuspensionIntro
-        ? (isShopifySuspensionVehicleProvided
-          ? `👋 ¡Perfecto! Ya tengo los datos de tu vehículo: *${messageText.split(':').slice(1).join(':').trim() || 'los datos compartidos'}*.
-
-🔧 ¿Qué pieza de suspensión necesitas consultar? Escríbeme la pieza y continuaré con la búsqueda.`
-          : `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo con tu consulta de suspensión.
-
-🚗 Compárteme la *marca, modelo y año* de tu vehículo para revisar la pieza correcta.`)
-        : `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo.
-
-🔧 ¿Qué pieza necesitas consultar? Compárteme la *marca, modelo y año* de tu vehículo para orientarte mejor.`;
-    } else if (isSprLargePickupRequestMessage) {
-      convData.human_handoff = true;
-      convData.bot_enabled = false;
-      convData.status = 'pending';
-      convData.auto_reactivate_enabled = true;
-      convData.human_handoff_started_at = convData.human_handoff_started_at || timestamp;
-      convData.large_pickup_rule_applied = true;
-      convData.large_pickup_drive_type = sprLargePickupDriveType;
-      botReply = sprLargePickupDriveType
-        ? `Gracias por confirmar que es *${sprLargePickupDriveType}*. Ya te paso directamente con un asesor para revisar la pieza correcta y preparar tu cotización.`
-        : 'Para cotizar correctamente esta camioneta y evitar enviarte una pieza equivocada, ¿es *4x4* o *4x2*? Ya te paso directamente con un asesor para revisar la compatibilidad.';
-
-      const taskId = createUniqueId('task');
-      const taskData = {
-        id: taskId,
-        company_id: companyId,
-        lead_id: leadId,
-        lead_nombre: customerName,
-        titulo: `Atender camioneta grande de ${customerName} en WhatsApp`,
-        tipo: 'whatsapp',
-        fecha_limite: new Date().toISOString(),
-        prioridad: 'Urgente',
-        completada: false,
-        fecha_creacion: timestamp,
-        nota: `Regla camioneta grande: confirmar 4x4/4x2 y revisar con asesor. Mensaje: "${messageText}"`
-      };
-      try {
-        await db.doc(`followups/${taskId}`).set(taskData);
-      } catch (e) {}
-    } else if (wantsHuman) {
+    if (wantsHuman) {
       convData.human_handoff = true;
       convData.bot_enabled = false;
       convData.status = 'pending';
@@ -2284,7 +1560,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
       try {
         await db.doc(`followups/${taskId}`).set(taskData);
       } catch (e) {}
-    } else if (botSettings?.working_hours && !checkWorkingHours(botSettings.working_hours) && !isFriendlyGreeting && !isCourtesyMessage && !isShopifyPrefillIntro && !isCommonFaqQuestion) {
+    } else if (botSettings?.working_hours && !checkWorkingHours(botSettings.working_hours) && !isFriendlyGreeting && !isCourtesyMessage && !isShopifyPrefillIntro) {
       // Out of hours
       botReply = botSettings.out_of_hours_message || `¡Hola! Gracias por comunicarte. En este momento nos encontramos fuera de horario de atención comercial, pero ya registramos tu consulta y un asesor te responderá a primera hora.`;
     } else {
@@ -2310,12 +1586,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
             const asksPrice = ['precio', 'cuanto', 'cuesta', 'costo', 'mensual', 'vale', 'tarifa', 'pago', 'acceso'].some(term => lowerText.includes(term));
       const asksPackage = lowerText.includes('paquete') || lowerText.includes('completo') || lowerText.includes('ambos') || lowerText.includes('los dos') || lowerText.includes('crm y bot') || lowerText.includes('bot y crm');
-      const asksPromotion = /\b(promocion|promo|descuento|oferta|halloween|activacion\s+gratis)\b/.test(lowerText);
       const asksCrm = lowerText.includes('crm');
       const asksBot = lowerText.includes('bot') || lowerText.includes('chatbot') || lowerText.includes('chat bot') || lowerText.includes('whatsapp') || lowerText.includes('api chat');
-      const isFriendlyGreeting = isFriendlyGreetingText(messageText);
-      const isCourtesyMessage = isCourtesyText(messageText);
-
       const crmReply = `📊 *DT CRM Core*
 
 💰 *$599 MXN al mes*
@@ -2348,24 +1620,7 @@ Incluye:
 
 ¿Quieres conocer el paquete completo o hablar con un asesor?`;
 
-      const isDtMarketingTenant = /dt\s*marketing/i.test(`${tenantDisplayName} ${tenantCompany?.nombre || ''} ${botSettings?.business_name || ''} ${botSettings?.business_description || ''}`);
-      const dtMarketingOctoberPromoActive = isDtMarketingTenant && isOctoberDtMarketingPromotionActive();
-      const packageReply = dtMarketingOctoberPromoActive
-        ? `🎃 *DESCUENTO DE MIEDO* 👻
-
-Contrata *DT CRM Core + DT Bot Core* y obtén:
-
-👻 *Activación GRATIS* ~$1,999 MXN~
-💬 Atención automatizada 24/7
-📊 Prospectos y clientes organizados
-📈 Seguimiento de oportunidades
-🔗 Bot + CRM trabajando juntos
-
-🔥 *$2,499 MXN al mes*
-📅 Válida durante octubre.
-
-📲 Solicita una demostración con *DT Marketing*.`
-        : `🚀 *Paquete Completo DT Marketing*
+      const packageReply = `🚀 *Paquete Completo DT Marketing*
 
 💰 *$2,499 MXN mensuales + activación*
 
@@ -2387,159 +1642,73 @@ Incluye:
 
 ¿Te gustaría solicitar una demostración?`;
 
-      const botIdentityForCatalog = `${tenantDisplayName} ${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase();
+      const botIdentityForCatalog = `${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase();
       const isSprAutopartesTenant = /spr\s*(bot|autopartes|engine)/i.test(botIdentityForCatalog) || /spr autopartes/i.test(botIdentityForCatalog);
       const publicBusinessName = isSprAutopartesTenant ? 'SPR Autopartes' : tenantDisplayName;
       const publicBotName = String(
         botSettings?.bot_name || (isSprAutopartesTenant ? 'SPR BOT' : 'asistente virtual')
       ).trim();
-      const sprFaqReply = buildSprFaqReply(messageText, isSprAutopartesTenant);
-      let catalogQueryText = catalogContextText || messageText;
-      let catalogLowerText = canonicalizeSprPartSynonyms(catalogQueryText);
-      let yearConfirmationReply = '';
-      const pendingYear = convData?.pending_year_confirmation || null;
-      const currentNormalizedText = normalizeBotText(messageText);
-      const confirmsPendingYear = pendingYear && isSprYearConfirmation(messageText);
-      const deniesPendingYear = pendingYear && /\b(no|incorrecto|incorrecta|ese no|esa no)\b/.test(currentNormalizedText);
-      if (confirmsPendingYear) {
-        const explicitYear = currentNormalizedText.match(/\b(?:19|20)\d{2}\b/);
-        const confirmedYear = explicitYear ? explicitYear[0] : String(pendingYear.suggested_year || '');
-        catalogQueryText = String(pendingYear.original_query || catalogQueryText).replace(String(pendingYear.invalid_year || ''), confirmedYear);
-        catalogLowerText = canonicalizeSprPartSynonyms(catalogQueryText);
-        convData.pending_year_confirmation = null;
-      } else if (deniesPendingYear) {
-        convData.pending_year_confirmation = null;
-        yearConfirmationReply = '\u00bfCu\u00e1l es el a\u00f1o correcto para revisar esa pieza? \U0001F4C5';
-      } else {
-        const yearClarification = getSprYearClarification(catalogQueryText);
-        if (yearClarification) {
-          convData.pending_year_confirmation = {
-            original_query: catalogQueryText,
-            invalid_year: yearClarification.invalidYear,
-            suggested_year: yearClarification.suggestedYear || null
-          };
-          yearConfirmationReply = yearClarification.suggestedYear
-            ? '\u00bfTe refieres al a\u00f1o ' + yearClarification.suggestedYear + '? Conf\u00edrmame y busco ' + getSprConfirmationPart(catalogQueryText) + '. \U0001F50E'
-            : 'No pude identificar el a\u00f1o. \u00bfCu\u00e1l es el a\u00f1o correcto para revisar esa pieza? \U0001F4C5';
-        }
-      }
-      const catalogInputText = canonicalizeSprPartSynonyms(lowerText);
-      const asksCatalogProduct = !isShopifyPrefillIntro && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|maza(?:s)?|balero(?:s)?|bieleta(?:s)?|junta\s+homocinetica|horquilla(?:s)?|flecha(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|soporte|terminal|r[oó]tula|tornillo(?:s)?|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera|carroceria|puerta(?:s)?)\b/.test(catalogInputText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText));
+      const catalogQueryText = catalogContextText || messageText;
+      const catalogLowerText = normalizeBotText(catalogQueryText);
+      const asksCatalogProduct = !isShopifyPrefillIntro && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera|carroceria)\b/.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText));
       let sprCatalogReply = '';
-      let catalogNeedsAdvisor = false;
       if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
-          if (!yearConfirmationReply) {
-            let catalogItems = await getSprEngineCatalog();
-          let sprMatches = filterStrictSprVehicleMatches(
-            findSprEngineMatches(catalogItems, catalogLowerText),
-            catalogLowerText
-          );
+          let catalogItems = await getSprEngineCatalog();
+          let sprMatches = findSprEngineMatches(catalogItems, catalogLowerText);
+          sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
           if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
-            // Do not answer "no hay" after the first miss. Search the full
-            // bounded synonym/vehicle plan, then run the relaxed local pass.
-            const exhaustive = await searchSprCatalogExhaustively(catalogItems, catalogQueryText);
-            catalogItems = exhaustive.items;
-            sprMatches = exhaustive.matches;
+            const focusedSearchQuery = buildSprFocusedSearchQuery(catalogQueryText);
+            const searchedItems = await searchSprCatalog(focusedSearchQuery);
+            sprMatches = findSprEngineMatches(searchedItems, catalogLowerText);
+            sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
+            if (sprMatches.length) catalogItems = [...catalogItems, ...searchedItems];
           }
-          const strictEngineTokens = (/\b(motor(?:es)?|cabeza(?:s)?|culata)\b/.test(catalogLowerText)
-            ? catalogLowerText.split(/\s+/).filter(token => /[a-z]/.test(token) && /\d/.test(token) && token.length >= 3 && !/^(19|20)\d{2}$/.test(token) && !["motor","motores","cabeza","cabezas","culata","engine","series"].includes(token) && !isSprEngineSpecificationToken(token))
-            : []);
-          if (strictEngineTokens.length) {
-            sprMatches = sprMatches.filter(item => {
-              const haystack = normalizeBotText([item.title, item.description, item.productType, item.tags].filter(Boolean).join(" "));
-              const words = haystack.split(/\s+/);
-              return strictEngineTokens.every(token => sprTokenMatches(haystack, token));
-            });
-          }
-          // A missing match is not a negative answer. Keep the conversation
-          // silent and route the request to an advisor for manual verification.
-          catalogNeedsAdvisor = !sprMatches.length
-            && !yearConfirmationReply
-            && !isGenericSprCatalogRequest(catalogLowerText)
-            && !isAmbiguousSprCatalogRequest(catalogLowerText)
-            && !isIncompleteSprCatalogRequest(catalogLowerText);
           const aldoStockResult = isAldoStockCategoryQuery(catalogQueryText)
             ? await searchAldoStock(catalogQueryText)
             : null;
           sprCatalogReply = buildSprCatalogReply(sprMatches, catalogLowerText, catalogItems, aldoStockResult);
-          }
         } catch (catalogError) {
           console.warn('⚠️ SPR live catalog lookup failed:', catalogError.message);
         }
       }
 
-      if (catalogNeedsAdvisor) {
-        convData.human_handoff = true;
-        convData.bot_enabled = false;
-        convData.status = 'pending';
-        convData.auto_reactivate_enabled = true;
-        convData.human_handoff_started_at = convData.human_handoff_started_at || timestamp;
-        convData.catalog_review_required = true;
-        convData.catalog_review_reason = 'no_confident_match';
-        convData.catalog_review_query = messageText;
-        botReply = '';
-
-        const taskId = createUniqueId('task');
-        const taskData = {
-          id: taskId,
-          company_id: companyId,
-          lead_id: leadId,
-          lead_nombre: customerName,
-          titulo: `Verificar pieza solicitada por ${customerName} en WhatsApp`,
-          tipo: 'whatsapp',
-          fecha_limite: new Date().toISOString(),
-          prioridad: 'Urgente',
-          completada: false,
-          fecha_creacion: timestamp,
-          nota: `El catálogo no dio una coincidencia segura. Revisar manualmente antes de responder. Mensaje: "${messageText}"`
-        };
-        try {
-          await db.doc(`followups/${taskId}`).set(taskData);
-        } catch (e) {}
-      }
-
-      if (isShopifyPrefillIntro) { botReply = isShopifySuspensionIntro ? `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo con tu consulta de suspensión.
-
-🚗 Compárteme la *marca, modelo y año* de tu vehículo para revisar la pieza correcta.` : `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo.
-
-🔧 ¿Qué pieza necesitas consultar? Compárteme la *marca, modelo y año* de tu vehículo para orientarte mejor.`; } else if (yearConfirmationReply) {
-        sprCatalogReply = yearConfirmationReply;
-      }
-      if (catalogNeedsAdvisor) {
-        // Leave botReply empty so the advisor can verify the request without
-        // sending a speculative or negative message to the customer.
+      if (isShopifyPrefillIntro) {
+        botReply = isShopifySuspensionIntro
+          ? `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo con tu consulta de suspensión.\n\n🚗 Compárteme la *marca, modelo y año* de tu vehículo para revisar la pieza correcta.`
+          : `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo.\n\n🔧 ¿Qué pieza necesitas consultar? Compárteme la *marca, modelo y año* de tu vehículo para orientarte mejor.`;
       } else if (sprCatalogReply) {
         botReply = sprCatalogReply;
-      } else if (sprFaqReply) {
-        botReply = sprFaqReply;
       } else if (isFriendlyGreeting) {
         const greetingPrefix = lowerText.includes('buenos dias')
-          ? '\u2600\ufe0f \u00a1Muy buenos d\u00edas!'
+          ? '☀️ ¡Muy buenos días!'
           : lowerText.includes('buenas tardes')
-            ? '\uD83C\uDF24\ufe0f \u00a1Muy buenas tardes!'
+            ? '🌤️ ¡Muy buenas tardes!'
             : lowerText.includes('buenas noches')
-              ? '\uD83C\uDF19 \u00a1Muy buenas noches!'
-              : '\uD83D\uDC4B \u00a1Hola!';
+              ? '🌙 ¡Muy buenas noches!'
+              : '👋 ¡Hola!';
         const helpPrompt = isSprAutopartesTenant
-          ? '\u00bfQu\u00e9 pieza o refacci\u00f3n est\u00e1s buscando? \uD83D\uDE97\uD83D\uDD27'
-          : '\u00bfEn qu\u00e9 podemos ayudarte hoy?';
-        const configuredWelcome = String(botSettings?.welcome_message || '').trim();
-        botReply = configuredWelcome && configuredWelcome.length >= 8
-          ? configuredWelcome
-          : greetingPrefix + "\n\nGracias por escribir a *" + publicBusinessName + "*. Soy *" + publicBotName + "* y con gusto te ayudo.\n\n" + helpPrompt;
+          ? '¿Qué pieza o refacción estás buscando? 🚗🔧'
+          : '¿En qué podemos ayudarte hoy?';
+        botReply = `${greetingPrefix}
+
+Gracias por escribir a *${publicBusinessName}*. Soy *${publicBotName}* y con gusto te ayudo.
+
+${helpPrompt}`;
       } else if (isCourtesyMessage) {
         const courtesyFollowup = isSprAutopartesTenant
-          ? 'Cuando necesites otra pieza, aqu\u00ed estaremos para ayudarte. \uD83D\uDE97\uD83D\uDD27'
-          : 'Cuando necesites algo m\u00e1s, aqu\u00ed estaremos para ayudarte.';
-        botReply = '\uD83D\uDE0A \u00a1Con gusto! Gracias a ti por escribir a *' + publicBusinessName + '*.\n\n' + courtesyFollowup;
-      } else if (asksPackage || (asksPromotion && !isSprAutopartesTenant)) {
+          ? 'Cuando necesites otra pieza, aquí estaremos para ayudarte. 🚗🔧'
+          : 'Cuando necesites algo más, aquí estaremos para ayudarte.';
+        botReply = `😊 ¡Con gusto! Gracias a ti por escribir a *${publicBusinessName}*.
+
+${courtesyFollowup}`;
+      } else if (asksPackage) {
         botReply = packageReply;
       } else if (asksBot && (asksPrice || lowerText.includes('y el') || lowerText.includes('incluye') || lowerText.includes('funciona') || lowerText.includes('informacion') || lowerText.includes('información') || lowerText.includes('servicio'))) {
         botReply = botReplyText;
       } else if (asksCrm && (asksPrice || lowerText.includes('incluye') || lowerText.includes('funciona') || lowerText.includes('informacion') || lowerText.includes('información') || lowerText.includes('servicio'))) {
         botReply = crmReply;
-      } else if (bestMatch && maxScore >= 2) {
+      } else if (bestMatch && maxScore >= 2) {        
         botReply = `${bestMatch.content} ¿Te gustaría que un asesor te prepare una cotización personalizada?`;
       } else if (['si', 'sii', 'siii', 'siiii', 'yes', 'claro', 'por favor', 'adelante', 'me interesa', 'me interesa la demo', 'si me interesa', 'si quiero', 'quiero una demo', 'quiero una demostracion', 'me gustaria una demo', 'me gustaria una demostracion'].includes(lowerText)) {
   botReply = `¡Excelente! 🙌 Con gusto te mostramos una demo de ${tenantDisplayName}.
@@ -2551,67 +1720,21 @@ Si quieres atención inmediata, escribe *asesor*`;
   botReply = `Entendido 👍 Si después quieres conocer nuestros servicios, escribe *CRM*, *WhatsApp* o *paquete*`;
 } else if (['ya', 'ok', 'okay', 'listo', 'recibido'].includes(lowerText)) {
   botReply = `Perfecto, ${customerName}. ¿Qué producto o servicio te interesa? También puedes escribir *asesor* para hablar con nuestro equipo.`;
-      } else if (isSprAutopartesTenant) {
-        // SPR must stay silent when the intent is uncertain. Route the
-        // conversation to an advisor instead of inventing a catalog answer.
-        convData.human_handoff = true;
-        convData.bot_enabled = false;
-        convData.status = 'pending';
-        convData.auto_reactivate_enabled = true;
-        convData.human_handoff_started_at = convData.human_handoff_started_at || timestamp;
-        convData.catalog_review_required = true;
-        convData.catalog_review_reason = 'no_confident_intent';
-        convData.catalog_review_query = messageText;
-        botReply = '';
-
-        const taskId = createUniqueId('task');
-        const taskData = {
-          id: taskId,
-          company_id: companyId,
-          lead_id: leadId,
-          lead_nombre: customerName,
-          titulo: `Revisar consulta de ${customerName} en WhatsApp`,
-          tipo: 'whatsapp',
-          fecha_limite: new Date().toISOString(),
-          prioridad: 'Urgente',
-          completada: false,
-          fecha_creacion: timestamp,
-          nota: `El bot SPR no identificó una respuesta segura. Revisar manualmente antes de responder. Mensaje: "${messageText}"`
-        };
-        try {
-          await db.doc(`followups/${taskId}`).set(taskData);
-        } catch (e) {}
       } else {
-        // Every tenant uses the same safe review behavior when the intent is
-        // uncertain. The inbound message remains visible in the CRM and an
-        // advisor can verify it before the bot sends anything.
+        // An uncertain answer is a review task, not an inventory denial. The
+        // bot stays silent so an advisor can verify the exact product, model,
+        // year and compatibility before anything is promised to the customer.
         if (botSettings?.silent_uncertain_fallback === true || botSettings?.onboarding_policy?.review_uncertain_requests === true) {
           convData.human_handoff = true;
           convData.bot_enabled = false;
           convData.status = 'pending';
           convData.auto_reactivate_enabled = true;
           convData.human_handoff_started_at = convData.human_handoff_started_at || timestamp;
-          convData.needs_human_review = true;
           convData.handoff_reason = 'uncertain_request_review';
+          convData.needs_human_review = true;
           convData.review_requested_at = timestamp;
           botReply = '';
-          const taskId = createUniqueId('task');
-          const taskData = {
-            id: taskId,
-            company_id: companyId,
-            lead_id: leadId,
-            lead_nombre: customerName,
-            titulo: `Revisar consulta de ${customerName} en WhatsApp`,
-            tipo: 'whatsapp',
-            fecha_limite: new Date().toISOString(),
-            prioridad: 'Urgente',
-            completada: false,
-            fecha_creacion: timestamp,
-            nota: `El bot no identificó una respuesta segura. Revisar manualmente antes de responder. Mensaje: "${messageText}"`
-          };
-          try {
-            await db.doc(`followups/${taskId}`).set(taskData);
-          } catch (e) {}
+          console.log(`🧑‍💼 [Review Required] Conversation [${convId}] needs advisor verification before replying.`);
         } else {
           const configuredFallback = String(botSettings?.fallback_message || '').trim();
           botReply = configuredFallback && !/no tenemos ese articulo|no tenemos ese artículo|no tengo suficiente información|no tengo suficiente informacion/i.test(configuredFallback)
@@ -2621,16 +1744,10 @@ Si quieres atención inmediata, escribe *asesor*`;
       }
     }
 
-    botReply = applyBotConfiguration(botReply, botSettings);
     botReply = formatWhatsAppReply(botReply);
 
     // 6. Send Outbound WhatsApp Reply via Meta Graph API
-    const botIdentity = `${companyId} ${tenantDisplayName} ${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase(); const isDtMarketingTenant = companyId === 'comp_dt_marketing' || /\bdt\s*(marketing|crm)\b/.test(botIdentity); const tenantBotName = String(botSettings?.bot_name || tenantDisplayName || 'nuestro asistente').trim(); const crossTenantContent = /(dt marketing|dt crm core|api chat bot|paquete completo|escribe \*crm\*, \*whatsapp\* o \*paquete\*)/i; const asksLocation = /\b(ubicacion|ubicados|donde estan|donde se encuentran|sucursal|domicilio|horarios?)\b/.test(lowerText) || (/\bdireccion\b/.test(lowerText) && (/\b(?:cual es|dime|me compartes|me das|compartenos|comparteme)\s+(?:la\s+|su\s+)?direccion\b/.test(lowerText) || /\bsu\s+direccion\b/.test(lowerText) || /\bdireccion\s+(?:del|de la)\s+(?:local|sucursal|negocio|tienda|oficina|empresa)\b/.test(lowerText) || /\bdireccion\s+(?:de|del)\s+(?:spr|ustedes|la empresa|el negocio|la tienda)\b/.test(lowerText))); if (!isDtMarketingTenant && (asksLocation || crossTenantContent.test(botReply))) { console.error(`[Cross-Tenant Content Blocked] Company: ${companyId} | Phone ID: ${phoneNumberId}`); botReply = asksLocation ? `📍 *Estamos ubicados en Querétaro, México.* 🚚 Realizamos envíos a todo México. Si ya deseas comprar, compártenos la pieza que buscas y los datos de tu vehículo para preparar tu cotización.` : `🤔 *Quiero ayudarte mejor.* Para orientarte sobre *${tenantBotName}*, ¿buscas una cotización, una pieza o servicio, información de envío, garantía o hablar con un asesor?`; } let outboundSuccess = false;
-    // Only SPR owns the configured Querétaro location. Never leak it to a
-    // different client when a generic fallback was generated.
-    if (!isDtMarketingTenant && asksLocation && !isSprAutopartesTenant) {
-      botReply = `📍 Para compartirte la ubicación de *${tenantBotName}*, un asesor de la empresa te atenderá directamente.`;
-    }
+    const botIdentity = `${companyId} ${tenantDisplayName} ${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase(); const isDtMarketingTenant = companyId === 'comp_dt_marketing' || /\bdt\s*(marketing|crm)\b/.test(botIdentity); const tenantBotName = String(botSettings?.bot_name || tenantDisplayName || 'nuestro asistente').trim(); const crossTenantContent = /(dt marketing|dt crm core|api chat bot|paquete completo|escribe \*crm\*, \*whatsapp\* o \*paquete\*)/i; const asksLocation = isCustomerLocationQuestion(lowerText); if (!isDtMarketingTenant && (asksLocation || crossTenantContent.test(botReply))) { console.error(`[Cross-Tenant Content Blocked] Company: ${companyId} | Phone ID: ${phoneNumberId}`); botReply = asksLocation ? `📍 *Estamos ubicados en Querétaro, México.* 🚚 Realizamos envíos a todo México. Si ya deseas comprar, compártenos la pieza que buscas y los datos de tu vehículo para preparar tu cotización.` : `🤔 *Quiero ayudarte mejor.* Para orientarte sobre *${tenantBotName}*, ¿buscas una cotización, una pieza o servicio, información de envío, garantía o hablar con un asesor?`; } let outboundSuccess = false;
     let metaMessageId = null;
 
     if (botReply && accessToken && phoneNumberId) {
@@ -2661,21 +1778,6 @@ Si quieres atención inmediata, escribe *asesor*`;
       } catch (metaErr) {
         console.error('❌ Meta Graph API Error sending reply:', metaErr.response?.data?.error?.message || metaErr.message);
       }
-    }
-
-    // Move the CRM lead only after the interaction has been classified. A
-    // catalog/price reply becomes “Cotización enviada” only when Meta accepted
-    // the outbound message; a failed send remains an interested prospect.
-    if (botSettings?.auto_create_leads !== false) {
-      await advanceLeadStageAutomatically(db, {
-        leadId,
-        messageText,
-        botReply,
-        humanHandoff: convData.human_handoff === true,
-        outboundSuccess,
-        source: 'bot',
-        currentStage: currentLeadStage
-      });
     }
 
     // Record Outbound Message in Firestore
@@ -2871,7 +1973,6 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
   }
 
   const cleanPhone = to_phone.replace(/[^0-9]/g, '');
-  let conversationLeadId = null;
 
   // 4. Strict Conversation Verification (must exist, match company, and match recipient)
   if (conversation_id) {
@@ -2907,7 +2008,6 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
         error: 'Acceso denegado: La conversación indicada pertenece a otra empresa o no tiene empresa asignada.'
       });
     }
-    conversationLeadId = convData.lead_id || null;
 
     // Validate recipient matching between request and conversation
     const convTarget = (convData.external_user_id || convData.contact_phone || '').replace(/[^0-9]/g, '');
@@ -3108,15 +2208,6 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
           human_handoff_started_at: agentTimestamp,
           last_agent_message_at: agentTimestamp
         }, { merge: true });
-        if (conversationLeadId) {
-          await advanceLeadStageAutomatically(db, {
-            leadId: conversationLeadId,
-            messageText: message_text,
-            humanHandoff: true,
-            outboundSuccess: true,
-            source: 'agent'
-          });
-        }
       } catch (e) {
         console.error('⚠️ Warning: Message sent to Meta, but Firestore recording failed:', e.message);
         firestorePersistError = e.message;
@@ -3327,31 +2418,6 @@ module.exports = {
   verifyMetaSignature,
   isSyntheticMetaPayload,
   resolveTenant,
-  normalizeBotText,
-  isFriendlyGreetingText,
-  isCourtesyText,
-  normalizeSprLargePickupText,
-  isSprLargePickupRequest,
-  getSprLargePickupDriveType,
-  detectAutomaticLeadStage,
-  shouldAdvanceLeadStage,
-  canonicalizeSprPartSynonyms,
-  buildSprFocusedSearchQuery,
-  buildSprCatalogSearchQueries,
-  buildSprExhaustiveSearchQueries,
-  findSprEngineMatches,
-  filterStrictSprVehicleMatches,
-  findSprExhaustiveMatches,
-  isAmbiguousSprCatalogRequest,
-  buildSprCatalogContext,
-  isUnlistedSprProductRequest,
-  getSprYearClarification,
-  isSprYearConfirmation,
-  isSprStoreLocationQuestion,
-  buildSprFaqReply,
-  isIncompleteSprCatalogRequest,
-  buildSprCatalogReply,
-  normalizeSprProduct,
   setDb,
   setAdminAuth,
   setHttpClient,
@@ -3373,6 +2439,66 @@ app.get('/api/meta/embedded-signup/config', authenticateUser, (req, res) => {
     version: META_ESU_VERSION,
     graph_api_version: GRAPH_API_VERSION
   });
+});
+
+// Prepare a tenant before opening Meta's Embedded Signup flow. This keeps
+// onboarding repeatable for every future client: safe bot defaults, tenant
+// identity and the activation checklist are written once, without exposing
+// tokens or requiring the operator to fill the same fields again.
+app.post('/api/meta/embedded-signup/prepare', authenticateUser, async (req, res) => {
+  const user = req.authenticatedUser || {};
+  const companyId = String(req.body?.company_id || user.company_id || '').trim();
+  if (!companyId) return res.status(400).json({ success: false, error: 'No se pudo identificar la empresa activa del CRM.' });
+  if (user.rol !== 'SUPERADMIN' && user.company_id !== companyId) {
+    return res.status(403).json({ success: false, error: 'No tienes autorización para preparar esta activación.' });
+  }
+  if (!db) return res.status(503).json({ success: false, error: 'La base de datos no está disponible para preparar la activación.' });
+
+  try {
+    const companyRef = db.doc(`companies/${companyId}`);
+    const settingsRef = db.doc(`bot_settings/${companyId}`);
+    const onboardingRef = db.doc(`tenant_onboarding/${companyId}`);
+    const [companySnap, settingsSnap] = await Promise.all([companyRef.get(), settingsRef.get()]);
+    const company = companySnap.exists ? companySnap.data() || {} : { id: companyId };
+    const currentSettings = settingsSnap.exists ? settingsSnap.data() || {} : {};
+    const safeSettings = mergeTenantSafeBotSettings({ ...company, id: companyId }, currentSettings);
+    const now = new Date().toISOString();
+    const batch = db.batch();
+    batch.set(settingsRef, {
+      ...safeSettings,
+      company_id: companyId,
+      updated_at: now,
+      activation_defaults_applied_at: now,
+      activation_defaults_applied_by: user.uid || 'system'
+    }, { merge: true });
+    batch.set(onboardingRef, {
+      company_id: companyId,
+      policy_version: TENANT_POLICY_VERSION,
+      status: 'preparing',
+      checklist: {
+        tenant_identity: Boolean(company.nombre || company.name),
+        own_waba: false,
+        verified_phone_number: false,
+        webhook_subscribed: false,
+        client_billing_owner: true,
+        bot_safe_defaults: true
+      },
+      updated_at: now,
+      prepared_at: now,
+      prepared_by_user_id: user.uid || null
+    }, { merge: true });
+    await batch.commit();
+    res.json({
+      success: true,
+      company_id: companyId,
+      policy_version: TENANT_POLICY_VERSION,
+      status: 'preparing',
+      next_step: 'Autorizar el WABA y el número de WhatsApp de la empresa en Meta.'
+    });
+  } catch (error) {
+    console.error('Embedded Signup preparation error:', error.message);
+    res.status(500).json({ success: false, error: 'No se pudo preparar la activación de esta empresa.' });
+  }
 });
 
 app.post('/api/meta/embedded-signup/complete', authenticateUser, async (req, res) => {
@@ -3458,18 +2584,3 @@ app.post('/api/meta/embedded-signup/complete', authenticateUser, async (req, res
     res.status(502).json({ success: false, error: metaError?.message || 'Meta no pudo completar la conexión de WhatsApp.' });
   }
 });
-// Keep inbound WhatsApp media metadata available to the webhook and CRM.
-function extractInboundMedia(message) {
-  const type = String(message?.type || '').trim().toLowerCase();
-  if (!['image', 'video', 'audio', 'document', 'sticker'].includes(type)) return null;
-  const payload = message?.[type] && typeof message[type] === 'object' ? message[type] : {};
-  const mediaId = payload.id ? String(payload.id).trim() : '';
-  if (!mediaId) return null;
-  return {
-    media_id: mediaId,
-    media_type: type,
-    media_mime_type: payload.mime_type ? String(payload.mime_type).trim() : null,
-    media_caption: payload.caption ? String(payload.caption).trim() : null,
-    media_filename: payload.filename ? String(payload.filename).trim() : null
-  };
-}
