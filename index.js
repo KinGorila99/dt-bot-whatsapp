@@ -13,10 +13,12 @@ const admin = require('firebase-admin');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const WEBHOOK_BODY_LIMIT = process.env.WEBHOOK_BODY_LIMIT || '1mb';
 
 // Capture raw body for Meta HMAC-SHA256 signature verification
 app.use(cors());
 app.use(express.json({
+  limit: WEBHOOK_BODY_LIMIT,
   verify: (req, res, buf) => {
     req.rawBody = buf;
   }
@@ -101,6 +103,10 @@ function timestampMs(value) {
   return Number.isFinite(time) ? time : 0;
 }
 
+function createUniqueId(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
 // Meta puede entregar el mismo número mexicano como 521XXXXXXXXXX o
 // 52XXXXXXXXXX. Además, algunas conversaciones antiguas conservaron el
 // prefijo de una empresa migrada. Un único ID canónico evita crear otra ficha
@@ -127,11 +133,27 @@ async function loadWhatsAppConversation(dbInstance, companyId, phone) {
   if (!targetPhone) return { id: canonicalId, data: directData, legacyIds: [] };
 
   try {
-    const snapshot = await dbInstance.collection('conversations')
-      .where('company_id', '==', companyId)
-      .where('channel', '==', 'whatsapp')
+    // New conversations carry a normalized phone field, so lookups remain
+    // bounded even when a tenant has hundreds of thousands of conversations.
+    // The capped legacy scan is only for records written before this field
+    // existed and is removed after the first successful migration.
+    let snapshot = await dbInstance.collection('conversations')
+      .where('contact_phone_normalized', '==', targetPhone)
+      .limit(20)
       .get();
-    const matches = snapshot.docs.filter(doc => {
+    let candidateDocs = snapshot.docs.filter(doc => {
+      const data = doc.data() || {};
+      return data.company_id === companyId && data.channel === 'whatsapp';
+    });
+    if (!candidateDocs.length) {
+      snapshot = await dbInstance.collection('conversations')
+        .where('company_id', '==', companyId)
+        .where('channel', '==', 'whatsapp')
+        .limit(200)
+        .get();
+      candidateDocs = snapshot.docs;
+    }
+    const matches = candidateDocs.filter(doc => {
       const data = doc.data() || {};
       const storedPhone = normalizeWhatsAppPhone(data.external_user_id || data.contact_phone);
       return storedPhone === targetPhone;
@@ -470,6 +492,41 @@ function applyBotConfiguration(value, settings) {
   return text;
 }
 
+const KNOWLEDGE_CACHE_TTL_MS = Math.max(5000, Number(process.env.KNOWLEDGE_CACHE_TTL_MS || 15000));
+const knowledgeCache = new Map();
+const knowledgeFetches = new Map();
+
+async function getTenantKnowledgeBase(dbInstance, companyId) {
+  const key = String(companyId || '').trim();
+  if (!dbInstance || !key) return [];
+  const now = Date.now();
+  const cached = knowledgeCache.get(key);
+  if (cached && now - cached.fetchedAt < KNOWLEDGE_CACHE_TTL_MS) return cached.items;
+  if (knowledgeFetches.has(key)) return knowledgeFetches.get(key);
+  const fetchPromise = (async () => {
+    try {
+      const kbSnap = await dbInstance.collection('knowledge_base')
+        .where('company_id', '==', key)
+        .where('enabled', '==', true)
+        .get();
+      const items = kbSnap.docs.map(doc => doc.data());
+      knowledgeCache.set(key, { fetchedAt: Date.now(), items });
+      if (knowledgeCache.size > 500) {
+        const oldestKey = knowledgeCache.keys().next().value;
+        if (oldestKey) knowledgeCache.delete(oldestKey);
+      }
+      return items;
+    } catch (error) {
+      console.warn(`Could not load knowledge base for ${key}:`, error.message);
+      return cached?.items || [];
+    } finally {
+      knowledgeFetches.delete(key);
+    }
+  })();
+  knowledgeFetches.set(key, fetchPromise);
+  return fetchPromise;
+}
+
 
 const SPR_ENGINE_COLLECTION_URL = process.env.SPR_FULL_CATALOG_URL || process.env.SPR_ENGINE_COLLECTION_URL || 'https://sprautopartes.mx/products.json?limit=250';
 const SPR_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_CATALOG_TTL_MS || 60000));
@@ -480,6 +537,7 @@ const SPR_OPTIONAL_VEHICLE_WORDS_PATTERN = /\b(gl|gls|gle|glx|lt|ls|le|lx|ex|se|
 // Promoción de septiembre desactivada: el bot muestra únicamente el precio normal.
 const SPR_SEPTEMBER_DISCOUNT_PERCENT = 0;
 let sprCatalogCache = { fetchedAt: 0, items: [] };
+let sprCatalogFetchPromise = null;
 // SPR does not provide a reliable inventory signal. Collision and lighting
 // availability is checked against Aldo Autopartes when the public lookup responds.
 const ALDO_STOCK_URL = process.env.ALDO_STOCK_URL || 'https://www.aldoautopartes.com/pi_busqueda.jsp';
@@ -544,6 +602,11 @@ async function searchAldoStock(query) {
     }
   }
   aldoStockCache.set(cacheKey, { fetchedAt: now, result });
+  // Keep user-entered queries from growing one Render instance forever.
+  if (aldoStockCache.size > 500) {
+    const oldestKey = aldoStockCache.keys().next().value;
+    if (oldestKey) aldoStockCache.delete(oldestKey);
+  }
   return result;
 }
 
@@ -627,15 +690,21 @@ function normalizeSprProduct(product) {
 async function getSprEngineCatalog() {
   const now = Date.now();
   if (sprCatalogCache.items.length > 0 && now - sprCatalogCache.fetchedAt < SPR_CATALOG_TTL_MS) return sprCatalogCache.items;
-  const response = await axios.get(SPR_ENGINE_COLLECTION_URL, {
-    timeout: 9000,
-    headers: { 'User-Agent': 'DT Bot Core / SPR catalog sync' }
+  if (sprCatalogFetchPromise) return sprCatalogFetchPromise;
+  sprCatalogFetchPromise = (async () => {
+    const response = await axios.get(SPR_ENGINE_COLLECTION_URL, {
+      timeout: 9000,
+      headers: { 'User-Agent': 'DT Bot Core / SPR catalog sync' }
+    });
+    const products = Array.isArray(response.data?.products) ? response.data.products : [];
+    if (!products.length) throw new Error('SPR catalog returned no products');
+    const items = products.map(normalizeSprProduct).filter(item => item.title && item.regularPrice > 0);
+    sprCatalogCache = { fetchedAt: Date.now(), items };
+    return items;
+  })().finally(() => {
+    sprCatalogFetchPromise = null;
   });
-  const products = Array.isArray(response.data?.products) ? response.data.products : [];
-  if (!products.length) throw new Error('SPR catalog returned no products');
-  const items = products.map(normalizeSprProduct).filter(item => item.title && item.regularPrice > 0);
-  sprCatalogCache = { fetchedAt: now, items };
-  return items;
+  return sprCatalogFetchPromise;
 }
 
 async function searchSprCatalog(query) {
@@ -1441,6 +1510,7 @@ async function resolveTenant(dbInstance, phoneNumberId, wabaId) {
   if (phoneNumberId) {
     const snapByPhone = await dbInstance.collection('integrations')
       .where('phone_number_id', '==', String(phoneNumberId).trim())
+      .limit(2)
       .get();
     if (!snapByPhone.empty) {
       let candidateDocs = snapByPhone.docs;
@@ -1877,11 +1947,23 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
     // 3. Register / Update Lead in CRM
     const cleanPhoneDigits = customerPhone.replace(/[^0-9]/g, '');
-    const leadId = `lead_wa_${cleanPhoneDigits.slice(-10) || Date.now()}`;
+    const phoneKey = cleanPhoneDigits.slice(-10) || String(Date.now());
+    const companyKey = String(companyId || 'tenant').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80) || 'tenant';
+    const legacyLeadId = `lead_wa_${phoneKey}`;
+    let leadId = `lead_${companyKey}_wa_${phoneKey}`;
     let currentLeadStage = 'Nuevo Lead';
     if (botSettings?.auto_create_leads !== false) {
       try {
-        const existingLeadSnap = await db.doc(`leads/${leadId}`).get();
+        let existingLeadSnap = await db.doc(`leads/${leadId}`).get();
+        // Preserve existing conversations created before tenant-scoped lead
+        // IDs, while every new company gets a collision-proof ID.
+        if (!existingLeadSnap.exists && legacyLeadId !== leadId) {
+          const legacySnap = await db.doc(`leads/${legacyLeadId}`).get();
+          if (legacySnap.exists && legacySnap.data()?.company_id === companyId) {
+            leadId = legacyLeadId;
+            existingLeadSnap = legacySnap;
+          }
+        }
         if (existingLeadSnap.exists) {
           currentLeadStage = String(existingLeadSnap.data()?.estado || currentLeadStage).trim() || currentLeadStage;
         }
@@ -1946,6 +2028,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
       try {
         const previousMessages = await db.collection('messages')
           .where('conversation_id', '==', convId)
+          .orderBy('created_at', 'desc')
+          .limit(50)
           .get();
         recentCustomerMessages = previousMessages.docs
           .map(doc => doc.data() || {})
@@ -1966,6 +2050,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
         company_id: companyId,
         channel: 'whatsapp',
         external_user_id: customerPhone,
+        contact_phone_normalized: customerPhone,
         contact_name: customerName,
         contact_phone: `+${customerPhone}`,
         lead_id: leadId,
@@ -1988,6 +2073,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
         last_message_at: timestamp
       };
     } else {
+      convData.contact_phone_normalized = customerPhone;
       recentCustomerMessages = [...recentCustomerMessages, messageText].filter(Boolean).slice(-4);
       convData.last_customer_message = messageText;
       convData.recent_customer_messages = recentCustomerMessages;
@@ -2154,7 +2240,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
         ? `Gracias por confirmar que es *${sprLargePickupDriveType}*. Ya te paso directamente con un asesor para revisar la pieza correcta y preparar tu cotización.`
         : 'Para cotizar correctamente esta camioneta y evitar enviarte una pieza equivocada, ¿es *4x4* o *4x2*? Ya te paso directamente con un asesor para revisar la compatibilidad.';
 
-      const taskId = `task_${Date.now()}`;
+      const taskId = createUniqueId('task');
       const taskData = {
         id: taskId,
         company_id: companyId,
@@ -2180,7 +2266,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
       botReply = `Entendido, ${customerName}. He pausado las respuestas automáticas y transferí tu conversación a un asesor comercial. En un momento te responderá directamente aquí.`;
 
       // Urgent Task in CRM
-      const taskId = `task_${Date.now()}`;
+      const taskId = createUniqueId('task');
       const taskData = {
         id: taskId,
         company_id: companyId,
@@ -2203,14 +2289,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
       botReply = botSettings.out_of_hours_message || `¡Hola! Gracias por comunicarte. En este momento nos encontramos fuera de horario de atención comercial, pero ya registramos tu consulta y un asesor te responderá a primera hora.`;
     } else {
       // Query Knowledge Base for match
-      let kbItems = [];
-      try {
-        const kbSnap = await db.collection('knowledge_base')
-          .where('company_id', '==', companyId)
-          .where('enabled', '==', true)
-          .get();
-        kbItems = kbSnap.docs.map(d => d.data());
-      } catch (e) {}
+      const kbItems = await getTenantKnowledgeBase(db, companyId);
 
       let bestMatch = null;
       let maxScore = 0;
@@ -2401,7 +2480,7 @@ Incluye:
         convData.catalog_review_query = messageText;
         botReply = '';
 
-        const taskId = `task_${Date.now()}`;
+        const taskId = createUniqueId('task');
         const taskData = {
           id: taskId,
           company_id: companyId,
@@ -2485,7 +2564,7 @@ Si quieres atención inmediata, escribe *asesor*`;
         convData.catalog_review_query = messageText;
         botReply = '';
 
-        const taskId = `task_${Date.now()}`;
+        const taskId = createUniqueId('task');
         const taskData = {
           id: taskId,
           company_id: companyId,
@@ -2516,7 +2595,7 @@ Si quieres atención inmediata, escribe *asesor*`;
           convData.handoff_reason = 'uncertain_request_review';
           convData.review_requested_at = timestamp;
           botReply = '';
-          const taskId = `task_${Date.now()}`;
+          const taskId = createUniqueId('task');
           const taskData = {
             id: taskId,
             company_id: companyId,
