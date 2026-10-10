@@ -1388,7 +1388,7 @@ function isSyntheticMetaPayload(from) {
 /**
  * Strictly resolve company tenant & access token by Phone Number ID.
  * Multi-tenant Isolation Rule:
- * 1. Strictly look up by phone_number_id. If multiple integrations share the same phone ID, reject as ambiguous.
+ * 1. Strictly look up by phone_number_id. If different companies share the same phone ID, reject as ambiguous; duplicate records for one company use the connected record.
  * 2. Lookup by WABA ID ONLY if phone_number_id was omitted. If multiple integrations match the WABA ID, reject as ambiguous.
  * 3. Reject unknown IDs without fallback to prevent cross-tenant leaks.
  */
@@ -1404,6 +1404,18 @@ async function resolveTenant(dbInstance, phoneNumberId, wabaId) {
       .get();
     if (!snapByPhone.empty) {
       let candidateDocs = snapByPhone.docs;
+      const candidateCompanyIds = new Set(
+        candidateDocs
+          .map(doc => String(doc.data()?.company_id || '').trim())
+          .filter(Boolean)
+      );
+      // A Phone Number ID is globally unique in Meta. If Firestore contains
+      // the same ID under different companies, fail closed instead of
+      // selecting by recency and routing a customer to the wrong tenant.
+      if (candidateCompanyIds.size > 1) {
+        console.error(`🛑 [Ambiguous Phone Number ID: ${phoneNumberId}] Multiple companies are registered for the same WhatsApp number. Rejecting webhook.`);
+        return null;
+      }
       if (candidateDocs.length > 1) {
         candidateDocs = [...candidateDocs].sort((a, b) => {
           const ad = a.data();
@@ -1466,24 +1478,7 @@ async function resolveTenant(dbInstance, phoneNumberId, wabaId) {
   };
 }
 
-/**
- function extractInboundMedia(message) {
-  const type = String(message?.type || '').trim().toLowerCase();
-  if (!['image', 'video', 'audio', 'document', 'sticker'].includes(type)) return null;
-  const payload = message?.[type] && typeof message[type] === 'object' ? message[type] : {};
-  const mediaId = payload.id ? String(payload.id).trim() : '';
-  if (!mediaId) return null;
-  return {
-    media_id: mediaId,
-    media_type: type,
-    media_mime_type: payload.mime_type ? String(payload.mime_type).trim() : null,
-    media_caption: payload.caption ? String(payload.caption).trim() : null,
-    media_filename: payload.filename ? String(payload.filename).trim() : null
-  };
-}
-
-* 1. HEALTH & DIAGNOSTIC STATUS ENDPOINTS
- */
+/* 1. HEALTH & DIAGNOSTIC STATUS ENDPOINTS */
 app.get('/', (req, res) => {
   res.json({
     status: 'online',
@@ -2430,9 +2425,9 @@ Si quieres atención inmediata, escribe *asesor*`;
   botReply = `Entendido 👍 Si después quieres conocer nuestros servicios, escribe *CRM*, *WhatsApp* o *paquete*`;
 } else if (['ya', 'ok', 'okay', 'listo', 'recibido'].includes(lowerText)) {
   botReply = `Perfecto, ${customerName}. ¿Qué producto o servicio te interesa? También puedes escribir *asesor* para hablar con nuestro equipo.`;
-      } else {
-        // An unknown intent must never receive a generic sales answer. Keep
-        // the message silent and create an advisor review instead.
+      } else if (isSprAutopartesTenant) {
+        // SPR must stay silent when the intent is uncertain. Route the
+        // conversation to an advisor instead of inventing a catalog answer.
         convData.human_handoff = true;
         convData.bot_enabled = false;
         convData.status = 'pending';
@@ -2455,11 +2450,24 @@ Si quieres atención inmediata, escribe *asesor*`;
           prioridad: 'Urgente',
           completada: false,
           fecha_creacion: timestamp,
-          nota: `El bot no identificó una respuesta segura. Revisar manualmente antes de responder. Mensaje: "${messageText}"`
+          nota: `El bot SPR no identificó una respuesta segura. Revisar manualmente antes de responder. Mensaje: "${messageText}"`
         };
         try {
           await db.doc(`followups/${taskId}`).set(taskData);
         } catch (e) {}
+      } else {
+        // Other tenants keep their configured fallback and are not forced
+        // into SPR's catalog-review flow.
+        const configuredFallback = String(botSettings?.fallback_message || '').trim();
+        botReply = configuredFallback && !/no tengo suficiente información|no tengo suficiente informacion/i.test(configuredFallback) ? configuredFallback : `🤔 *Quiero ayudarte mejor.*
+
+¿Buscas información sobre:
+
+📊 *DT CRM Core*
+🤖 *API Chat Bot de WhatsApp*
+🚀 *Paquete completo*
+
+Escribe el nombre del servicio o pon *asesor* y te comunicamos con nuestro equipo.`;
       }
     }
 

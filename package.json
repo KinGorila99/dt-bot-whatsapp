@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "test:faq": "node tests/faq-eval.cjs",
+    "test:faq": "node tests/faq-eval-1000.cjs",
     "test:faq:1000": "node tests/faq-eval-1000.cjs",
     "test:catalog:full": "node tests/catalog-eval-full.cjs",
     "test:catalog:regressions": "node tests/catalog-regressions.cjs"
