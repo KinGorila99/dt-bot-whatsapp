@@ -51,6 +51,46 @@ if (!admin.apps.length) {
 const MASTER_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'dt_crm_whatsapp_verify_token_2026';
 const GRAPH_API_VERSION = process.env.GRAPH_API_VERSION || 'v26.0';
 const META_APP_SECRET = process.env.META_APP_SECRET || '';
+// Tenant-safe defaults are applied to every new client. They keep each bot
+// isolated, require its own Meta connection, and route uncertain requests to
+// an advisor instead of sending an unverified inventory denial.
+const TENANT_POLICY_VERSION = 'tenant-safe-defaults-20261010';
+const TENANT_SAFE_ONBOARDING_POLICY = Object.freeze({
+  tenant_isolation_required: true,
+  require_own_waba: true,
+  require_verified_phone_number: true,
+  require_client_billing_owner: true,
+  review_uncertain_requests: true,
+  silent_uncertain_fallback: true,
+  keyword_search_before_no_match: true,
+  ask_vehicle_details_before_no_match: true,
+  preserve_tenant_identity: true,
+  no_cross_tenant_content: true
+});
+
+function getTenantSafeBotDefaults(tenant = {}) {
+  const name = String(tenant.nombre || tenant.name || 'nuestro negocio').trim();
+  return {
+    policy_version: TENANT_POLICY_VERSION,
+    silent_uncertain_fallback: true,
+    onboarding_policy: { ...TENANT_SAFE_ONBOARDING_POLICY },
+    fallback_message: '',
+    custom_instructions: `Eres el asistente oficial de ${name}. Responde con amabilidad y precisión. Busca por palabras clave y usa marca, modelo, año y pieza para verificar la solicitud antes de responder. No inventes precios, compatibilidad ni existencias. Si no puedes confirmar la información con seguridad, marca la conversación para revisión de un asesor y no envíes una respuesta automática. Mantén siempre el nombre e identidad de esta empresa y no menciones otras empresas o cuentas.`
+  };
+}
+
+function mergeTenantSafeBotSettings(tenant, settings) {
+  const defaults = getTenantSafeBotDefaults(tenant);
+  const current = settings && typeof settings === 'object' ? settings : {};
+  return {
+    ...defaults,
+    ...current,
+    onboarding_policy: {
+      ...defaults.onboarding_policy,
+      ...(current.onboarding_policy || {})
+    }
+  };
+}
 // Auto-reactivate the bot after an advisor has been idle.
 const HUMAN_HANDOFF_IDLE_MINUTES = Math.max(5, Number(process.env.HUMAN_HANDOFF_IDLE_MINUTES || 10));
 
@@ -2058,6 +2098,13 @@ app.post('/webhook/whatsapp', async (req, res) => {
     } catch (e) {
       console.warn('Could not load tenant company profile:', e.message);
     }
+    // Preserve tenant-specific configuration while filling any missing global
+    // safety defaults. This makes the same onboarding contract apply to every
+    // future client without replacing a client's own branding or messages.
+    botSettings = mergeTenantSafeBotSettings(
+      tenantCompany || { id: companyId, nombre: 'nuestro negocio' },
+      botSettings
+    );
     const tenantDisplayName = String(
       tenantCompany?.nombre || botSettings?.business_name || botSettings?.business_description || 'nuestro negocio'
     ).trim();
@@ -2456,18 +2503,42 @@ Si quieres atención inmediata, escribe *asesor*`;
           await db.doc(`followups/${taskId}`).set(taskData);
         } catch (e) {}
       } else {
-        // Other tenants keep their configured fallback and are not forced
-        // into SPR's catalog-review flow.
-        const configuredFallback = String(botSettings?.fallback_message || '').trim();
-        botReply = configuredFallback && !/no tengo suficiente información|no tengo suficiente informacion/i.test(configuredFallback) ? configuredFallback : `🤔 *Quiero ayudarte mejor.*
-
-¿Buscas información sobre:
-
-📊 *DT CRM Core*
-🤖 *API Chat Bot de WhatsApp*
-🚀 *Paquete completo*
-
-Escribe el nombre del servicio o pon *asesor* y te comunicamos con nuestro equipo.`;
+        // Every tenant uses the same safe review behavior when the intent is
+        // uncertain. The inbound message remains visible in the CRM and an
+        // advisor can verify it before the bot sends anything.
+        if (botSettings?.silent_uncertain_fallback === true || botSettings?.onboarding_policy?.review_uncertain_requests === true) {
+          convData.human_handoff = true;
+          convData.bot_enabled = false;
+          convData.status = 'pending';
+          convData.auto_reactivate_enabled = true;
+          convData.human_handoff_started_at = convData.human_handoff_started_at || timestamp;
+          convData.needs_human_review = true;
+          convData.handoff_reason = 'uncertain_request_review';
+          convData.review_requested_at = timestamp;
+          botReply = '';
+          const taskId = `task_${Date.now()}`;
+          const taskData = {
+            id: taskId,
+            company_id: companyId,
+            lead_id: leadId,
+            lead_nombre: customerName,
+            titulo: `Revisar consulta de ${customerName} en WhatsApp`,
+            tipo: 'whatsapp',
+            fecha_limite: new Date().toISOString(),
+            prioridad: 'Urgente',
+            completada: false,
+            fecha_creacion: timestamp,
+            nota: `El bot no identificó una respuesta segura. Revisar manualmente antes de responder. Mensaje: "${messageText}"`
+          };
+          try {
+            await db.doc(`followups/${taskId}`).set(taskData);
+          } catch (e) {}
+        } else {
+          const configuredFallback = String(botSettings?.fallback_message || '').trim();
+          botReply = configuredFallback && !/no tenemos ese articulo|no tenemos ese artículo|no tengo suficiente información|no tengo suficiente informacion/i.test(configuredFallback)
+            ? configuredFallback
+            : '';
+        }
       }
     }
 
@@ -2582,6 +2653,8 @@ Escribe el nombre del servicio o pon *asesor* y te comunicamos con nuestro equip
         bot_replied: outboundSuccess,
         outbound_message_id: metaMessageId,
         human_handoff: convData.human_handoff,
+        needs_human_review: convData.needs_human_review === true,
+        handoff_reason: convData.handoff_reason || null,
         db_save_partial_error: dbSaveError || null
       }, { merge: true });
     } catch (e) {}
@@ -3275,6 +3348,8 @@ app.post('/api/meta/embedded-signup/complete', authenticateUser, async (req, res
       id: integrationId, company_id: companyId, provider: 'whatsapp', status: 'connected',
       onboarding_method: 'embedded_signup', display_phone_number: displayPhone, phone_number_id: phoneId,
       whatsapp_business_account_id: wabaId, verified_name: verifiedName || businessName || 'WhatsApp Business',
+      tenant_owned: true, billing_owner: 'client', billing_scope: 'tenant_messaging_account',
+      policy_version: TENANT_POLICY_VERSION,
       has_token: true, webhook_verified: true, outbound_verified: false,
       meta_business_id: String(body.meta_business_id || '').trim(), last_verified_at: now, last_sync_at: now,
       updated_at: now, created_at: now, created_by_user_id: user.uid, created_by_user_name: user.nombre || 'Administrador'
@@ -3282,7 +3357,21 @@ app.post('/api/meta/embedded-signup/complete', authenticateUser, async (req, res
     const batch = db.batch();
     batch.set(db.doc(`integrations/${integrationId}`), integration, { merge: true });
     batch.set(db.doc(`integrations/${integrationId}/secrets/tokens`), { access_token: accessToken, has_token: true, source: 'embedded_signup', updated_at: now, company_id: companyId }, { merge: true });
-    await batch.commit(); try { const companyRef = db.doc(`companies/${companyId}`); const companySnap = await companyRef.get(); if (companySnap.exists) { const companyData = companySnap.data() || {}; const existingIntegrations = companyData.integraciones || {}; const activeIntegrations = Array.isArray(existingIntegrations.activeIntegrations) ? existingIntegrations.activeIntegrations.filter(item => item.id !== integrationId && item.provider !== "whatsapp") : []; activeIntegrations.push(integration); await companyRef.set({ integraciones: { ...existingIntegrations, activeIntegrations, whatsapp: { ...(existingIntegrations.whatsapp || {}), enabled: true, businessNumber: displayPhone, phoneNumberId: phoneId, wabaId, has_token: true } } }, { merge: true }); } } catch (companySyncError) { console.warn("Embedded Signup company cache sync pending:", companySyncError.message); }
+    batch.set(db.doc(`tenant_onboarding/${companyId}`), {
+      company_id: companyId,
+      policy_version: TENANT_POLICY_VERSION,
+      status: 'connected',
+      checklist: {
+        tenant_identity: true,
+        own_waba: true,
+        verified_phone_number: true,
+        webhook_subscribed: true,
+        client_billing_owner: true,
+        bot_safe_defaults: true
+      },
+      updated_at: now
+    }, { merge: true });
+    await batch.commit(); try { const companyRef = db.doc(`companies/${companyId}`); const companySnap = await companyRef.get(); if (companySnap.exists) { const companyData = companySnap.data() || {}; const existingIntegrations = companyData.integraciones || {}; const activeIntegrations = Array.isArray(existingIntegrations.activeIntegrations) ? existingIntegrations.activeIntegrations.filter(item => item.id !== integrationId && item.provider !== "whatsapp") : []; activeIntegrations.push(integration); await companyRef.set({ integraciones: { ...existingIntegrations, activeIntegrations, whatsapp: { ...(existingIntegrations.whatsapp || {}), enabled: true, businessNumber: displayPhone, phoneNumberId: phoneId, wabaId, has_token: true, tenant_owned: true, billing_owner: 'client', policy_version: TENANT_POLICY_VERSION } } }, { merge: true }); } } catch (companySyncError) { console.warn("Embedded Signup company cache sync pending:", companySyncError.message); }
     res.json({ success: true, company_id: companyId, waba_id: wabaId, phone_number_id: phoneId, display_phone_number: displayPhone, verified_name: verifiedName || businessName, status: 'connected' });
   } catch (err) {
     const metaError = err.response?.data?.error;
