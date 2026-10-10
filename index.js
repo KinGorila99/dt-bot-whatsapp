@@ -170,6 +170,30 @@ function isCourtesyText(value) {
     || /^(?:(?:te|le)\s+)?agradezco\b/.test(text);
 }
 
+// Large pickups use different suspension/body configurations for 4x4 and
+// 4x2. Route these requests to an advisor before catalog matching so the bot
+// never rejects a valid part or sends a quote for the wrong configuration.
+function normalizeSprLargePickupText(value) {
+  return normalizeBotText(value)
+    .replace(/\bf\s*[- ]?\s*(150|250|350)\b/g, 'f$1')
+    .replace(/\b4\s*x\s*([24])\b/g, '4x$1')
+    .replace(/\b(pick)\s+up\b/g, '$1up');
+}
+
+function isSprLargePickupRequest(value) {
+  const text = normalizeSprLargePickupText(value);
+  const namedLargePickup = /\b(?:lobo|f150|f250|f350|silverado|cheyenne|sierra|ram(?:\s*(?:1500|2500|3500))?|tundra|titan)\b/.test(text);
+  const genericLargePickup = /\b(?:camioneta(?:s)?\s+grande(?:s)?|pickup(?:s)?|pickup\s+grande(?:s)?)\b/.test(text);
+  return namedLargePickup || genericLargePickup;
+}
+
+function getSprLargePickupDriveType(value) {
+  const text = normalizeSprLargePickupText(value);
+  if (/\b(?:4x4|4wd|cuatro\s+x\s+cuatro|doble\s+traccion)\b/.test(text)) return '4x4';
+  if (/\b(?:4x2|2wd|cuatro\s+x\s+dos)\b/.test(text)) return '4x2';
+  return null;
+}
+
 // Commercial stages are advanced by evidence from the conversation. The bot
 // never regresses a lead and never overwrites the two terminal stages selected
 // by a person in the CRM.
@@ -299,12 +323,12 @@ function canonicalizeSprPartSynonyms(value) {
   for (const replacer of SPR_PART_SYNONYM_REPLACERS) {
     normalized = normalized.replace(replacer.pattern, ` ${replacer.canonical} `);
   }
-    // Voice transcription and quick typing frequently turn “Chevy” into
+  // Voice transcription and quick typing frequently turn “Chevy” into
   // “Chev soy” (or a close variant). Treat the phrase as the vehicle name
   // before compacting model/year tokens; otherwise “soy 1985” becomes the
   // unrelated model token “soy1985” and a valid grille is rejected.
   normalized = normalized.replace(/\bchev\s+(?:soy|soi|boy|boi|hoy)\b/g, ' chevy ');
-// Correct a small set of common vehicle-name typos only after the normal
+  // Correct a small set of common vehicle-name typos only after the normal
   // accent and part-synonym normalization. This keeps the matcher tolerant
   // without allowing unrelated words to be guessed as a make or model.
   const vehicleAliases = new Map([
@@ -600,7 +624,7 @@ async function searchSprCatalog(query) {
 function sprTokenMatches(haystack, token) {
   const normalizedToken = normalizeBotText(token).trim();
   if (!normalizedToken) return false;
-    // Chevrolet/Chevy are the same make in the SPR catalog. Accept the common
+  // Chevrolet/Chevy are the same make in the SPR catalog. Accept the common
   // abbreviated spelling “chev” as well, while keeping all other vehicle
   // identity tokens strict.
   const vehicleAliases = {
@@ -662,7 +686,7 @@ function findSprEngineMatches(items, lowerText) {
     { key: 'tornillo', pattern: /\b(?:tornillo(?:s)?|estabilizador(?:es)?|cacahuate(?:s)?|cachuate(?:s)?|cahuate(?:s)?|cacuate(?:s)?)\b/ },
     { key: 'soporte', pattern: /\bsoporte(?:s)?\b/ },
     { key: 'iluminacion', pattern: /\b(faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?)\b/ },
-    { key: 'carroceria', pattern: /\b(parrilla(?:s)?|rejilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria)\b/ }
+    { key: 'carroceria', pattern: /\b(parrilla(?:s)?|rejilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria|puerta(?:s)?)\b/ }
   ];
   let requestedCategory = categoryRules.find(rule => rule.pattern.test(normalizedQuery));
   // A vehicle engine specification can appear alongside the requested part
@@ -851,27 +875,40 @@ function buildSprExhaustiveSearchQueries(value) {
   const normalized = canonicalizeSprPartSynonyms(value);
   const focused = buildSprFocusedSearchQuery(normalized);
   const partGroups = SPR_PART_SYNONYM_GROUPS.filter(group => {
-    const terms = [group.canonical, ...group.aliases].map(term => normalizeBotText(term)).filter(Boolean);
+    const terms = [group.canonical, ...group.aliases]
+      .map(term => normalizeBotText(term))
+      .filter(Boolean);
     return terms.some(term => new RegExp('\\b' + escapeSprRegex(term) + '\\b', 'i').test(normalized));
   });
-  const allPartTerms = partGroups.flatMap(group => [group.canonical, ...group.aliases]).map(term => normalizeBotText(term)).filter(Boolean).sort((a, b) => b.length - a.length);
-  const partPattern = allPartTerms.length ? new RegExp('\\b(?:' + allPartTerms.map(escapeSprRegex).join('|') + ')\\b', 'gi') : /$^/;
+  const allPartTerms = partGroups
+    .flatMap(group => [group.canonical, ...group.aliases])
+    .map(term => normalizeBotText(term))
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+  const partPattern = allPartTerms.length
+    ? new RegExp('\\b(?:' + allPartTerms.map(escapeSprRegex).join('|') + ')\\b', 'gi')
+    : /$^/;
   const vehicleText = focused
     .replace(partPattern, ' ')
-    .replace(/\\b(?:delantero|delantera|delanteros|delanteras|trasero|trasera|traseros|traseras|izquierdo|izquierda|izquierdos|izquierdas|derecho|derecha|derechos|derechas|lado|frente|atras|principal|niebla|antiniebla|piloto|chofer|conductor|pasajero|manual|electrico|electrica|electricos|electricas|con|sin|abs|fwd|birlo|birlos)\\b/gi, ' ')
+    .replace(/\b(?:delantero|delantera|delanteros|delanteras|trasero|trasera|traseros|traseras|izquierdo|izquierda|izquierdos|izquierdas|derecho|derecha|derechos|derechas|lado|frente|atras|principal|niebla|antiniebla|piloto|chofer|conductor|pasajero|manual|electrico|electrica|electricos|electricas|con|sin|abs|fwd|birlo|birlos)\b/gi, ' ')
     .replace(SPR_OPTIONAL_VEHICLE_WORDS_PATTERN, ' ')
     .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
-    .replace(/\\s+/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
   const queries = [...buildSprCatalogSearchQueries(value), focused];
   if (vehicleText) queries.push(vehicleText);
   for (const group of partGroups) {
-    const terms = [...new Set([group.canonical, ...group.aliases.map(term => normalizeBotText(term))])].filter(Boolean).slice(0, 6);
+    const terms = [...new Set([group.canonical, ...group.aliases.map(term => normalizeBotText(term))])]
+      .filter(Boolean)
+      .slice(0, 6);
     for (const term of terms) {
-      if (vehicleText) { queries.push(term + ' ' + vehicleText); queries.push(vehicleText + ' ' + term); }
+      if (vehicleText) {
+        queries.push(term + ' ' + vehicleText);
+        queries.push(vehicleText + ' ' + term);
+      }
     }
   }
-  return [...new Set(queries.map(query => String(query || '').replace(/\\s+/g, ' ').trim()).filter(Boolean))].slice(0, 16);
+  return [...new Set(queries.map(query => String(query || '').replace(/\s+/g, ' ').trim()).filter(Boolean))].slice(0, 16);
 }
 
 function sprLevenshteinDistance(left, right) {
@@ -879,8 +916,13 @@ function sprLevenshteinDistance(left, right) {
   const b = String(right || '');
   const row = Array.from({ length: b.length + 1 }, (_, index) => index);
   for (let i = 1; i <= a.length; i += 1) {
-    let previous = row[0]; row[0] = i;
-    for (let j = 1; j <= b.length; j += 1) { const current = row[j]; row[j] = Math.min(row[j] + 1, row[j - 1] + 1, previous + (a[i - 1] === b[j - 1] ? 0 : 1)); previous = current; }
+    let previous = row[0];
+    row[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const current = row[j];
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, previous + (a[i - 1] === b[j - 1] ? 0 : 1));
+      previous = current;
+    }
   }
   return row[b.length];
 }
@@ -888,12 +930,17 @@ function sprLevenshteinDistance(left, right) {
 function sprInvestigativeTokenMatches(haystack, token) {
   if (sprTokenMatches(haystack, token)) return true;
   const normalizedToken = normalizeBotText(token).replace(/[^a-z0-9]/g, '');
-  if (normalizedToken.length < 5 || /\\d/.test(normalizedToken)) return false;
-  const words = normalizeBotText(haystack).split(/\\s+/).map(word => word.replace(/[^a-z0-9]/g, '')).filter(word => word.length >= 5);
-  return words.some(word => Math.abs(word.length - normalizedToken.length) <= 1 && sprLevenshteinDistance(word, normalizedToken) <= 1);
+  // Do not guess numeric model/year fragments. One-character tolerance is
+  // limited to long alphabetic words where transcription typos are plausible.
+  if (normalizedToken.length < 5 || /\d/.test(normalizedToken)) return false;
+  const words = normalizeBotText(haystack).split(/\s+/)
+    .map(word => word.replace(/[^a-z0-9]/g, ''))
+    .filter(word => word.length >= 5);
+  return words.some(word => Math.abs(word.length - normalizedToken.length) <= 1
+    && sprLevenshteinDistance(word, normalizedToken) <= 1);
 }
 
-// Last local pass before the public "No tenemos..." response. Category,
+// Last local pass before handing an uncertain request to an advisor. Category,
 // vehicle identity and compatible year remain mandatory; only catalog wording
 // and a single alphabetic typo are relaxed.
 function findSprExhaustiveMatches(items, query) {
@@ -901,39 +948,86 @@ function findSprExhaustiveMatches(items, query) {
   const exact = filterStrictSprVehicleMatches(findSprEngineMatches(items, normalized), normalized);
   if (exact.length) return exact;
   const categoryRules = [
-    ['motor', /\\b(?:motor|engine(?:\\s+series)?)\\b/], ['cabeza', /\\b(?:cabeza|culata)\\b/],
-    ['amortiguador', /\\bamortiguador\\b/], ['suspension', /\\bsuspension\\b/],
-    ['freno', /\\b(?:freno|balata|pastilla)\\b/], ['aceite', /\\b(?:aceite|lubricante|motul|valvoline|pentosin)\\b/],
-    ['direccion', /\\b(?:direccion|terminal|rotula|caja de direccion)\\b/], ['radiador', /\\b(?:radiador|enfriamiento|cooling)\\b/],
-    ['bomba', /\\bbomba\\b/], ['turbo', /\\bturbo\\b/], ['embrague', /\\b(?:embrague|clutch)\\b/],
-    ['maza', /\\b(?:maza|balero)\\b/], ['bieleta', /\\bbieleta\\b/], ['junta', /\\b(?:junta homocinetica|espiga)\\b/],
-    ['horquilla', /\\bhorquilla\\b/], ['flecha', /\\b(?:flecha|semieje)\\b/], ['fascia', /\\bfascia\\b/],
-    ['tornillo', /\\btornillo\\b/], ['soporte', /\\bsoporte(?: de motor)?\\b/],
-    ['iluminacion', /\\b(?:faro|calavera|lampara|luz|luces|espejo)\\b/], ['carroceria', /\\b(?:parrilla|rejilla|defensa|cofre|salpicadera|carroceria)\\b/]
+    ['motor', /\b(?:motor|engine(?:\s+series)?)\b/],
+    ['cabeza', /\b(?:cabeza|culata)\b/],
+    ['amortiguador', /\bamortiguador\b/],
+    ['suspension', /\bsuspension\b/],
+    ['freno', /\b(?:freno|balata|pastilla)\b/],
+    ['aceite', /\b(?:aceite|lubricante|motul|valvoline|pentosin)\b/],
+    ['direccion', /\b(?:direccion|terminal|rotula|caja de direccion)\b/],
+    ['radiador', /\b(?:radiador|enfriamiento|cooling)\b/],
+    ['bomba', /\bbomba\b/], ['turbo', /\bturbo\b/],
+    ['embrague', /\b(?:embrague|clutch)\b/],
+    ['maza', /\b(?:maza|balero)\b/], ['bieleta', /\bbieleta\b/],
+    ['junta', /\b(?:junta homocinetica|espiga)\b/],
+    ['horquilla', /\bhorquilla\b/], ['flecha', /\b(?:flecha|semieje)\b/],
+    ['fascia', /\bfascia\b/], ['tornillo', /\btornillo\b/],
+    ['soporte', /\bsoporte(?: de motor)?\b/],
+    ['iluminacion', /\b(?:faro|calavera|lampara|luz|luces|espejo)\b/],
+    ['carroceria', /\b(?:parrilla|rejilla|defensa|cofre|salpicadera|carroceria)\b/]
   ];
   const requestedGroup = SPR_PART_SYNONYM_GROUPS.find(group => new RegExp('\\b' + escapeSprRegex(group.canonical) + '\\b', 'i').test(normalized));
-  const requestedCategory = requestedGroup ? { key: requestedGroup.canonical, pattern: new RegExp('\\b' + escapeSprRegex(requestedGroup.canonical) + '\\b', 'i') } : (() => { const found = categoryRules.find(rule => rule[1].test(normalized)); return found ? { key: found[0], pattern: found[1] } : null; })();
-  const requestedYears = [...normalized.matchAll(/\\b(?:19|20)\\d{2}\\b/g)].map(match => Number(match[0]));
+  const requestedCategory = requestedGroup
+    ? { key: requestedGroup.canonical, pattern: new RegExp('\\b' + escapeSprRegex(requestedGroup.canonical) + '\\b', 'i') }
+    : (() => {
+      const found = categoryRules.find(rule => rule[1].test(normalized));
+      return found ? { key: found[0], pattern: found[1] } : null;
+    })();
+  const requestedYears = [...normalized.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => Number(match[0]));
   const focused = buildSprFocusedSearchQuery(normalized);
-  const partTerms = [...SPR_PART_SYNONYM_GROUPS.flatMap(group => [group.canonical, ...group.aliases]), 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'engine', 'series'].map(term => normalizeBotText(term)).filter(Boolean).sort((a, b) => b.length - a.length);
+  const partTerms = [
+    ...SPR_PART_SYNONYM_GROUPS.flatMap(group => [group.canonical, ...group.aliases]),
+    'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'engine', 'series'
+  ].map(term => normalizeBotText(term)).filter(Boolean).sort((a, b) => b.length - a.length);
   const partPattern = new RegExp('\\b(?:' + partTerms.map(escapeSprRegex).join('|') + ')\\b', 'gi');
-  const coreTokens = focused.replace(partPattern, ' ').replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ').replace(SPR_CATALOG_EXTRA_FILLER_PATTERN, ' ').replace(SPR_OPTIONAL_VEHICLE_WORDS_PATTERN, ' ').replace(/\\b(?:19|20)\\d{2}\\b/g, ' ').replace(/\\b(?:delantero|delantera|delanteros|delanteras|trasero|trasera|traseros|traseras|izquierdo|izquierda|izquierdos|izquierdas|derecho|derecha|derechos|derechas|lado|frente|atras|principal|niebla|antiniebla|piloto|chofer|conductor|pasajero|manual|electrico|electrica|electricos|electricas|con|sin|abs|fwd|birlo|birlos)\\b/gi, ' ').split(/\\s+/).filter(token => (token.length >= 3 || /\\d/.test(token)) && !isSprEngineSpecificationToken(token));
-  const requestedSide = /\\b(?:izquierdo|izquierda|piloto|chofer|conductor)\\b/.test(normalized) ? 'left' : /\\b(?:derecho|derecha|pasajero|copiloto)\\b/.test(normalized) ? 'right' : '';
-  const requestedPosition = /\\b(?:delantero|delantera|frontal|delant)\\b/.test(normalized) ? 'front' : /\\b(?:trasero|trasera|posterior|tras)\\b/.test(normalized) ? 'rear' : '';
-  const negativeFogRequest = /\\b(?:no|sin|evitar|ningun|ninguna)\\b(?:\\s+\\w+){0,8}\\s+(?:faro\\s+de\\s+)?niebla\\b/.test(normalized);
-  const asksFogLight = !negativeFogRequest && /\\b(?:faro\\s+de\\s+)?(?:niebla|antiniebla)\\b/.test(normalized);
-  const asksMainLight = !negativeFogRequest && !asksFogLight && /\\b(?:faro|principal|delantero|delantera)\\b/.test(normalized);
-  const matchesYear = item => { if (!requestedYears.length) return true; const source = [item.title, item.description, item.tags].map(value => String(value || '')).join(' '); const years = [...source.matchAll(/\\b(?:19|20)\\d{2}\\b/g)].map(match => Number(match[0])); const ranges = [...source.matchAll(/\\b((?:19|20)\\d{2})\\s*[-–/]\\s*((?:19|20)\\d{2})\\b/g)].map(match => [Number(match[1]), Number(match[2])]); return requestedYears.some(year => years.includes(year) || ranges.some(([start, end]) => year >= Math.min(start, end) && year <= Math.max(start, end))); };
+  const coreTokens = focused
+    .replace(partPattern, ' ')
+    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
+    .replace(SPR_CATALOG_EXTRA_FILLER_PATTERN, ' ')
+    .replace(SPR_OPTIONAL_VEHICLE_WORDS_PATTERN, ' ')
+    .replace(/\b(?:19|20)\d{2}\b/g, ' ')
+    .replace(/\b(?:delantero|delantera|delanteros|delanteras|trasero|trasera|traseros|traseras|izquierdo|izquierda|izquierdos|izquierdas|derecho|derecha|derechos|derechas|lado|frente|atras|principal|niebla|antiniebla|piloto|chofer|conductor|pasajero|manual|electrico|electrica|electricos|electricas|con|sin|abs|fwd|birlo|birlos)\b/gi, ' ')
+    .split(/\s+/)
+    .filter(token => (token.length >= 3 || /\d/.test(token)) && !isSprEngineSpecificationToken(token));
+  const requestedSide = /\b(?:izquierdo|izquierda|piloto|chofer|conductor)\b/.test(normalized) ? 'left'
+    : /\b(?:derecho|derecha|pasajero|copiloto)\b/.test(normalized) ? 'right' : '';
+  const requestedPosition = /\b(?:delantero|delantera|frontal|delant)\b/.test(normalized) ? 'front'
+    : /\b(?:trasero|trasera|posterior|tras)\b/.test(normalized) ? 'rear' : '';
+  const negativeFogRequest = /\b(?:no|sin|evitar|ningun|ninguna)\b(?:\s+\w+){0,8}\s+(?:faro\s+de\s+)?niebla\b/.test(normalized);
+  const asksFogLight = !negativeFogRequest && /\b(?:faro\s+de\s+)?(?:niebla|antiniebla)\b/.test(normalized);
+  const asksMainLight = !negativeFogRequest && !asksFogLight && /\b(?:faro|principal|delantero|delantera)\b/.test(normalized);
+  const matchesYear = item => {
+    if (!requestedYears.length) return true;
+    const source = [item.title, item.description, item.tags].map(value => String(value || '')).join(' ');
+    const years = [...source.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => Number(match[0]));
+    const ranges = [...source.matchAll(/\b((?:19|20)\d{2})\s*[-–/]\s*((?:19|20)\d{2})\b/g)]
+      .map(match => [Number(match[1]), Number(match[2])]);
+    return requestedYears.some(year => years.includes(year) || ranges.some(([start, end]) => year >= Math.min(start, end) && year <= Math.max(start, end)));
+  };
   const rows = items.map(item => {
-    const haystack = canonicalizeSprPartSynonyms([item.normalizedTitle, item.title, item.vendor, item.productType, item.tags, item.description, item.handle].filter(Boolean).join(' '));
+    const haystack = canonicalizeSprPartSynonyms([
+      item.normalizedTitle, item.title, item.vendor, item.productType, item.tags, item.description, item.handle
+    ].filter(Boolean).join(' '));
     if (requestedCategory && !requestedCategory.pattern.test(haystack)) return null;
     if (coreTokens.length && !coreTokens.every(token => sprInvestigativeTokenMatches(haystack, token))) return null;
     if (!matchesYear(item)) return null;
-    if (requestedSide && !(/\\bamb[oa]s(?:\\s+lados?)?\\b/.test(haystack) || (requestedSide === 'left' ? /\\bizquierd[oa]\\b/.test(haystack) : /\\bderech[oa]\\b/.test(haystack)))) return null;
-    if (requestedPosition === 'front' && !(/\\b(?:delanter[oa]s?|frontal(?:es)?|delant)\\b/.test(haystack) || (requestedCategory?.key === 'iluminacion' && !/\\b(?:calavera|stop|rear lamp)\\b/.test(haystack)))) return null;
-    if (requestedPosition === 'rear' && !(/\\b(?:traser[oa]s?|posterior(?:es)?|tras)\\b/.test(haystack) || /\\b(?:calavera|stop|rear lamp)\\b/.test(haystack))) return null;
-    if (requestedCategory?.key === 'iluminacion') { const isFog = /\\b(?:niebla|antiniebla)\\b/.test(haystack); if (asksFogLight !== isFog || (asksMainLight && isFog)) return null; }
-    if (requestedCategory?.key === 'motor') { const wantsHead = /\\b(?:cabeza|culata)\\b/.test(normalized); const wantsAccessory = /\\b(?:soporte|base|taco|montura|mount|sensor|accesorio)\\b/.test(normalized); if (!wantsHead && !wantsAccessory && (!item.discountEligible || !/\\b(?:motor|engine(?:\\s+series)?)\\b/.test(haystack) || /\\b(?:cabeza|culata|soporte|base|taco|montura|mount|sensor|accesorio)\\b/.test(haystack))) return null; }
+    if (requestedSide && !(/\bamb[oa]s(?:\s+lados?)?\b/.test(haystack)
+      || (requestedSide === 'left' ? /\bizquierd[oa]\b/.test(haystack) : /\bderech[oa]\b/.test(haystack)))) return null;
+    if (requestedPosition === 'front' && !(/\b(?:delanter[oa]s?|frontal(?:es)?|delant)\b/.test(haystack)
+      || (requestedCategory?.key === 'iluminacion' && !/\b(?:calavera|stop|rear lamp)\b/.test(haystack)))) return null;
+    if (requestedPosition === 'rear' && !(/\b(?:traser[oa]s?|posterior(?:es)?|tras)\b/.test(haystack)
+      || /\b(?:calavera|stop|rear lamp)\b/.test(haystack))) return null;
+    if (requestedCategory?.key === 'iluminacion') {
+      const isFog = /\b(?:niebla|antiniebla)\b/.test(haystack);
+      if (asksFogLight !== isFog || (asksMainLight && isFog)) return null;
+    }
+    if (requestedCategory?.key === 'motor') {
+      const wantsHead = /\b(?:cabeza|culata)\b/.test(normalized);
+      const wantsAccessory = /\b(?:soporte|base|taco|montura|mount|sensor|accesorio)\b/.test(normalized);
+      if (!wantsHead && !wantsAccessory && (!item.discountEligible
+        || !/\b(?:motor|engine(?:\s+series)?)\b/.test(haystack)
+        || /\b(?:cabeza|culata|soporte|base|taco|montura|mount|sensor|accesorio)\b/.test(haystack))) return null;
+    }
     return { item, score: (coreTokens.length * 10) + (requestedYears.length ? 12 : 0) + (requestedCategory ? 18 : 0) + (item.available ? 1 : 0) };
   }).filter(Boolean).sort((a, b) => b.score - a.score || a.item.title.localeCompare(b.item.title));
   return rows.slice(0, 3).map(row => row.item);
@@ -941,10 +1035,19 @@ function findSprExhaustiveMatches(items, query) {
 
 async function searchSprCatalogExhaustively(catalogItems, query) {
   const merged = new Map();
-  for (const item of Array.isArray(catalogItems) ? catalogItems : []) { const key = item.id || item.url || item.handle || item.title; if (key) merged.set(String(key), item); }
+  for (const item of Array.isArray(catalogItems) ? catalogItems : []) {
+    const key = item.id || item.url || item.handle || item.title;
+    if (key) merged.set(String(key), item);
+  }
   const queries = buildSprExhaustiveSearchQueries(query);
   const results = await Promise.allSettled(queries.map(searchQuery => searchSprCatalog(searchQuery)));
-  for (const result of results) { if (result.status !== 'fulfilled') continue; for (const item of result.value || []) { const key = item.id || item.url || item.handle || item.title; if (key && !merged.has(String(key))) merged.set(String(key), item); } }
+  for (const result of results) {
+    if (result.status !== 'fulfilled') continue;
+    for (const item of result.value || []) {
+      const key = item.id || item.url || item.handle || item.title;
+      if (key && !merged.has(String(key))) merged.set(String(key), item);
+    }
+  }
   const items = [...merged.values()];
   let matches = filterStrictSprVehicleMatches(findSprEngineMatches(items, query), query);
   if (!matches.length) matches = findSprExhaustiveMatches(items, query);
@@ -952,17 +1055,6 @@ async function searchSprCatalogExhaustively(catalogItems, query) {
 }
 
 function getSprYearClarification(value) {
-            if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
-            // A first miss is never enough to tell the customer that a piece is absent.
-            const exhaustive = await searchSprCatalogExhaustively(catalogItems, catalogQueryText);
-            catalogItems = exhaustive.items;
-            sprMatches = exhaustive.matches;
-          }
-
-    buildSprExhaustiveSearchQueries,
-
-        findSprExhaustiveMatches,
-
   const normalized = normalizeBotText(value);
   const invalidYears = [...normalized.matchAll(/\b(?!19|20)\d{4}\b/g)].map(match => match[0]);
   if (!invalidYears.length) return null;
@@ -1051,12 +1143,12 @@ function buildSprCatalogSearchQueries(value) {
 // the customer's previous catalog request. Keep the vehicle and part from
 // that previous turn so a side/orientation answer cannot jump to another
 // make or model.
-const SPR_CATALOG_CONTEXT_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|producto(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|maza(?:s)?|balero(?:s)?|bieleta(?:s)?|junta\s+homocinetica|horquilla(?:s)?|flecha(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|tornillo(?:s)?|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carrocer[ií]a)\b/;
+const SPR_CATALOG_CONTEXT_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|producto(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|maza(?:s)?|balero(?:s)?|bieleta(?:s)?|junta\s+homocinetica|horquilla(?:s)?|flecha(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|tornillo(?:s)?|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera|carrocer[ií]a|puerta(?:s)?)\b/;
 const SPR_CATALOG_REFINEMENT_PATTERN = /\b(delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atr[aá]s|modelo|a[nñ]o|versi[oó]n|principal|niebla|antiniebla|motor)\b/;
 
 // Do not guess a vehicle from a generic part request. Ask for the vehicle
 // before searching so the bot cannot return an unrelated make or model.
-const SPR_CATALOG_GENERIC_WORDS_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|que|qué|por|favor|de|precio|precios|cuanto|cu[aá]nto|cuesta|costo|cotizacion|cotizaci[oó]n|cotizar|comprar|compra|nuevo|nueva|disponible|disponibilidad|stock|catalogo|cat[aá]logo|producto|productos|pieza|piezas|refaccion|refacciones|motor|motores|cabeza|cabezas|culata|engine|series|amortiguador|amortiguadores|suspension|freno|frenos|balata|balatas|pastilla|pastillas|aceite|lubricante|lubricantes|direccion|terminal|terminales|rotula|rotulas|radiador|radiadores|bomba|bombas|turbo|turbos|embrague|clutch|maza|mazas|balero|baleros|bieleta|bieletas|junta|homocinetica|horquilla|horquillas|flecha|flechas|guia|guias|fascia|fascias|soporte|soportes|faro|faros|niebla|antiniebla|principal|calavera|calaveras|lampara|lamparas|luz|luces|espejo|espejos|parrilla|parrillas|defensa|defensas|tornillo|tornillos|cofre|salpicadera|salpicaderas|carroceria|delantero|delantera|delanteros|delanteras|trasero|trasera|traseros|traseras|izquierdo|izquierda|izquierdos|izquierdas|derecho|derecha|derechos|derechas|lado|frente|atras|modelo|ano|version|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|camiones|completo|completa|todo|toda|todos|todas|no|sin|evitar|ningun|ninguna)\b/gi;
+const SPR_CATALOG_GENERIC_WORDS_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|que|qué|por|favor|de|precio|precios|cuanto|cu[aá]nto|cuesta|costo|cotizacion|cotizaci[oó]n|cotizar|comprar|compra|nuevo|nueva|disponible|disponibilidad|stock|catalogo|cat[aá]logo|producto|productos|pieza|piezas|refaccion|refacciones|motor|motores|cabeza|cabezas|culata|engine|series|amortiguador|amortiguadores|suspension|freno|frenos|balata|balatas|pastilla|pastillas|aceite|lubricante|lubricantes|direccion|terminal|terminales|rotula|rotulas|radiador|radiadores|bomba|bombas|turbo|turbos|embrague|clutch|maza|mazas|balero|baleros|bieleta|bieletas|junta|homocinetica|horquilla|horquillas|flecha|flechas|guia|guias|fascia|fascias|soporte|soportes|faro|faros|niebla|antiniebla|principal|calavera|calaveras|lampara|lamparas|luz|luces|espejo|espejos|parrilla|parrillas|defensa|defensas|tornillo|tornillos|cofre|salpicadera|salpicaderas|carroceria|puerta|puertas|delantero|delantera|delanteros|delanteras|trasero|trasera|traseros|traseras|izquierdo|izquierda|izquierdos|izquierdas|derecho|derecha|derechos|derechas|lado|frente|atras|modelo|ano|version|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|camiones|completo|completa|todo|toda|todos|todas|no|sin|evitar|ningun|ninguna)\b/gi;
 // Conversational words are removed only from vehicle-identity checks. They
 // must never make a valid catalog request look like a different vehicle.
 const SPR_CATALOG_EXTRA_FILLER_PATTERN = /\b(hola|holi|hey|hello|buen|buenos|buenas|dia|dias|vengo|spr|autopartes|asesoria|marca|modelo|ano|version|puedes|pueden|podrias|podrian|consultar|consulta|ayuda|ayudar|dime|tambien|porfa|porfavor|articulo|articulos|refaccion|refacciones|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|camiones|del|es|piloto|chofer|conductor|pasajero|manual|cabina|cab|sencilla|doble|remanufacturad[oa]s?|reconstruid[oa]s?|usad[oa]s?|nuev[oa]s?|complet[oa]s?|original(?:es)?|generico(?:s)?|generica(?:s)?|de|a|y)\b/gi;
@@ -1111,15 +1203,16 @@ function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
 function isGenericSprCatalogRequest(lowerText) {
   const query = canonicalizeSprPartSynonyms(lowerText);
   const asksGeneral = /\b(que productos|que tienen|que hay|catalogo|catalog|refacciones|productos|todo|completo)\b/.test(query);
-  const asksSpecific = /\b(motor(?:es)?|cabeza(?:s)?|culata|amortiguador(?:es)?|suspension|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite(?:s)?|refaccion(?:es)?|pieza(?:s)?|direccion|radiador(?:es)?|bomba(?:s)?|turbo(?:s)?|embrague(?:s)?|clutch|maza(?:s)?|balero(?:s)?|soporte(?:s)?|terminal(?:es)?|rotula(?:s)?|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria)\b/.test(query);
+  const asksSpecific = /\b(motor(?:es)?|cabeza(?:s)?|culata|amortiguador(?:es)?|suspension|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite(?:s)?|refaccion(?:es)?|pieza(?:s)?|direccion|radiador(?:es)?|bomba(?:s)?|turbo(?:s)?|embrague(?:s)?|clutch|maza(?:s)?|balero(?:s)?|soporte(?:s)?|terminal(?:es)?|rotula(?:s)?|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria|puerta(?:s)?)\b/.test(query);
   return asksGeneral && !asksSpecific;
 }
 
-// Route unknown automotive purchase questions through the catalog so absent items receive a direct no-stock answer.
+// Route unknown automotive purchase questions through the catalog so an advisor
+// can verify them instead of the bot guessing or rejecting the request.
 function isUnlistedSprProductRequest(value) {
   const query = canonicalizeSprPartSynonyms(value);
   const purchaseIntent = /\b(busco|buscando|necesito|ocupo|quiero|tienen|tendrian|tendran|hay|venden|manejan|consiguen|cotizar|cotizacion)\b/.test(query);
-  const automotiveContext = /\b(carro|auto|vehiculo|coche|tienda|refaccion|refacciones|pieza|producto|articulo|accesorio|rayon|rayones|compatibilidad)\b/.test(query);
+  const automotiveContext = /\b(carro|auto|vehiculo|coche|tienda|refaccion|refacciones|pieza|producto|articulo|accesorio|puerta|rayon|rayones|compatibilidad)\b/.test(query);
   if (!purchaseIntent || !automotiveContext || SPR_CATALOG_CONTEXT_PATTERN.test(query)) return false;
   const residual = query.replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ').replace(SPR_CATALOG_EXTRA_FILLER_PATTERN, ' ').replace(/\s+/g, ' ').trim();
   return residual.split(' ').filter(token => token.length >= 3).length >= 1;
@@ -1180,7 +1273,7 @@ function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult
     return '🔎 Para preparar una cotización necesito la pieza exacta y los datos del vehículo: *marca, modelo y año*. Si aplica, indícame también el lado.';
   }
   if (!matches.length) {
-    return 'No tenemos ese artículo en existencia.';
+    return '';
   }
   const lines = ['🛠️ *Catálogo de SPR Autopartes*', '', 'Encontré estas opciones relacionadas:'];
   for (const item of matches) {
@@ -1193,9 +1286,7 @@ function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult
     }
     const stockLine = stockResult?.status === 'in_stock'
       ? '✅ Disponible para cotización'
-      : stockResult?.status === 'out_of_stock'
-        ? '⚠️ Por el momento no contamos con existencias para esa pieza específica'
-        : '🔎 Disponibilidad por confirmar';
+      : '🔎 Un asesor verificará la existencia actual';
     lines.push(stockLine);
     lines.push('🔗 ' + item.url);
   }
@@ -1666,7 +1757,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const timestamp = message.timestamp ? new Date(parseInt(message.timestamp, 10) * 1000).toISOString() : new Date().toISOString();
 
     // 1. Strict Tenant Company & Credential Resolution
-        
+
     let messageText = message.text?.body || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || inboundMedia?.media_caption || '';
     if (!messageText && inboundMedia) {
       const mediaLabels = { image: '📷 Imagen recibida', video: '🎥 Video recibido', audio: '🎙️ Audio recibido', document: '📄 Documento recibido', sticker: '🧩 Sticker recibido' };
@@ -1937,7 +2028,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
     // If human handoff is still active, keep the bot silent.
     if (convData.human_handoff === true || convData.bot_enabled === false) {
       console.log(`🛑 Conversation [${convId}] is assigned to a human advisor. Bot will NOT reply.`);
-      
+
       try {
         await db.doc(`conversations/${convId}`).set(convData, { merge: true });
         // A configuration pause should not look like a commercial follow-up;
@@ -1975,6 +2066,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const tenantDisplayName = String(
       tenantCompany?.nombre || botSettings?.business_name || botSettings?.business_description || 'nuestro negocio'
     ).trim();
+    const tenantRoutingIdentity = `${tenantDisplayName} ${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase();
+    const tenantAppearsSprAutopartes = /spr\s*(bot|autopartes|engine)/i.test(tenantRoutingIdentity) || /spr autopartes/i.test(tenantRoutingIdentity);
 
     // Check for Human Handoff Intent
     const lowerText = normalizeBotText(messageText);
@@ -1985,6 +2078,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const isShopifySuspensionVehicleProvided = /^hola\s+vengo\s+de\s+spr\s+autopartes\s+y\s+necesito\s+asesoria\s+para\s+suspension\s+marca\s+modelo\s+y\s+ano\s+.+$/.test(lowerText);
     const isShopifyPartsIntro = /^hola\s+vengo\s+de\s+spr\s+autopartes\s+y\s+me\s+gustaria\s+consultar\s+sobre\s+(?:algunas|unas|varias)?\s*piezas?$/.test(lowerText);
     const isShopifyPrefillIntro = isShopifySuspensionIntro || isShopifyPartsIntro;
+    const isSprLargePickupRequestMessage = tenantAppearsSprAutopartes && !isShopifyPrefillIntro && isSprLargePickupRequest(messageText);
+    const sprLargePickupDriveType = isSprLargePickupRequestMessage ? getSprLargePickupDriveType(messageText) : null;
     const wantsHuman = !isShopifyPrefillIntro && humanKeywords.some(kw => lowerText.includes(kw));
     const isFriendlyGreeting = isFriendlyGreetingText(messageText);
     const isCourtesyMessage = isCourtesyText(messageText);
@@ -2005,6 +2100,35 @@ app.post('/webhook/whatsapp', async (req, res) => {
         : `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo.
 
 🔧 ¿Qué pieza necesitas consultar? Compárteme la *marca, modelo y año* de tu vehículo para orientarte mejor.`;
+    } else if (isSprLargePickupRequestMessage) {
+      convData.human_handoff = true;
+      convData.bot_enabled = false;
+      convData.status = 'pending';
+      convData.auto_reactivate_enabled = true;
+      convData.human_handoff_started_at = convData.human_handoff_started_at || timestamp;
+      convData.large_pickup_rule_applied = true;
+      convData.large_pickup_drive_type = sprLargePickupDriveType;
+      botReply = sprLargePickupDriveType
+        ? `Gracias por confirmar que es *${sprLargePickupDriveType}*. Ya te paso directamente con un asesor para revisar la pieza correcta y preparar tu cotización.`
+        : 'Para cotizar correctamente esta camioneta y evitar enviarte una pieza equivocada, ¿es *4x4* o *4x2*? Ya te paso directamente con un asesor para revisar la compatibilidad.';
+
+      const taskId = `task_${Date.now()}`;
+      const taskData = {
+        id: taskId,
+        company_id: companyId,
+        lead_id: leadId,
+        lead_nombre: customerName,
+        titulo: `Atender camioneta grande de ${customerName} en WhatsApp`,
+        tipo: 'whatsapp',
+        fecha_limite: new Date().toISOString(),
+        prioridad: 'Urgente',
+        completada: false,
+        fecha_creacion: timestamp,
+        nota: `Regla camioneta grande: confirmar 4x4/4x2 y revisar con asesor. Mensaje: "${messageText}"`
+      };
+      try {
+        await db.doc(`followups/${taskId}`).set(taskData);
+      } catch (e) {}
     } else if (wantsHuman) {
       convData.human_handoff = true;
       convData.bot_enabled = false;
@@ -2179,36 +2303,23 @@ Incluye:
         }
       }
       const catalogInputText = canonicalizeSprPartSynonyms(lowerText);
-      const asksCatalogProduct = !isShopifyPrefillIntro && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|maza(?:s)?|balero(?:s)?|bieleta(?:s)?|junta\s+homocinetica|horquilla(?:s)?|flecha(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|soporte|terminal|r[oó]tula|tornillo(?:s)?|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera|carroceria)\b/.test(catalogInputText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText));
+      const asksCatalogProduct = !isShopifyPrefillIntro && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|maza(?:s)?|balero(?:s)?|bieleta(?:s)?|junta\s+homocinetica|horquilla(?:s)?|flecha(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|soporte|terminal|r[oó]tula|tornillo(?:s)?|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera|carroceria|puerta(?:s)?)\b/.test(catalogInputText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText));
       let sprCatalogReply = '';
+      let catalogNeedsAdvisor = false;
       if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
           if (!yearConfirmationReply) {
             let catalogItems = await getSprEngineCatalog();
-          let sprMatches = findSprEngineMatches(catalogItems, catalogLowerText);
-          sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
+          let sprMatches = filterStrictSprVehicleMatches(
+            findSprEngineMatches(catalogItems, catalogLowerText),
+            catalogLowerText
+          );
           if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
-            const searchQueries = buildSprCatalogSearchQueries(catalogQueryText);
-            const searchedItemsByKey = new Map();
-            // Run the bounded query plan sequentially. This deliberately gives
-            // Shopify time to answer each useful variant before we conclude
-            // that the requested piece is missing. Results are deduplicated,
-            // then filtered against the original vehicle/part request.
-            for (const query of searchQueries) {
-              try {
-                const queryItems = await searchSprCatalog(query);
-                for (const item of queryItems) {
-                  const key = item.id || item.url || item.title;
-                  if (key && !searchedItemsByKey.has(key)) searchedItemsByKey.set(key, item);
-                }
-              } catch (searchError) {
-                console.warn(`SPR catalog alternative search failed for "${query}":`, searchError.message);
-              }
-            }
-            const searchedItems = [...searchedItemsByKey.values()];
-            sprMatches = findSprEngineMatches(searchedItems, catalogLowerText);
-            sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
-            if (sprMatches.length) catalogItems = [...catalogItems, ...searchedItems];
+            // Do not answer "no hay" after the first miss. Search the full
+            // bounded synonym/vehicle plan, then run the relaxed local pass.
+            const exhaustive = await searchSprCatalogExhaustively(catalogItems, catalogQueryText);
+            catalogItems = exhaustive.items;
+            sprMatches = exhaustive.matches;
           }
           const strictEngineTokens = (/\b(motor(?:es)?|cabeza(?:s)?|culata)\b/.test(catalogLowerText)
             ? catalogLowerText.split(/\s+/).filter(token => /[a-z]/.test(token) && /\d/.test(token) && token.length >= 3 && !/^(19|20)\d{2}$/.test(token) && !["motor","motores","cabeza","cabezas","culata","engine","series"].includes(token) && !isSprEngineSpecificationToken(token))
@@ -2220,6 +2331,13 @@ Incluye:
               return strictEngineTokens.every(token => sprTokenMatches(haystack, token));
             });
           }
+          // A missing match is not a negative answer. Keep the conversation
+          // silent and route the request to an advisor for manual verification.
+          catalogNeedsAdvisor = !sprMatches.length
+            && !yearConfirmationReply
+            && !isGenericSprCatalogRequest(catalogLowerText)
+            && !isAmbiguousSprCatalogRequest(catalogLowerText)
+            && !isIncompleteSprCatalogRequest(catalogLowerText);
           const aldoStockResult = isAldoStockCategoryQuery(catalogQueryText)
             ? await searchAldoStock(catalogQueryText)
             : null;
@@ -2230,6 +2348,36 @@ Incluye:
         }
       }
 
+      if (catalogNeedsAdvisor) {
+        convData.human_handoff = true;
+        convData.bot_enabled = false;
+        convData.status = 'pending';
+        convData.auto_reactivate_enabled = true;
+        convData.human_handoff_started_at = convData.human_handoff_started_at || timestamp;
+        convData.catalog_review_required = true;
+        convData.catalog_review_reason = 'no_confident_match';
+        convData.catalog_review_query = messageText;
+        botReply = '';
+
+        const taskId = `task_${Date.now()}`;
+        const taskData = {
+          id: taskId,
+          company_id: companyId,
+          lead_id: leadId,
+          lead_nombre: customerName,
+          titulo: `Verificar pieza solicitada por ${customerName} en WhatsApp`,
+          tipo: 'whatsapp',
+          fecha_limite: new Date().toISOString(),
+          prioridad: 'Urgente',
+          completada: false,
+          fecha_creacion: timestamp,
+          nota: `El catálogo no dio una coincidencia segura. Revisar manualmente antes de responder. Mensaje: "${messageText}"`
+        };
+        try {
+          await db.doc(`followups/${taskId}`).set(taskData);
+        } catch (e) {}
+      }
+
       if (isShopifyPrefillIntro) { botReply = isShopifySuspensionIntro ? `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo con tu consulta de suspensión.
 
 🚗 Compárteme la *marca, modelo y año* de tu vehículo para revisar la pieza correcta.` : `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo.
@@ -2237,7 +2385,10 @@ Incluye:
 🔧 ¿Qué pieza necesitas consultar? Compárteme la *marca, modelo y año* de tu vehículo para orientarte mejor.`; } else if (yearConfirmationReply) {
         sprCatalogReply = yearConfirmationReply;
       }
-      if (sprCatalogReply) {
+      if (catalogNeedsAdvisor) {
+        // Leave botReply empty so the advisor can verify the request without
+        // sending a speculative or negative message to the customer.
+      } else if (sprCatalogReply) {
         botReply = sprCatalogReply;
       } else if (sprFaqReply) {
         botReply = sprFaqReply;
@@ -2267,7 +2418,7 @@ Incluye:
         botReply = botReplyText;
       } else if (asksCrm && (asksPrice || lowerText.includes('incluye') || lowerText.includes('funciona') || lowerText.includes('informacion') || lowerText.includes('información') || lowerText.includes('servicio'))) {
         botReply = crmReply;
-      } else if (bestMatch && maxScore >= 2) {        
+      } else if (bestMatch && maxScore >= 2) {
         botReply = `${bestMatch.content} ¿Te gustaría que un asesor te prepare una cotización personalizada?`;
       } else if (['si', 'sii', 'siii', 'siiii', 'yes', 'claro', 'por favor', 'adelante', 'me interesa', 'me interesa la demo', 'si me interesa', 'si quiero', 'quiero una demo', 'quiero una demostracion', 'me gustaria una demo', 'me gustaria una demostracion'].includes(lowerText)) {
   botReply = `¡Excelente! 🙌 Con gusto te mostramos una demo de ${tenantDisplayName}.
@@ -3001,13 +3152,18 @@ module.exports = {
   normalizeBotText,
   isFriendlyGreetingText,
   isCourtesyText,
+  normalizeSprLargePickupText,
+  isSprLargePickupRequest,
+  getSprLargePickupDriveType,
   detectAutomaticLeadStage,
   shouldAdvanceLeadStage,
   canonicalizeSprPartSynonyms,
   buildSprFocusedSearchQuery,
   buildSprCatalogSearchQueries,
+  buildSprExhaustiveSearchQueries,
   findSprEngineMatches,
   filterStrictSprVehicleMatches,
+  findSprExhaustiveMatches,
   isAmbiguousSprCatalogRequest,
   buildSprCatalogContext,
   isUnlistedSprProductRequest,
