@@ -328,6 +328,13 @@ function formatWhatsAppReply(value) {
 
 const SPR_ENGINE_COLLECTION_URL = process.env.SPR_FULL_CATALOG_URL || process.env.SPR_ENGINE_COLLECTION_URL || 'https://sprautopartes.mx/products.json?limit=250';
 const SPR_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_CATALOG_TTL_MS || 60000));
+// A complete digital catalog can be mounted as JSON/CSV through an environment
+// URL or local file. When present, it is the primary source for prices and
+// product matching; the public Shopify search remains a compatibility fallback
+// until the digital catalog is configured.
+const SPR_DIGITAL_CATALOG_URL = String(process.env.SPR_DIGITAL_CATALOG_URL || '').trim();
+const SPR_DIGITAL_CATALOG_FILE = String(process.env.SPR_DIGITAL_CATALOG_FILE || '').trim();
+const SPR_DIGITAL_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_DIGITAL_CATALOG_TTL_MS || 300000));
 // Shopify product titles usually omit trim/package words that customers include
 // in natural language (for example, "GL" or "Mind"). Keep the vehicle model,
 // year and requested part strict while treating these descriptors as optional.
@@ -338,6 +345,9 @@ const SPR_OPTIONAL_VEHICLE_WORDS_PATTERN = /\b(gl|gls|gle|glx|lt|ls|le|lx|ex|se|
 const SPR_SEPTEMBER_DISCOUNT_PERCENT = 0;
 let sprCatalogCache = { fetchedAt: 0, items: [] };
 let sprCatalogFetchPromise = null;
+let sprDigitalCatalogCache = { fetchedAt: 0, items: [] };
+let sprDigitalCatalogFetchPromise = null;
+let sprCatalogSource = 'none';
 // SPR does not provide a reliable inventory signal. Collision and lighting
 // availability is checked against Aldo Autopartes when the public lookup responds.
 const ALDO_STOCK_URL = process.env.ALDO_STOCK_URL || 'https://www.aldoautopartes.com/pi_busqueda.jsp';
@@ -469,11 +479,153 @@ function normalizeSprProduct(product) {
   };
 }
 
+function parseDelimitedCatalogLine(line, delimiter) {
+  const values = [];
+  let value = '';
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    const next = line[index + 1];
+    if (char === '"' && quoted && next === '"') {
+      value += '"';
+      index += 1;
+    } else if (char === '"') {
+      quoted = !quoted;
+    } else if (char === delimiter && !quoted) {
+      values.push(value.trim());
+      value = '';
+    } else {
+      value += char;
+    }
+  }
+  values.push(value.trim());
+  return values;
+}
+
+function parseDigitalCatalogPayload(payload) {
+  let source = payload;
+  if (Buffer.isBuffer(source)) source = source.toString('utf8');
+  if (typeof source === 'string') {
+    const text = source.replace(/^\uFEFF/, '').trim();
+    if (!text) return [];
+    try {
+      source = JSON.parse(text);
+    } catch (_) {
+      const lines = text.split(/\r?\n/).filter(Boolean);
+      if (lines.length < 2) return [];
+      const delimiter = lines[0].includes(';') && !lines[0].includes(',') ? ';' : ',';
+      const headers = parseDelimitedCatalogLine(lines[0], delimiter).map(header => normalizeBotText(header).replace(/\s+/g, '_'));
+      return lines.slice(1).map(line => {
+        const values = parseDelimitedCatalogLine(line, delimiter);
+        return headers.reduce((row, header, index) => {
+          row[header] = values[index] || '';
+          return row;
+        }, {});
+      });
+    }
+  }
+
+  if (Array.isArray(source)) return source;
+  if (source && Array.isArray(source.products)) return source.products;
+  if (source && Array.isArray(source.items)) return source.items;
+  if (source && Array.isArray(source.data)) return source.data;
+  return [];
+}
+
+function normalizeDigitalCatalogRow(row) {
+  const source = row && typeof row === 'object' ? row : {};
+  const title = String(
+    source.title || source.name || source.product_name || source.nombre || source.descripcion_corta || ''
+  ).trim();
+  const price = source.price ?? source.precio ?? source.precio_normal ?? source.regular_price ?? source.sale_price ?? '';
+  const compareAtPrice = source.compare_at_price ?? source.precio_lista ?? source.precio_regular ?? '';
+  const availableValue = source.available ?? source.disponible ?? source.in_stock ?? source.existencia;
+  const variants = Array.isArray(source.variants) && source.variants.length
+    ? source.variants
+    : [{
+      price,
+      compare_at_price: compareAtPrice,
+      available: availableValue === '' || availableValue === null || availableValue === undefined
+        ? true
+        : !['false', '0', 'no', 'agotado', 'sin existencia'].includes(normalizeBotText(availableValue))
+    }];
+  const rowTags = [
+    source.tags,
+    source.keywords,
+    source.sinonimos,
+    source.sinónimos,
+    source.marca,
+    source.brand,
+    source.make,
+    source.modelo,
+    source.model,
+    source.año,
+    source.year,
+    source.categoria,
+    source.category
+  ].flatMap(value => Array.isArray(value) ? value : [value]).filter(Boolean).join(' ');
+  return normalizeSprProduct({
+    ...source,
+    id: source.id || source.sku || source.codigo || source.clave,
+    title,
+    vendor: source.vendor || source.brand || source.marca || 'SPR Autopartes',
+    product_type: source.product_type || source.category || source.categoria || '',
+    tags: rowTags,
+    body_html: source.body_html || source.description || source.descripcion || '',
+    handle: source.handle || source.slug || '',
+    variants
+  });
+}
+
+async function getSprDigitalCatalog() {
+  const now = Date.now();
+  if (sprDigitalCatalogCache.items.length > 0 && now - sprDigitalCatalogCache.fetchedAt < SPR_DIGITAL_CATALOG_TTL_MS) {
+    return sprDigitalCatalogCache.items;
+  }
+  if (!SPR_DIGITAL_CATALOG_URL && !SPR_DIGITAL_CATALOG_FILE) return [];
+  if (sprDigitalCatalogFetchPromise) return sprDigitalCatalogFetchPromise;
+
+  sprDigitalCatalogFetchPromise = (async () => {
+    let payload;
+    if (SPR_DIGITAL_CATALOG_FILE) {
+      payload = await fs.promises.readFile(SPR_DIGITAL_CATALOG_FILE);
+    } else {
+      const response = await axios.get(SPR_DIGITAL_CATALOG_URL, {
+        timeout: 15000,
+        responseType: 'text',
+        headers: { 'User-Agent': 'DT Bot Core / SPR digital catalog sync', Accept: 'application/json,text/csv,text/plain' }
+      });
+      payload = response.data;
+    }
+    const items = parseDigitalCatalogPayload(payload)
+      .map(normalizeDigitalCatalogRow)
+      .filter(item => item.title && item.regularPrice > 0);
+    if (!items.length) throw new Error('El catálogo digital no contiene productos con precio válido');
+    sprDigitalCatalogCache = { fetchedAt: Date.now(), items };
+    return items;
+  })().finally(() => {
+    sprDigitalCatalogFetchPromise = null;
+  });
+  return sprDigitalCatalogFetchPromise;
+}
+
 async function getSprEngineCatalog() {
   const now = Date.now();
   if (sprCatalogCache.items.length > 0 && now - sprCatalogCache.fetchedAt < SPR_CATALOG_TTL_MS) return sprCatalogCache.items;
   if (sprCatalogFetchPromise) return sprCatalogFetchPromise;
   sprCatalogFetchPromise = (async () => {
+    try {
+      const digitalItems = await getSprDigitalCatalog();
+      if (digitalItems.length) {
+        sprCatalogSource = 'digital';
+        sprCatalogCache = { fetchedAt: Date.now(), items: digitalItems };
+        console.log(`📚 [SPR Digital Catalog] ${digitalItems.length} productos cargados como fuente principal.`);
+        return digitalItems;
+      }
+    } catch (digitalError) {
+      console.warn('⚠️ SPR digital catalog unavailable; using Shopify fallback:', digitalError.message);
+    }
+
     const response = await axios.get(SPR_ENGINE_COLLECTION_URL, {
       timeout: 9000,
       headers: { 'User-Agent': 'DT Bot Core / SPR catalog sync' }
@@ -481,6 +633,7 @@ async function getSprEngineCatalog() {
     const products = Array.isArray(response.data?.products) ? response.data.products : [];
     if (!products.length) throw new Error('SPR catalog returned no products');
     const items = products.map(normalizeSprProduct).filter(item => item.title && item.regularPrice > 0);
+    sprCatalogSource = 'shopify';
     sprCatalogCache = { fetchedAt: Date.now(), items };
     return items;
   })().finally(() => {
@@ -1657,7 +1810,11 @@ Incluye:
           let catalogItems = await getSprEngineCatalog();
           let sprMatches = findSprEngineMatches(catalogItems, catalogLowerText);
           sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
-          if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
+          // Once a digital catalog is configured, keep the lookup inside that
+          // catalog so prices and availability come from the supplied source.
+          // The public Shopify search is only used while no digital catalog is
+          // available yet; this avoids mixing stale web results with the file.
+          if (!sprMatches.length && sprCatalogSource !== 'digital' && !isGenericSprCatalogRequest(catalogLowerText)) {
             const focusedSearchQuery = buildSprFocusedSearchQuery(catalogQueryText);
             const searchedItems = await searchSprCatalog(focusedSearchQuery);
             sprMatches = findSprEngineMatches(searchedItems, catalogLowerText);
@@ -2422,7 +2579,10 @@ module.exports = {
   setAdminAuth,
   setHttpClient,
   GRAPH_API_VERSION,
-  MASTER_VERIFY_TOKEN
+  MASTER_VERIFY_TOKEN,
+  parseDigitalCatalogPayload,
+  normalizeDigitalCatalogRow,
+  getSprDigitalCatalog
 };
 
 
@@ -2582,5 +2742,32 @@ app.post('/api/meta/embedded-signup/complete', authenticateUser, async (req, res
     const metaError = err.response?.data?.error;
     console.error('Embedded Signup completion error:', metaError?.message || err.message);
     res.status(502).json({ success: false, error: metaError?.message || 'Meta no pudo completar la conexión de WhatsApp.' });
+  }
+});
+
+// Clear the in-memory catalog cache after SPR provides a refreshed digital
+// catalog. This keeps the update quick without restarting Render and does not
+// expose the configured URL or any credentials.
+app.post('/api/catalog/digital/refresh', authenticateUser, async (req, res) => {
+  const user = req.authenticatedUser || {};
+  if (!['SUPERADMIN', 'ADMINISTRADOR'].includes(user.rol)) {
+    return res.status(403).json({ success: false, error: 'Solo un administrador puede actualizar el catálogo digital.' });
+  }
+  sprDigitalCatalogCache = { fetchedAt: 0, items: [] };
+  sprCatalogCache = { fetchedAt: 0, items: [] };
+  sprCatalogSource = 'none';
+  try {
+    const items = await getSprEngineCatalog();
+    return res.json({
+      success: true,
+      source: sprCatalogSource,
+      products_loaded: items.length,
+      message: sprCatalogSource === 'digital'
+        ? 'Catálogo digital cargado como fuente principal.'
+        : 'No hay catálogo digital configurado; se mantiene la fuente web de respaldo.'
+    });
+  } catch (error) {
+    console.error('Digital catalog refresh error:', error.message);
+    return res.status(502).json({ success: false, error: 'No se pudo cargar el catálogo digital ni la fuente de respaldo.' });
   }
 });
