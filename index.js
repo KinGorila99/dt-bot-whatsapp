@@ -222,6 +222,72 @@ function normalizeBotText(value) {
     .trim();
 }
 
+// A customer can send the vehicle profile in several labeled lines before
+// naming the part (for example: "Marca: Volkswagen", "Modelo: Tiguan",
+// "Año: 2019", "Motor: 1.4 TSI"). Keep those labels as vehicle context so
+// the bot does not ask for the same information again or mistake the engine
+// specification for a request to buy a motor.
+function extractSprVehicleDetails(value) {
+  const details = {};
+  const lines = String(value || '').split(/\r?\n/);
+  for (const line of lines) {
+    const match = line.match(/^\s*[-*•]?\s*([^:]{1,48}):\s*(.+?)\s*$/);
+    if (!match) continue;
+    const label = normalizeBotText(match[1]);
+    const detailValue = String(match[2] || '').trim();
+    if (!detailValue) continue;
+
+    if (/^(marca|marca del vehiculo|make|brand)$/.test(label)) details.marca = detailValue;
+    else if (/^(modelo|model)$/.test(label)) details.modelo = detailValue;
+    else if (/^(ano|year)$/.test(label)) details.ano = detailValue;
+    else if (/^(motor|engine|motorizacion|motor del vehiculo)$/.test(label)) details.motor = detailValue;
+    else if (/^(version|trim)$/.test(label)) details.version = detailValue;
+    else if (/^(potencia|horsepower|hp)$/.test(label)) details.potencia = detailValue;
+    else if (/^(transmision|transmission|caja)$/.test(label)) details.transmision = detailValue;
+    else if (/^(traccion|drive|drivetrain)$/.test(label)) details.traccion = detailValue;
+    else if (/^(numero de serie|numero de serie vin|vin|serie)$/.test(label)) details.vin = detailValue;
+  }
+  return details;
+}
+
+function stripSprVehicleDetailLines(value) {
+  return String(value || '')
+    .split(/\r?\n/)
+    .filter(line => {
+      const match = line.match(/^\s*[-*•]?\s*([^:]{1,48}):\s*(.+?)\s*$/);
+      if (!match) return true;
+      const label = normalizeBotText(match[1]);
+      return !/^(marca|marca del vehiculo|make|brand|modelo|model|ano|year|motor|engine|motorizacion|motor del vehiculo|version|trim|potencia|horsepower|hp|transmision|transmission|caja|traccion|drive|drivetrain|numero de serie|numero de serie vin|vin|serie)$/.test(label);
+    })
+    .join('\n');
+}
+
+const SPR_EXPLICIT_PART_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carrocer[ií]a)\b/i;
+
+function hasSprExplicitPartRequest(value) {
+  const query = normalizeBotText(stripSprVehicleDetailLines(value));
+  return SPR_EXPLICIT_PART_PATTERN.test(query) || isUnlistedSprProductRequest(query);
+}
+
+function buildSprVehicleConfirmationReply(details) {
+  const labels = [
+    ['marca', 'Marca'],
+    ['modelo', 'Modelo'],
+    ['ano', 'Año'],
+    ['motor', 'Motor'],
+    ['version', 'Versión'],
+    ['potencia', 'Potencia'],
+    ['transmision', 'Transmisión'],
+    ['traccion', 'Tracción']
+  ];
+  // Do not echo the customer's VIN. It remains backend context and is never
+  // repeated in an automated WhatsApp reply.
+  const visibleLines = labels
+    .filter(([key]) => details && details[key])
+    .map(([key, label]) => `• ${label}: ${details[key]}`);
+  return `✅ Perfecto, ya recibí los datos de tu vehículo:\n\n${visibleLines.join('\n')}\n\n🔧 ¿Qué pieza o refacción necesitas consultar?`;
+}
+
 // Customers often type collision parts phonetically or with one missing
 // letter. Normalize only well-known catalog variants in the query so a typo
 // such as "facia"/"kickn" does not turn an exact catalog match into a false
@@ -1803,7 +1869,25 @@ Incluye:
       ).trim();
       const catalogQueryText = catalogContextText || messageText;
       const catalogLowerText = normalizeBotText(catalogQueryText);
-      const asksCatalogProduct = !isShopifyPrefillIntro && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera|carroceria)\b/.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText));
+      const sprVehicleDetails = isSprAutopartesTenant
+        ? extractSprVehicleDetails(catalogQueryText)
+        : {};
+      const hasCompleteSprVehicleIdentity = Boolean(
+        sprVehicleDetails.marca && sprVehicleDetails.modelo && sprVehicleDetails.ano
+      );
+      // A labeled vehicle profile is context, not a product request. In
+      // particular, "Motor: 1.4 TSI" must not trigger a motor lookup. Only
+      // search once the customer names an actual piece in the same message or
+      // in a follow-up that carries this vehicle context.
+      const vehicleOnlyCatalogContext = isSprAutopartesTenant
+        && hasCompleteSprVehicleIdentity
+        && !hasSprExplicitPartRequest(catalogQueryText);
+      const vehicleContextReply = vehicleOnlyCatalogContext
+        ? buildSprVehicleConfirmationReply(sprVehicleDetails)
+        : '';
+      const asksCatalogProduct = !isShopifyPrefillIntro
+        && !vehicleOnlyCatalogContext
+        && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera|carroceria)\b/.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText));
       let sprCatalogReply = '';
       if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
@@ -1834,6 +1918,8 @@ Incluye:
         botReply = isShopifySuspensionIntro
           ? `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo con tu consulta de suspensión.\n\n🚗 Compárteme la *marca, modelo y año* de tu vehículo para revisar la pieza correcta.`
           : `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo.\n\n🔧 ¿Qué pieza necesitas consultar? Compárteme la *marca, modelo y año* de tu vehículo para orientarte mejor.`;
+      } else if (vehicleContextReply) {
+        botReply = vehicleContextReply;
       } else if (sprCatalogReply) {
         botReply = sprCatalogReply;
       } else if (isFriendlyGreeting) {
@@ -2582,7 +2668,11 @@ module.exports = {
   MASTER_VERIFY_TOKEN,
   parseDigitalCatalogPayload,
   normalizeDigitalCatalogRow,
-  getSprDigitalCatalog
+  getSprDigitalCatalog,
+  extractSprVehicleDetails,
+  stripSprVehicleDetailLines,
+  hasSprExplicitPartRequest,
+  buildSprVehicleConfirmationReply
 };
 
 
