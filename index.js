@@ -2431,17 +2431,35 @@ Si quieres atención inmediata, escribe *asesor*`;
 } else if (['ya', 'ok', 'okay', 'listo', 'recibido'].includes(lowerText)) {
   botReply = `Perfecto, ${customerName}. ¿Qué producto o servicio te interesa? También puedes escribir *asesor* para hablar con nuestro equipo.`;
       } else {
-        // Safe, non-hallucinating response with clarification
-                const configuredFallback = String(botSettings?.fallback_message || '').trim();
-        botReply = configuredFallback && !/no tengo suficiente información|no tengo suficiente informacion/i.test(configuredFallback) ? configuredFallback : `🤔 *Quiero ayudarte mejor.*
+        // An unknown intent must never receive a generic sales answer. Keep
+        // the message silent and create an advisor review instead.
+        convData.human_handoff = true;
+        convData.bot_enabled = false;
+        convData.status = 'pending';
+        convData.auto_reactivate_enabled = true;
+        convData.human_handoff_started_at = convData.human_handoff_started_at || timestamp;
+        convData.catalog_review_required = true;
+        convData.catalog_review_reason = 'no_confident_intent';
+        convData.catalog_review_query = messageText;
+        botReply = '';
 
-¿Buscas información sobre:
-
-📊 *DT CRM Core*
-🤖 *API Chat Bot de WhatsApp*
-🚀 *Paquete completo*
-
-Escribe el nombre del servicio o pon *asesor* y te comunicamos con nuestro equipo.`;
+        const taskId = `task_${Date.now()}`;
+        const taskData = {
+          id: taskId,
+          company_id: companyId,
+          lead_id: leadId,
+          lead_nombre: customerName,
+          titulo: `Revisar consulta de ${customerName} en WhatsApp`,
+          tipo: 'whatsapp',
+          fecha_limite: new Date().toISOString(),
+          prioridad: 'Urgente',
+          completada: false,
+          fecha_creacion: timestamp,
+          nota: `El bot no identificó una respuesta segura. Revisar manualmente antes de responder. Mensaje: "${messageText}"`
+        };
+        try {
+          await db.doc(`followups/${taskId}`).set(taskData);
+        } catch (e) {}
       }
     }
 
