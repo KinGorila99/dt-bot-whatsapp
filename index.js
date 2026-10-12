@@ -1226,16 +1226,20 @@ async function resolveTenant(dbInstance, phoneNumberId, wabaId) {
  */
 async function resolveOutboundTenant(dbInstance, companyId, preferredPhoneNumberId = null) {
   if (!dbInstance || !companyId) return null;
+  // Keep this lookup to one equality filter.  The previous compound
+  // company_id + provider query required a Firestore composite index that
+  // may not be deployed yet, which made an otherwise valid CRM send fail
+  // before it ever reached Meta.  Filter provider in memory instead.
   const snap = await dbInstance.collection('integrations')
     .where('company_id', '==', String(companyId))
-    .where('provider', '==', 'whatsapp')
-    .limit(25)
+    .limit(50)
     .get();
   if (snap.empty) return null;
 
   const candidates = [];
   for (const doc of snap.docs) {
     const intData = doc.data() || {};
+    if (String(intData.provider || '').toLowerCase() !== 'whatsapp') continue;
     const phoneNumberId = String(intData.phone_number_id || '').trim();
     if (!phoneNumberId) continue;
     let accessToken = null;
@@ -1250,11 +1254,18 @@ async function resolveOutboundTenant(dbInstance, companyId, preferredPhoneNumber
     const status = String(intData.status || '').toLowerCase();
     const verifiedAt = timestampMs(intData.last_verified_at);
     const updatedAt = timestampMs(intData.updated_at);
+    const isPreferred = preferredPhoneNumberId && phoneNumberId === String(preferredPhoneNumberId).trim();
+    const isUsablePreferred = isPreferred && (status === 'connected' || intData.outbound_verified === true);
+    const isDisconnected = ['disconnected', 'disabled', 'revoked', 'expired'].includes(status);
     const score =
-      (preferredPhoneNumberId && phoneNumberId === String(preferredPhoneNumberId).trim() ? 1000000 : 0)
-      + (status === 'connected' ? 10000 : 0)
-      + (intData.outbound_verified === true ? 1000 : 0)
-      + (intData.webhook_verified === true ? 500 : 0)
+      // A conversation's old Phone Number ID is only a tie-breaker when the
+      // integration is still verified.  A stale/disconnected record must
+      // never outrank the company's active connection.
+      (isUsablePreferred ? 1000 : 0)
+      + (status === 'connected' ? 100000 : 0)
+      + (intData.outbound_verified === true ? 10000 : 0)
+      + (intData.webhook_verified === true ? 5000 : 0)
+      + (isDisconnected ? -1000000 : 0)
       + verifiedAt / 1e12
       + updatedAt / 1e15;
     candidates.push({ score, intDocId: doc.id, intDoc: intData, phoneNumberId, accessToken });
@@ -2579,6 +2590,8 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
       return res.status(409).json({
         success: false,
         error_code: 'WHATSAPP_WINDOW_CLOSED',
+        meta_error_code: metaErrorObj?.code || 131047,
+        meta_error_subcode: metaErrorObj?.error_subcode || null,
         retryable: false,
         requires_template: true,
         error: 'La ventana de atención de WhatsApp está cerrada. El cliente debe escribir primero o debes usar una plantilla aprobada por Meta.'
@@ -2587,6 +2600,10 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
 
     return res.status(500).json({
       success: false,
+      error_code: metaErrorObj?.code ? `META_${metaErrorObj.code}` : 'WHATSAPP_SEND_FAILED',
+      meta_error_code: metaErrorObj?.code || null,
+      meta_error_subcode: metaErrorObj?.error_subcode || null,
+      retryable: true,
       error: metaErrorObj?.message || err.message
     });
   }
@@ -2628,21 +2645,13 @@ app.post('/api/test-message', authenticateUser, async (req, res) => {
   let activeToken = access_token;
 
   // 3. Fallback to saved credentials if token was not provided in request (reopened forms)
-  if (company_id && db) {
+  if (company_id && db && (!activePhoneNumberId || !activeToken)) {
     try {
-      const intSnap = await db.collection('integrations')
-        .where('company_id', '==', company_id)
-        .where('provider', '==', 'whatsapp')
-        .limit(1)
-        .get();
-
-      if (!intSnap.empty) {
-        const intData = intSnap.docs[0].data();
-        activePhoneNumberId = activePhoneNumberId || intData.phone_number_id; activeWabaId = activeWabaId || intData.whatsapp_business_account_id;
-        const secDoc = await db.doc(`integrations/${intSnap.docs[0].id}/secrets/tokens`).get();
-        if (secDoc.exists && secDoc.data().access_token) {
-          activeToken = secDoc.data().access_token;
-        }
+      const outboundTenant = await resolveOutboundTenant(db, company_id, activePhoneNumberId);
+      if (outboundTenant) {
+        activePhoneNumberId = activePhoneNumberId || outboundTenant.phoneNumberId;
+        activeWabaId = activeWabaId || outboundTenant.intDoc?.whatsapp_business_account_id || null;
+        activeToken = activeToken || outboundTenant.accessToken;
       }
     } catch (e) {
       console.error('Error fetching saved credentials for test-message:', e.message);
