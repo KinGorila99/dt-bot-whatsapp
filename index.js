@@ -2307,7 +2307,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
     }
     const catalogContextText = buildSprCatalogContext(recentCustomerMessages, messageText);
 
-    const botPausedByOwner = PAUSED_BOT_COMPANIES.has(String(companyId));
+    
     if (!convData) {
       convData = {
         id: convId,
