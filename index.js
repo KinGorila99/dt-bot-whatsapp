@@ -2967,7 +2967,7 @@ Incluye:
 ¿Te gustaría solicitar una demostración?`;
 
       const botIdentityForCatalog = `${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase();
-      const isSprAutopartesTenant = companyId === SPR_COMPANY_ID
+      var isSprAutopartesTenant = companyId === SPR_COMPANY_ID
         || /spr\s*(bot|autopartes|engine)/i.test(botIdentityForCatalog)
         || /spr autopartes/i.test(botIdentityForCatalog);
       const publicBusinessName = isSprAutopartesTenant ? 'SPR Autopartes' : tenantDisplayName;
