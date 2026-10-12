@@ -1721,7 +1721,7 @@ function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
       && !isSingleLabeledVehicleField
       && (/\b(?:19|20)\d{2}\b/.test(normalized) || [...SPR_VEHICLE_MAKES].some(make => new RegExp(`\\b${escapeSprRegex(make)}\\b`, 'i').test(normalized)));
   });
-  const previousStructuredVehicleContext = getSprStructuredVehicleContext(previous);
+  const previousStructuredVehicleContext = getSprStructuredVehicleContext(previous); const previousVehicleIndex = previousVehicleMessage ? previous.lastIndexOf(previousVehicleMessage) : -1; const previousStructuredVehicleIndex = previous.reduce((latest, value, index) => { const details = extractSprVehicleDetails(value); return ['marca', 'modelo', 'ano'].some(key => details[key]) ? index : latest; }, -1); const latestVehicleContext = previousStructuredVehicleIndex > previousVehicleIndex ? previousStructuredVehicleContext : previousVehicleMessage;
   const currentHasVehicle = hasSprVehicleReference(currentNormalized);
   const currentHasCatalogTerm = SPR_CATALOG_CONTEXT_PATTERN.test(currentNormalized)
     || SPR_CATALOG_REFINEMENT_PATTERN.test(currentNormalized)
@@ -1730,7 +1730,7 @@ function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
   const currentCanUsePreviousVehicle = currentHasCatalogTerm
     && !currentHasVehicle;
 
-  if (previousVehicleMessage && currentCanUsePreviousVehicle) return previousVehicleMessage + ' ' + current; if (previousStructuredVehicleContext && currentCanUsePreviousVehicle) return previousStructuredVehicleContext + ' ' + current; // Keep the last vehicle/model when the customer clarifies the same part
+  if (latestVehicleContext && currentCanUsePreviousVehicle) return latestVehicleContext + ' ' + current; // Keep the latest vehicle profile for subsequent pieces.
   // (for example: "faro de Versa 2017" -> "quiero el faro principal").
   if (previousCatalogMessage && currentCanUsePreviousVehicle) {
     return previousCatalogMessage + ' ' + current;
