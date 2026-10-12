@@ -1728,7 +1728,7 @@ function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
     || isFollowUpRefinement
     || isSprLikelyPieceFollowUp(currentNormalized);
   const currentCanUsePreviousVehicle = currentHasCatalogTerm
-    && (!currentHasVehicle || isSprLikelyPieceFollowUp(currentNormalized));
+    && !currentHasVehicle;
 
   if (previousVehicleMessage && currentCanUsePreviousVehicle) return previousVehicleMessage + ' ' + current; if (previousStructuredVehicleContext && currentCanUsePreviousVehicle) return previousStructuredVehicleContext + ' ' + current; // Keep the last vehicle/model when the customer clarifies the same part
   // (for example: "faro de Versa 2017" -> "quiero el faro principal").
