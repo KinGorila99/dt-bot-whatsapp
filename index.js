@@ -1253,11 +1253,11 @@ function buildSprCatalogSearchQueries(value) {
 // that previous turn so a side/orientation answer cannot jump to another
 // make or model.
 const SPR_CATALOG_CONTEXT_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|bieleta(?:s)?|balero(?:s)?|maza(?:s)?|homocin[eé]tica(?:s)?|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|producto(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|stop|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera(?:s)?|carrocer[ií]a)\b/;
-const SPR_CATALOG_REFINEMENT_PATTERN = /\b(delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atr[aá]s|modelo|a[nñ]o|versi[oó]n|principal|niebla|antiniebla|motor)\b/;
+const SPR_CATALOG_REFINEMENT_PATTERN = /\b(delantero|delantera|delanteros|delanteras|trasero|trasera|traseros|traseras|izquierdo|izquierda|izquierdos|izquierdas|derecho|derecha|derechos|derechas|lateral|laterales|lado|frente|atr[aá]s|modelo|a[nñ]o|versi[oó]n|principal|niebla|antiniebla|motor)\b/;
 
 // Do not guess a vehicle from a generic part request. Ask for the vehicle
 // before searching so the bot cannot return an unrelated make or model.
-const SPR_CATALOG_GENERIC_WORDS_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|que|qué|por|favor|de|precio|precios|cuanto|cu[aá]nto|cuesta|costo|cotizacion|cotizaci[oó]n|cotizar|comprar|compra|nuevo|nueva|disponible|disponibilidad|stock|catalogo|cat[aá]logo|producto|productos|pieza|piezas|refaccion|refacciones|motor|motores|cabeza|cabezas|culata|engine|series|amortiguador|amortiguadores|suspension|bieleta|bieletas|balero|baleros|maza|mazas|homocinetica|homocineticas|freno|frenos|balata|balatas|pastilla|pastillas|aceite|lubricante|lubricantes|direccion|terminal|terminales|rotula|rotulas|radiador|radiadores|bomba|bombas|turbo|turbos|embrague|clutch|soporte|soportes|faro|faros|niebla|antiniebla|principal|calavera|calaveras|lampara|lamparas|luz|luces|espejo|espejos|guia|guias|fascia|fascias|moldura|molduras|parrilla|parrillas|defensa|defensas|cofre|cajuela|puerta|puertas|manija|manijas|bisagra|bisagras|tolva|tolvas|rejilla|rejillas|salpicadera|salpicaderas|carroceria|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atras|modelo|ano|version|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|camiones|completo|completa|todo|toda|todos|todas|no|sin|evitar|ningun|ninguna)\b/gi;
+const SPR_CATALOG_GENERIC_WORDS_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|que|qué|por|favor|de|precio|precios|cuanto|cu[aá]nto|cuesta|costo|cotizacion|cotizaci[oó]n|cotizar|comprar|compra|nuevo|nueva|disponible|disponibilidad|stock|catalogo|cat[aá]logo|producto|productos|pieza|piezas|refaccion|refacciones|motor|motores|cabeza|cabezas|culata|engine|series|amortiguador|amortiguadores|suspension|bieleta|bieletas|balero|baleros|maza|mazas|homocinetica|homocineticas|freno|frenos|balata|balatas|pastilla|pastillas|aceite|lubricante|lubricantes|direccion|terminal|terminales|rotula|rotulas|radiador|radiadores|bomba|bombas|turbo|turbos|embrague|clutch|soporte|soportes|faro|faros|niebla|antiniebla|principal|calavera|calaveras|lampara|lamparas|luz|luces|espejo|espejos|guia|guias|fascia|fascias|moldura|molduras|parrilla|parrillas|defensa|defensas|cofre|cajuela|puerta|puertas|manija|manijas|bisagra|bisagras|tolva|tolvas|rejilla|rejillas|salpicadera|salpicaderas|carroceria|delantero|delantera|delanteros|delanteras|trasero|trasera|traseros|traseras|izquierdo|izquierda|izquierdos|izquierdas|derecho|derecha|derechos|derechas|lateral|laterales|lado|frente|atras|modelo|ano|version|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|camiones|completo|completa|todo|toda|todos|todas|no|sin|evitar|ningun|ninguna)\b/gi;
 const SPR_VEHICLE_MAKES = new Set(['nissan', 'ford', 'chevrolet', 'chevy', 'volkswagen', 'vw', 'toyota', 'honda', 'kia', 'hyundai', 'dodge', 'chrysler', 'jeep', 'mazda', 'mitsubishi', 'suzuki', 'seat', 'renault', 'peugeot', 'fiat', 'ram', 'gmc', 'volvo', 'audi', 'bmw', 'mercedes', 'mercedesbenz', 'isuzu', 'subaru', 'lincoln', 'cadillac', 'buick', 'acura', 'infiniti', 'lexus', 'porsche', 'mg', 'byd']);
 
 function hasSprVehicleReference(value) {
@@ -1268,6 +1268,31 @@ function hasSprVehicleReference(value) {
   const vehicleTokens = normalized.split(/\s+/).filter(token => token.length >= 2);
   if (!vehicleTokens.length || vehicleTokens.every(token => SPR_VEHICLE_MAKES.has(token))) return false;
   return true;
+}
+
+// A vehicle profile can arrive in separate customer turns (for example,
+// "Marca: Nissan", then "Modelo: Versa", then "Año: 2017"). Keep that
+// structured tail together so the next piece request can use the complete
+// profile instead of falling through to advisor review.
+function getSprStructuredVehicleContext(previousMessages) {
+  const previous = Array.isArray(previousMessages) ? previousMessages : [];
+  const context = [];
+  let collecting = false;
+  for (let index = previous.length - 1; index >= 0; index -= 1) {
+    const value = String(previous[index] || '').trim();
+    if (!value) continue;
+    const details = extractSprVehicleDetails(value);
+    const hasVehicleField = ['marca', 'modelo', 'ano'].some(key => details[key]);
+    if (hasVehicleField) {
+      context.unshift(value);
+      collecting = true;
+      continue;
+    }
+    // Courtesy or greeting turns do not invalidate a vehicle profile.
+    if (collecting && (isFriendlyGreetingText(value) || isCourtesyText(value))) continue;
+    if (collecting) break;
+  }
+  return context.join(' ').replace(/\s+/g, ' ').trim();
 }
 
 function isAmbiguousSprCatalogRequest(value) {
@@ -1291,9 +1316,14 @@ function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
   });
   const previousVehicleMessage = [...previous].reverse().find(value => {
     const normalized = normalizeBotText(value);
+    const labeledDetails = extractSprVehicleDetails(value);
+    const isSingleLabeledVehicleField = Object.keys(labeledDetails).length === 1
+      && ['marca', 'modelo', 'ano'].some(key => labeledDetails[key]);
     return hasSprVehicleReference(normalized)
+      && !isSingleLabeledVehicleField
       && (/\b(?:19|20)\d{2}\b/.test(normalized) || [...SPR_VEHICLE_MAKES].some(make => new RegExp(`\\b${escapeSprRegex(make)}\\b`, 'i').test(normalized)));
   });
+  const previousStructuredVehicleContext = getSprStructuredVehicleContext(previous);
   const currentHasVehicle = hasSprVehicleReference(currentNormalized);
   const currentHasCatalogTerm = SPR_CATALOG_CONTEXT_PATTERN.test(currentNormalized)
     || SPR_CATALOG_REFINEMENT_PATTERN.test(currentNormalized)
@@ -1310,6 +1340,10 @@ function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
   // "faro derecho" becomes a searchable request instead of a dead end.
   if (previousVehicleMessage && currentHasCatalogTerm && !currentHasVehicle) {
     return previousVehicleMessage + ' ' + current;
+  }
+
+  if (previousStructuredVehicleContext && currentHasCatalogTerm && !currentHasVehicle) {
+    return previousStructuredVehicleContext + ' ' + current;
   }
 
   if (previous.length && isFollowUpRefinement && SPR_CATALOG_CONTEXT_PATTERN.test(previousNormalized)) {
@@ -3279,6 +3313,7 @@ module.exports = {
   findSprExhaustiveMatches,
   isAmbiguousSprCatalogRequest,
   buildSprCatalogContext,
+  getSprStructuredVehicleContext,
   isUnlistedSprProductRequest,
   isIncompleteSprCatalogRequest,
   getSprMissingRequestFields,
