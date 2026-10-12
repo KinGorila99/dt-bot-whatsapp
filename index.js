@@ -16,6 +16,17 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 const WEBHOOK_BODY_LIMIT = process.env.WEBHOOK_BODY_LIMIT || '1mb';
 const SERVER_STARTED_AT = new Date().toISOString();
+const RESEND_API_URL = 'https://api.resend.com/emails';
+const RESEND_API_KEY = String(process.env.RESEND_API_KEY || '').trim();
+const ALERT_EMAIL_TO = String(process.env.ALERT_EMAIL_TO || '')
+  .split(',')
+  .map(value => value.trim())
+  .filter(Boolean);
+const ALERT_EMAIL_FROM = String(process.env.ALERT_EMAIL_FROM || '').trim();
+const SPR_ALERT_TIMEZONE = String(process.env.SPR_ALERT_TIMEZONE || 'America/Mexico_City').trim();
+const SPR_INACTIVITY_ALERT_HOURS = Math.max(1, Number(process.env.SPR_INACTIVITY_ALERT_HOURS || 3));
+const SPR_ALERT_CHECK_INTERVAL_MS = Math.max(60000, Number(process.env.SPR_ALERT_CHECK_INTERVAL_MS || 600000));
+const SPR_INACTIVITY_STATE_PATH = 'system_alert_state/spr_inactivity';
 
 // Capture raw body for Meta HMAC-SHA256 signature verification
 app.use(cors());
@@ -125,9 +136,195 @@ const HUMAN_HANDOFF_IDLE_MINUTES = Math.max(5, Number(process.env.HUMAN_HANDOFF_
 
 function timestampMs(value) {
   if (!value) return 0;
+  if (typeof value.toDate === 'function') return timestampMs(value.toDate());
+  if (typeof value._seconds === 'number') return value._seconds * 1000;
   const parsed = value instanceof Date ? value : new Date(value);
   const time = parsed.getTime();
   return Number.isFinite(time) ? time : 0;
+}
+
+function isAlertEmailConfigured() {
+  return Boolean(RESEND_API_KEY && ALERT_EMAIL_FROM && ALERT_EMAIL_TO.length);
+}
+
+async function sendAlertEmail({ subject, text }) {
+  if (!isAlertEmailConfigured()) {
+    console.warn('[Alert email] Disabled: configure RESEND_API_KEY, ALERT_EMAIL_FROM and ALERT_EMAIL_TO in Render.');
+    return false;
+  }
+
+  try {
+    await axios.post(RESEND_API_URL, {
+      from: ALERT_EMAIL_FROM,
+      to: ALERT_EMAIL_TO,
+      subject,
+      text
+    }, {
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 10000
+    });
+    console.log(`[Alert email] Sent: ${subject}`);
+    return true;
+  } catch (error) {
+    console.error('[Alert email] Resend failed:', error.response?.data?.message || error.message);
+    return false;
+  }
+}
+
+function getZonedDateParts(date, timeZone = SPR_ALERT_TIMEZONE) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    weekday: 'short',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(new Date(date));
+  const values = Object.fromEntries(parts
+    .filter(part => part.type !== 'literal')
+    .map(part => [part.type, part.value]));
+  const weekdays = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return {
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+    hour: Number(values.hour),
+    minute: Number(values.minute),
+    second: Number(values.second),
+    weekday: weekdays[values.weekday]
+  };
+}
+
+function getTimeZoneOffsetMs(date, timeZone = SPR_ALERT_TIMEZONE) {
+  const parts = getZonedDateParts(date, timeZone);
+  const asUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return asUtc - new Date(date).getTime();
+}
+
+function zonedPartsToUtc(parts, timeZone = SPR_ALERT_TIMEZONE) {
+  const localAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  let guess = localAsUtc;
+  for (let index = 0; index < 3; index += 1) {
+    const corrected = localAsUtc - getTimeZoneOffsetMs(new Date(guess), timeZone);
+    if (corrected === guess) break;
+    guess = corrected;
+  }
+  return new Date(guess);
+}
+
+function isSprBusinessWindow(date = new Date(), timeZone = SPR_ALERT_TIMEZONE) {
+  const parts = getZonedDateParts(date, timeZone);
+  return parts.weekday >= 1 && parts.weekday <= 6 && parts.hour >= 9 && parts.hour < 19;
+}
+
+function businessMinutesSince(startDate, endDate = new Date(), timeZone = SPR_ALERT_TIMEZONE) {
+  const startMs = timestampMs(startDate);
+  const endMs = timestampMs(endDate);
+  if (!startMs || !endMs || endMs <= startMs) return 0;
+
+  const startParts = getZonedDateParts(new Date(startMs), timeZone);
+  const endParts = getZonedDateParts(new Date(endMs), timeZone);
+  let cursor = Date.UTC(startParts.year, startParts.month - 1, startParts.day);
+  const lastDay = Date.UTC(endParts.year, endParts.month - 1, endParts.day);
+  let totalMinutes = 0;
+
+  for (let index = 0; cursor <= lastDay && index < 370; index += 1) {
+    const cursorDate = new Date(cursor);
+    const dayParts = {
+      year: cursorDate.getUTCFullYear(),
+      month: cursorDate.getUTCMonth() + 1,
+      day: cursorDate.getUTCDate()
+    };
+    const weekday = cursorDate.getUTCDay();
+    if (weekday >= 1 && weekday <= 6) {
+      const workStart = zonedPartsToUtc({ ...dayParts, hour: 9, minute: 0, second: 0 }, timeZone).getTime();
+      const workEnd = zonedPartsToUtc({ ...dayParts, hour: 19, minute: 0, second: 0 }, timeZone).getTime();
+      const overlapStart = Math.max(startMs, workStart);
+      const overlapEnd = Math.min(endMs, workEnd);
+      if (overlapEnd > overlapStart) totalMinutes += (overlapEnd - overlapStart) / 60000;
+    }
+    cursor += 86400000;
+  }
+
+  return totalMinutes;
+}
+
+async function checkSprInactivityAlert(now = new Date()) {
+  if (!db || !isAlertEmailConfigured() || !isSprBusinessWindow(now)) return false;
+
+  const stateRef = db.doc(SPR_INACTIVITY_STATE_PATH);
+  const stateSnap = await stateRef.get();
+  const state = stateSnap.exists ? stateSnap.data() || {} : {};
+  const nowIso = new Date(now).toISOString();
+  const baselineAt = state.baseline_at || SERVER_STARTED_AT;
+  if (!stateSnap.exists || !state.baseline_at) {
+    await stateRef.set({
+      company_id: SPR_COMPANY_ID,
+      baseline_at: baselineAt,
+      updated_at: nowIso
+    }, { merge: true });
+  }
+
+  const quietSince = state.last_customer_message_at || baselineAt;
+  const quietSinceMs = timestampMs(quietSince);
+  if (!quietSinceMs) return false;
+
+  const quietBusinessMinutes = businessMinutesSince(quietSince, now, SPR_ALERT_TIMEZONE);
+  const thresholdMinutes = SPR_INACTIVITY_ALERT_HOURS * 60;
+  if (quietBusinessMinutes <= thresholdMinutes) return false;
+
+  const lastAlertedMs = timestampMs(state.last_alerted_at);
+  if (lastAlertedMs >= quietSinceMs) return false;
+
+  const sent = await sendAlertEmail({
+    subject: '[SPR] Más de 3 horas hábiles sin mensajes de clientes',
+    text: [
+      'SPR Autopartes no ha recibido mensajes de clientes durante más de 3 horas hábiles.',
+      `Último mensaje de cliente: ${state.last_customer_message_at || 'no registrado; se tomó el arranque del servidor como referencia'}`,
+      `Tiempo hábil transcurrido: ${Math.floor(quietBusinessMinutes / 60)} h ${Math.floor(quietBusinessMinutes % 60)} min`,
+      `Horario considerado: lunes a sábado, 09:00–19:00 (${SPR_ALERT_TIMEZONE})`,
+      `Revisión generada: ${nowIso}`
+    ].join('\n')
+  });
+
+  if (sent) {
+    await stateRef.set({
+      company_id: SPR_COMPANY_ID,
+      last_alerted_at: nowIso,
+      last_alerted_business_minutes: Math.round(quietBusinessMinutes),
+      updated_at: nowIso
+    }, { merge: true });
+  }
+  return sent;
+}
+
+let inactivityAlertCheckRunning = false;
+function startSprAlertMonitor() {
+  if (!db || !isAlertEmailConfigured()) {
+    console.warn('[SPR alerts] Monitor disabled until Resend environment variables are configured.');
+    return null;
+  }
+
+  const runCheck = async () => {
+    if (inactivityAlertCheckRunning) return;
+    inactivityAlertCheckRunning = true;
+    try {
+      await checkSprInactivityAlert();
+    } catch (error) {
+      console.error('[SPR alerts] Inactivity check failed:', error.message);
+    } finally {
+      inactivityAlertCheckRunning = false;
+    }
+  };
+
+  void runCheck();
+  return setInterval(runCheck, SPR_ALERT_CHECK_INTERVAL_MS);
 }
 
 function createUniqueId(prefix) {
@@ -2112,6 +2309,19 @@ app.post('/webhook/whatsapp', async (req, res) => {
           delivery_status_updated_at: updatedAt,
           ...(errorMessage ? { error_message: errorMessage, whatsapp_error_code: firstError.code || null } : {})
         };
+        if (firstError) {
+          void sendAlertEmail({
+            subject: '[WhatsApp] Meta reportó un error de entrega',
+            text: [
+              'Meta reportó un error al entregar un mensaje de WhatsApp.',
+              `Código: ${firstError.code || 'sin código'}`,
+              `Motivo: ${errorMessage || 'sin motivo informado'}`,
+              `Mensaje: ${externalId}`,
+              `Phone Number ID: ${value?.metadata?.phone_number_id || 'no informado'}`,
+              `Fecha: ${updatedAt}`
+            ].join('\n')
+          }).catch(() => {});
+        }
         try {
           const messageSnap = await db.collection('messages')
             .where('external_message_id', '==', externalId)
@@ -2457,6 +2667,20 @@ app.post('/webhook/whatsapp', async (req, res) => {
       await db.doc(`messages/${inMsgId}`).set(inMsgData);
     } catch (e) {
       console.warn('Error saving inbound message:', e.message);
+    }
+
+    if (companyId === SPR_COMPANY_ID) {
+      try {
+        await db.doc(SPR_INACTIVITY_STATE_PATH).set({
+          company_id: SPR_COMPANY_ID,
+          last_customer_message_at: timestamp,
+          last_customer_message_id: messageId,
+          last_alerted_at: null,
+          updated_at: new Date().toISOString()
+        }, { merge: true });
+      } catch (alertStateError) {
+        console.warn('[SPR alerts] Could not update last customer message:', alertStateError.message);
+      }
     }
 
     // 5. DT Bot Core Engine Evaluation
@@ -3328,6 +3552,20 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
   } catch (err) {
     console.error('Error in agent send message:', err.response?.data?.error?.message || err.message);
     const metaErrorObj = err.response?.data?.error;
+    if (metaErrorObj?.code || metaErrorObj?.message) {
+      void sendAlertEmail({
+        subject: '[WhatsApp] Meta rechazó un mensaje',
+        text: [
+          'Meta devolvió un error al intentar enviar una respuesta desde el CRM.',
+          `Empresa: ${company_id || 'no informada'}`,
+          `Conversación: ${conversation_id || 'no informada'}`,
+          `Código: ${metaErrorObj.code || 'sin código'}`,
+          `Motivo: ${metaErrorObj.message || err.message}`,
+          `Detalle: ${metaErrorObj.error_data?.details || metaErrorObj.details || 'sin detalle adicional'}`,
+          `Fecha: ${new Date().toISOString()}`
+        ].join('\n')
+      }).catch(() => {});
+    }
 
     // Meta rejects free-form text after the 24-hour customer-service window
     // with error 131047 ("Re-engagement message").  Treat this as a
@@ -3521,6 +3759,7 @@ if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`🚀 DT Bot Core WhatsApp Cloud API Server v1.3.0 listening on port ${PORT}`);
     console.log(`Webhook URL: http://localhost:${PORT}/webhook/whatsapp`);
+    startSprAlertMonitor();
   });
 }
 
@@ -3564,6 +3803,8 @@ module.exports = {
   buildSprFaqReply,
   buildSprCatalogFallbackReply,
   buildSprCatalogReply,
+  businessMinutesSince,
+  isSprBusinessWindow,
   normalizeSprProduct,
   parseDigitalCatalogPayload,
   normalizeDigitalCatalogRow,
