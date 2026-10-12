@@ -70,6 +70,17 @@ const TENANT_SAFE_ONBOARDING_POLICY = Object.freeze({
   no_cross_tenant_content: true
 });
 
+// Owner-requested safety pause while the SPR CRM outbound path is being
+// repaired. Inbound messages and CRM history continue to be recorded, but
+// this tenant must not receive an automatic bot reply until the pause is
+// explicitly removed. DT Marketing is intentionally not included.
+const PAUSED_BOT_COMPANIES = new Set(
+  String(process.env.PAUSED_BOT_COMPANIES || 'comp_1787600762092')
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean)
+);
+
 function getTenantSafeBotDefaults(tenant = {}) {
   const name = String(tenant.nombre || tenant.name || 'nuestro negocio').trim();
   return {
@@ -1819,6 +1830,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
       tenantCompany?.nombre || botSettings?.business_name || botSettings?.business_description || 'nuestro negocio'
     ).trim();
 
+    const botPausedByOwner = PAUSED_BOT_COMPANIES.has(String(companyId));
+
     // Check for Human Handoff Intent
     const lowerText = normalizeBotText(messageText);
     const humanKeywords = ['asesor', 'humano', 'persona', 'agente', 'ejecutivo', 'hablar con alguien', 'representante', 'ayuda humana', 'transferir'];
@@ -1835,7 +1848,19 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
     let botReply = '';
 
-    if (wantsHuman) {
+    if (botPausedByOwner) {
+      // Keep the inbound turn in Firestore for the advisor, but never send an
+      // automatic answer while the owner has paused this tenant's bot.
+      convData.human_handoff = true;
+      convData.bot_enabled = false;
+      convData.status = 'pending';
+      convData.auto_reactivate_enabled = false;
+      convData.handoff_reason = 'bot_paused_by_owner';
+      convData.needs_human_review = true;
+      convData.review_requested_at = timestamp;
+      botReply = '';
+      console.log(`⏸️ [Bot Paused by Owner] Company [${companyId}] — inbound recorded without automatic reply.`);
+    } else if (wantsHuman) {
       convData.human_handoff = true;
       convData.bot_enabled = false;
       convData.status = 'pending';
