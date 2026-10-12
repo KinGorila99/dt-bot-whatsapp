@@ -73,14 +73,26 @@ const TENANT_SAFE_ONBOARDING_POLICY = Object.freeze({
 
 // Per-tenant emergency pause. No tenant is paused by default; an environment
 // value can pause one or more tenants without affecting other tenants such as
-// DT Marketing. SPR is therefore active after this release unless the owner
-// deliberately sets PAUSED_BOT_COMPANIES in Render.
+// DT Marketing. SPR is active by default after this release. A stale
+// PAUSED_BOT_COMPANIES value left over from the previous emergency stop must
+// not silently keep SPR offline; use SPR_BOT_ACTIVE=false when an explicit
+// pause is intended.
+const SPR_COMPANY_ID = 'comp_1787600762092';
+const SPR_BOT_ACTIVE = !/^(false|0|off|paused)$/i.test(
+  String(process.env.SPR_BOT_ACTIVE ?? 'true').trim()
+);
 const PAUSED_BOT_COMPANIES = new Set(
   String(process.env.PAUSED_BOT_COMPANIES || '')
     .split(',')
     .map(value => value.trim())
     .filter(Boolean)
 );
+
+function isTenantPaused(companyId) {
+  const normalizedCompanyId = String(companyId || '').trim();
+  if (normalizedCompanyId === SPR_COMPANY_ID) return !SPR_BOT_ACTIVE;
+  return PAUSED_BOT_COMPANIES.has(normalizedCompanyId);
+}
 
 function getTenantSafeBotDefaults(tenant = {}) {
   const name = String(tenant.nombre || tenant.name || 'nuestro negocio').trim();
@@ -1764,7 +1776,9 @@ function isSyntheticMetaPayload(from) {
 /**
  * Strictly resolve company tenant & access token by Phone Number ID.
  * Multi-tenant Isolation Rule:
- * 1. Strictly look up by phone_number_id. If multiple integrations share the same phone ID, reject as ambiguous.
+ * 1. Strictly look up by phone_number_id. If duplicate records belong to the
+ *    same company, choose the active/verified record instead of dropping the
+ *    customer's message. Reject only a true cross-tenant collision.
  * 2. Lookup by WABA ID ONLY if phone_number_id was omitted. If multiple integrations match the WABA ID, reject as ambiguous.
  * 3. Reject unknown IDs without fallback to prevent cross-tenant leaks.
  */
@@ -1777,13 +1791,29 @@ async function resolveTenant(dbInstance, phoneNumberId, wabaId) {
   if (phoneNumberId) {
     const snapByPhone = await dbInstance.collection('integrations')
       .where('phone_number_id', '==', String(phoneNumberId).trim())
-      .limit(2)
+      .limit(20)
       .get();
     if (!snapByPhone.empty) {
       let candidateDocs = snapByPhone.docs;
       if (candidateDocs.length > 1) {
-        console.error(`🛑 [Duplicate Phone Number ID: ${phoneNumberId}] ${candidateDocs.length} integrations found. Rejecting the webhook to prevent cross-tenant delivery.`);
-        return null;
+        const companyIds = [...new Set(candidateDocs
+          .map(doc => String(doc.data()?.company_id || '').trim())
+          .filter(Boolean))];
+        if (companyIds.length > 1) {
+          console.error(`🛑 [Cross-tenant Phone Number ID: ${phoneNumberId}] ${candidateDocs.length} integrations belong to ${companyIds.length} companies. Rejecting the webhook to prevent cross-tenant delivery.`);
+          return null;
+        }
+        const scoreIntegration = doc => {
+          const data = doc.data() || {};
+          const status = String(data.status || '').toLowerCase();
+          return (status === 'connected' ? 1000000 : 0)
+            + (data.webhook_verified === true ? 100000 : 0)
+            + (data.outbound_verified === true ? 10000 : 0)
+            + (data.provider === 'whatsapp' ? 1000 : 0)
+            + (timestampMs(data.updated_at) / 1e12);
+        };
+        candidateDocs = candidateDocs.slice().sort((a, b) => scoreIntegration(b) - scoreIntegration(a));
+        console.warn(`⚠️ [Duplicate Phone Number ID: ${phoneNumberId}] ${candidateDocs.length} same-company records found; using active/verified integration ${candidateDocs[0].id}.`);
       }
       const selectedDoc = candidateDocs[0];
       intDoc = selectedDoc.data();
@@ -1957,7 +1987,9 @@ app.get('/api/status', (req, res) => {
     server_time: new Date().toISOString(),
     graph_api_version: GRAPH_API_VERSION,
     signature_verification: !!META_APP_SECRET ? 'enforced' : 'optional',
-    database: db ? 'firebase_admin_authenticated' : 'uninitialized'
+    database: db ? 'firebase_admin_authenticated' : 'uninitialized',
+    spr_bot_active: SPR_BOT_ACTIVE,
+    spr_bot_pause_control: 'SPR_BOT_ACTIVE=false'
   });
 });
 
@@ -2095,7 +2127,9 @@ app.post('/webhook/whatsapp', async (req, res) => {
           console.error('Error persisting WhatsApp delivery status for ' + externalId + ':', statusError.message);
         }
       }
-      return;
+      // A payload can contain delivery statuses and a customer message at
+      // the same time. Statuses are persisted above, but must not prevent the
+      // message branch below from saving the inbound turn in the CRM.
     }
 
     if (!value?.messages || value.messages.length === 0) return;
@@ -2307,7 +2341,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
     }
     const catalogContextText = buildSprCatalogContext(recentCustomerMessages, messageText);
 
-    
+    const botPausedByOwner = isTenantPaused(companyId);
     if (!convData) {
       convData = {
         id: convId,
@@ -2370,12 +2404,13 @@ app.post('/webhook/whatsapp', async (req, res) => {
       console.log('🤖 [Owner Pause Removed] Conversation [' + convId + '] resumed for the reactivated SPR bot.');
     }
 
-    // An uncertain catalog result is paused for an advisor. Keep that pause
-    // for acknowledgements, but allow a genuinely new piece/FAQ question to
-    // start a fresh automated turn without waiting for a timer.
+    // A human reply pauses the current turn, not the whole conversation. For
+    // SPR, a new piece, greeting, or concrete question explicitly starts a
+    // fresh automated turn. This prevents every advisor send from leaving the
+    // customer silently paused while preserving acknowledgements such as
+    // "gracias" with the human advisor.
     if (!botPausedByOwner
       && convData.human_handoff === true
-      && convData.handoff_reason === 'uncertain_request_review'
       && isSprNewRequestOrQuestion(messageText)) {
       convData.human_handoff = false;
       convData.bot_enabled = true;
@@ -2387,6 +2422,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
       convData.handoff_reason = null;
       convData.auto_reactivated_at = timestamp;
       convData.auto_reactivation_reason = 'customer_new_request';
+      convData.assigned_user_id = null;
+      convData.assigned_user_name = null;
       console.log('🤖 [New Customer Request] Conversation [' + convId + '] resumed for a new piece or FAQ question.');
     }
 
