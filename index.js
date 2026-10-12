@@ -1730,7 +1730,7 @@ function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
   const currentCanUsePreviousVehicle = currentHasCatalogTerm
     && (!currentHasVehicle || isSprLikelyPieceFollowUp(currentNormalized));
 
-  // Keep the last vehicle/model when the customer clarifies the same part
+  if (previousVehicleMessage && currentCanUsePreviousVehicle) return previousVehicleMessage + ' ' + current; if (previousStructuredVehicleContext && currentCanUsePreviousVehicle) return previousStructuredVehicleContext + ' ' + current; // Keep the last vehicle/model when the customer clarifies the same part
   // (for example: "faro de Versa 2017" -> "quiero el faro principal").
   if (previousCatalogMessage && currentCanUsePreviousVehicle) {
     return previousCatalogMessage + ' ' + current;
