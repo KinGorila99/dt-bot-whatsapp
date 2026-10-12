@@ -1300,6 +1300,22 @@ function isAmbiguousSprCatalogRequest(value) {
   return SPR_CATALOG_CONTEXT_PATTERN.test(normalized) && !hasSprVehicleReference(normalized);
 }
 
+// Keep the follow-up flow open even when a piece is new or is not yet in the
+// synonym list (for example, "claxon" or "bomba de agua"). This fallback is
+// used only after a vehicle context exists, so greetings and advisor commands
+// cannot become unrelated catalog searches.
+function isSprLikelyPieceFollowUp(value) {
+  const query = canonicalizeSprPartSynonyms(value);
+  if (!query || isFriendlyGreetingText(query) || isCourtesyText(query)) return false;
+  if (/\b(?:asesor|humano|persona|agente|horario|envio|envios|ubicacion|direccion|garantia|pago|pagos|gracias|ok|okay|listo|recibido)\b/.test(query)) return false;
+  const residual = query
+    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
+    .replace(/\b(?:19|20)\d{2}\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return residual.split(' ').some(token => token.length >= 3);
+}
+
 function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
   const current = String(currentMessage || '').trim();
   const previous = (Array.isArray(previousCustomerMessages) ? previousCustomerMessages : [])
@@ -1327,22 +1343,25 @@ function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
   const currentHasVehicle = hasSprVehicleReference(currentNormalized);
   const currentHasCatalogTerm = SPR_CATALOG_CONTEXT_PATTERN.test(currentNormalized)
     || SPR_CATALOG_REFINEMENT_PATTERN.test(currentNormalized)
-    || isFollowUpRefinement;
+    || isFollowUpRefinement
+    || isSprLikelyPieceFollowUp(currentNormalized);
+  const currentCanUsePreviousVehicle = currentHasCatalogTerm
+    && (!currentHasVehicle || isSprLikelyPieceFollowUp(currentNormalized));
 
   // Keep the last vehicle/model when the customer clarifies the same part
   // (for example: "faro de Versa 2017" -> "quiero el faro principal").
-  if (previousCatalogMessage && currentHasCatalogTerm && !currentHasVehicle) {
+  if (previousCatalogMessage && currentCanUsePreviousVehicle) {
     return previousCatalogMessage + ' ' + current;
   }
 
   // The first turn may contain only a model/year (for example, "Sentra
   // 2018"), followed by the actual piece. Preserve that vehicle context so
   // "faro derecho" becomes a searchable request instead of a dead end.
-  if (previousVehicleMessage && currentHasCatalogTerm && !currentHasVehicle) {
+  if (previousVehicleMessage && currentCanUsePreviousVehicle) {
     return previousVehicleMessage + ' ' + current;
   }
 
-  if (previousStructuredVehicleContext && currentHasCatalogTerm && !currentHasVehicle) {
+  if (previousStructuredVehicleContext && currentCanUsePreviousVehicle) {
     return previousStructuredVehicleContext + ' ' + current;
   }
 
@@ -2472,7 +2491,7 @@ Incluye:
       const sprMissingRequestReply = buildSprMissingRequestReply(sprMissingRequestFields, catalogQueryText);
       const asksCatalogProduct = !isShopifyPrefillIntro
         && !vehicleOnlyCatalogContext
-        && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera|carroceria)\b/.test(lowerText) || SPR_EXPLICIT_PART_PATTERN.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText));
+        && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera|carroceria)\b/.test(lowerText) || SPR_EXPLICIT_PART_PATTERN.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText) || (catalogContextText !== messageText && isSprLikelyPieceFollowUp(messageText)));
       let sprCatalogReply = '';
       if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
@@ -3314,6 +3333,7 @@ module.exports = {
   isAmbiguousSprCatalogRequest,
   buildSprCatalogContext,
   getSprStructuredVehicleContext,
+  isSprLikelyPieceFollowUp,
   isUnlistedSprProductRequest,
   isIncompleteSprCatalogRequest,
   getSprMissingRequestFields,
@@ -3519,3 +3539,4 @@ app.post('/api/catalog/digital/refresh', authenticateUser, async (req, res) => {
     return res.status(502).json({ success: false, error: 'No se pudo cargar el catálogo digital ni la fuente de respaldo.' });
   }
 });
+

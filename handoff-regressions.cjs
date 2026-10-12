@@ -20,7 +20,8 @@ const {
   buildSprAdvisorReviewReply,
   getSprMissingRequestFields,
   buildSprMissingRequestReply,
-  buildSprCatalogContext
+  buildSprCatalogContext,
+  isSprLikelyPieceFollowUp
 } = require('../index.js');
 Module._load = originalLoad;
 
@@ -85,7 +86,14 @@ if (!/marca: nissan modelo: versa a[nñ]o: 2017 faro derecho/i.test(labeledConte
   failures.push({ labeledContext });
 }
 
-const total = cases.length + 3 + genericVehicleCases.length + 1;
+for (const piece of ['CLAXON', 'BOMBA DE AGUA', 'SENSOR ABS']) {
+  const context = buildSprCatalogContext(['SENTRA 2018'], piece);
+  if (!isSprLikelyPieceFollowUp(piece) || !context.toLowerCase().includes(`sentra 2018 ${piece.toLowerCase()}`)) {
+    failures.push({ piece, context });
+  }
+}
+
+const total = cases.length + 3 + genericVehicleCases.length + 1 + 3;
 console.log(`SPR handoff regressions: ${total - failures.length}/${total} passed`);
 if (failures.length) {
   console.error(JSON.stringify(failures, null, 2));
