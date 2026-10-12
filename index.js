@@ -1217,6 +1217,76 @@ async function resolveTenant(dbInstance, phoneNumberId, wabaId) {
   };
 }
 
+/**
+ * Resolve the outbound WhatsApp credential for a company without assuming
+ * that the first Firestore integration document is the active one. Companies
+ * can retain old, disconnected or test integrations after reconnecting Meta.
+ * Prefer the conversation's phone number when available, then a connected
+ * and verified integration that actually has a token.
+ */
+async function resolveOutboundTenant(dbInstance, companyId, preferredPhoneNumberId = null) {
+  if (!dbInstance || !companyId) return null;
+  const snap = await dbInstance.collection('integrations')
+    .where('company_id', '==', String(companyId))
+    .where('provider', '==', 'whatsapp')
+    .limit(25)
+    .get();
+  if (snap.empty) return null;
+
+  const candidates = [];
+  for (const doc of snap.docs) {
+    const intData = doc.data() || {};
+    const phoneNumberId = String(intData.phone_number_id || '').trim();
+    if (!phoneNumberId) continue;
+    if (preferredPhoneNumberId && phoneNumberId !== String(preferredPhoneNumberId).trim()) continue;
+
+    let accessToken = null;
+    try {
+      const secDoc = await dbInstance.doc(`integrations/${doc.id}/secrets/tokens`).get();
+      accessToken = secDoc.exists ? String(secDoc.data()?.access_token || '').trim() : null;
+    } catch (secretError) {
+      console.warn(`Could not read outbound token for ${doc.id}:`, secretError.message);
+    }
+    if (!accessToken) continue;
+
+    const status = String(intData.status || '').toLowerCase();
+    const verifiedAt = timestampMs(intData.last_verified_at);
+    const updatedAt = timestampMs(intData.updated_at);
+    const score =
+      (preferredPhoneNumberId && phoneNumberId === String(preferredPhoneNumberId).trim() ? 1000000 : 0)
+      + (status === 'connected' ? 10000 : 0)
+      + (intData.outbound_verified === true ? 1000 : 0)
+      + (intData.webhook_verified === true ? 500 : 0)
+      + verifiedAt / 1e12
+      + updatedAt / 1e15;
+    candidates.push({ score, intDocId: doc.id, intDoc: intData, phoneNumberId, accessToken });
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0] || null;
+}
+
+async function mergeBufferedDeliveryStatus(dbInstance, externalMessageId, messageRef) {
+  if (!dbInstance || !externalMessageId || !messageRef) return null;
+  try {
+    const statusSnap = await dbInstance.doc(`whatsapp_delivery_status/${externalMessageId}`).get();
+    if (!statusSnap.exists) return null;
+    const statusData = statusSnap.data() || {};
+    const patch = {
+      delivery_status: statusData.delivery_status || statusData.whatsapp_status || 'accepted',
+      whatsapp_status: statusData.whatsapp_status || statusData.delivery_status || 'accepted',
+      delivery_status_updated_at: statusData.delivery_status_updated_at || statusData.updated_at || new Date().toISOString()
+    };
+    if (statusData.error_message) patch.error_message = statusData.error_message;
+    if (statusData.whatsapp_error_code) patch.whatsapp_error_code = statusData.whatsapp_error_code;
+    await messageRef.set(patch, { merge: true });
+    return patch;
+  } catch (statusError) {
+    console.warn(`Could not merge buffered delivery status for ${externalMessageId}:`, statusError.message);
+    return null;
+  }
+}
+
 // WhatsApp media messages carry the binary file behind a short-lived Meta
 // media id. Keep the id and its metadata in Firestore; the CRM media route
 // below fetches the binary with the tenant's token when the conversation is
@@ -1617,6 +1687,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
         id: convId,
         company_id: companyId,
         channel: 'whatsapp',
+        phone_number_id: phoneNumberId,
+        waba_id: wabaId,
         external_user_id: customerPhone,
         contact_phone_normalized: customerPhone,
         contact_name: customerName,
@@ -1641,6 +1713,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
         last_message_at: timestamp
       };
     } else {
+      if (phoneNumberId) convData.phone_number_id = phoneNumberId;
+      if (wabaId) convData.waba_id = wabaId;
       convData.contact_phone_normalized = customerPhone;
       recentCustomerMessages = [...recentCustomerMessages, messageText].filter(Boolean).slice(-4);
       convData.last_customer_message = messageText;
@@ -2038,10 +2112,13 @@ Si quieres atención inmediata, escribe *asesor*`;
           sender_type: 'bot',
           created_at: new Date().toISOString(),
           delivery_status: 'accepted',
-          external_message_id: metaMessageId
+          external_message_id: metaMessageId,
+          phone_number_id: phoneNumberId
         };
 
-        await db.doc(`messages/${outMsgId}`).set(outMsgData);
+        const messageRef = db.doc(`messages/${outMsgId}`);
+        await messageRef.set(outMsgData);
+        await mergeBufferedDeliveryStatus(db, metaMessageId, messageRef);
         convData.last_message = botReply;
         convData.last_message_sender = 'bot';
         convData.last_message_at = new Date().toISOString();
@@ -2216,6 +2293,7 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
   }
 
   const cleanPhone = to_phone.replace(/[^0-9]/g, '');
+  let preferredPhoneNumberId = null;
 
   // 4. Strict Conversation Verification (must exist, match company, and match recipient)
   if (conversation_id) {
@@ -2260,6 +2338,7 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
         error: 'El teléfono destino no coincide con el destinatario registrado en la conversación.'
       });
     }
+    preferredPhoneNumberId = convData.phone_number_id || convData.whatsapp_phone_number_id || null;
   }
 
   // 5. Outbound Idempotency & Concurrency Lock (MANDATORY & FAIL-CLOSED)
@@ -2337,29 +2416,18 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
   let activePhoneNumberId = null;
   let activeToken = null;
 
-  if (db) {
-    try {
-      const intSnap = await db.collection('integrations')
-        .where('company_id', '==', company_id)
-        .where('provider', '==', 'whatsapp')
-        .limit(1)
-        .get();
-
-      if (!intSnap.empty) {
-        const intData = intSnap.docs[0].data();
-        activePhoneNumberId = intData.phone_number_id;
-        const secDoc = await db.doc(`integrations/${intSnap.docs[0].id}/secrets/tokens`).get();
-        if (secDoc.exists && secDoc.data().access_token) {
-          activeToken = secDoc.data().access_token;
-        }
-      }
-    } catch (e) {
-      console.error('Error fetching tenant credentials:', e.message);
-      return res.status(500).json({
-        success: false,
-        error: 'Error al consultar credenciales de integración en la base de datos.'
-      });
+  try {
+    const outboundTenant = await resolveOutboundTenant(db, company_id, preferredPhoneNumberId);
+    if (outboundTenant) {
+      activePhoneNumberId = outboundTenant.phoneNumberId;
+      activeToken = outboundTenant.accessToken;
     }
+  } catch (e) {
+    console.error('Error fetching tenant credentials:', e.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Error al consultar credenciales de integración en la base de datos.'
+    });
   }
 
   if (!activePhoneNumberId || !activeToken) {
@@ -2435,11 +2503,14 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
         user_name: user_name || user.nombre,
         created_at: agentTimestamp,
         delivery_status: 'accepted',
-        external_message_id: metaMsgId
+        external_message_id: metaMsgId,
+        phone_number_id: activePhoneNumberId
       };
 
       try {
-        await db.doc(`messages/${msgId}`).set(msgData);
+        const messageRef = db.doc(`messages/${msgId}`);
+        await messageRef.set(msgData);
+        await mergeBufferedDeliveryStatus(db, metaMsgId, messageRef);
         await db.doc(`conversations/${conversation_id}`).set({
           last_message: message_text,
           last_message_sender: 'agent',
@@ -2473,7 +2544,15 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
 
   } catch (err) {
     console.error('Error in agent send message:', err.response?.data?.error?.message || err.message);
-    const metaErrorObj = err.response?.data?.error; const isClosedWhatsAppWindow = metaErrorObj?.code === 131047 || /re-engagement message/i.test(String(metaErrorObj?.message || err.message || ""));
+    const metaErrorObj = err.response?.data?.error;
+
+    // Meta rejects free-form text after the 24-hour customer-service window
+    // with error 131047 ("Re-engagement message").  Treat this as a
+    // non-retryable, actionable state instead of surfacing Meta's raw text
+    // and offering a retry that will fail again.  The advisor must either
+    // wait for the customer to write again or use an approved template.
+    const isClosedWhatsAppWindow = metaErrorObj?.code === 131047
+      || /re-engagement message/i.test(String(metaErrorObj?.message || err.message || ''));
 
     if (dedupDocRef) {
       try {
@@ -2485,7 +2564,17 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
       } catch (e) {}
     }
 
-    if (isClosedWhatsAppWindow) { return res.status(409).json({ success: false, error_code: 'WHATSAPP_WINDOW_CLOSED', retryable: false, requires_template: true, error: 'La ventana de atención de WhatsApp está cerrada. El cliente debe escribir primero o debes usar una plantilla aprobada por Meta.' }); } return res.status(500).json({
+    if (isClosedWhatsAppWindow) {
+      return res.status(409).json({
+        success: false,
+        error_code: 'WHATSAPP_WINDOW_CLOSED',
+        retryable: false,
+        requires_template: true,
+        error: 'La ventana de atención de WhatsApp está cerrada. El cliente debe escribir primero o debes usar una plantilla aprobada por Meta.'
+      });
+    }
+
+    return res.status(500).json({
       success: false,
       error: metaErrorObj?.message || err.message
     });
