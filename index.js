@@ -1829,13 +1829,13 @@ function buildSprMissingRequestReply(missingFields, source = '') {
   return `${intro}
 ${directQuestion}
 
-Para buscarla correctamente solo me falta: *${readable}*.
-Compárteme ese dato y te respondo con la pieza, precio y enlace del catálogo.
 
-Puedes elegir una opción:
-1️⃣ Completar los datos: *pieza, marca, modelo y año*.
-2️⃣ Describir la pieza si no conoces su nombre exacto.
-3️⃣ Escribir *asesor* para que una persona revise tu caso.`;
+Para afinar compatibilidad y darte la cotización con *precio, foto y enlace*, compárteme: *${readable}*.
+
+Si no conoces alguno, describe la pieza con tus propias palabras y revisaré las opciones relacionadas.
+
+
+`;
 }
 
 // Once a conversation is handed to an advisor, a short acknowledgement such
@@ -3003,7 +3003,7 @@ Incluye:
       const asksCatalogProduct = !isShopifyPrefillIntro
         && !vehicleOnlyCatalogContext
         && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera|carroceria)\b/.test(lowerText) || SPR_EXPLICIT_PART_PATTERN.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText) || (catalogContextText !== messageText && isSprLikelyPieceFollowUp(messageText)));
-      let sprCatalogReply = '';
+      let sprCatalogReply = ''; let sprCatalogMatched = false;
       if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
           let catalogItems = await getSprEngineCatalog();
@@ -3036,7 +3036,7 @@ Incluye:
           if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
             sprMatches = findSprCatalogRecoveryMatches(catalogItems, catalogQueryText);
           }
-          const aldoStockResult = isAldoStockCategoryQuery(catalogQueryText)
+          sprCatalogMatched = sprMatches.length > 0; const aldoStockResult = isAldoStockCategoryQuery(catalogQueryText)
             ? await searchAldoStock(catalogQueryText)
             : null;
           sprCatalogReply = buildSprCatalogReply(sprMatches, catalogLowerText, catalogItems, aldoStockResult);
@@ -3047,7 +3047,7 @@ Incluye:
 
       if (isShopifyPrefillIntro) {
         botReply = `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo.\n\nPara buscar correctamente en el catálogo, escríbeme *solo estos cuatro datos* en un mismo mensaje:\n🔧 Pieza\n🚗 Marca\n🚙 Modelo\n📅 Año\n\nEjemplo: *faro derecho Nissan Versa 2017*.`;
-      } else if (sprMissingRequestReply) {
+      } else if (sprMissingRequestReply && !sprCatalogMatched) {
         botReply = sprMissingRequestReply;
       } else if (vehicleContextReply) {
         botReply = vehicleContextReply;
