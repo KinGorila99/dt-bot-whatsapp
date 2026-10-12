@@ -1766,6 +1766,27 @@ function isIncompleteSprCatalogRequest(value) {
   return /\b(precio|precios|cuanto|cuesta|costo|cotizacion|cotizar|cotiza|disponible|disponibilidad|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|principal|niebla|antiniebla)\b/.test(query);
 }
 
+// A concrete SPR request that survives the complete catalog/search pass but
+// has no confirmed product must go to an advisor. It must not fall back to a
+// repeated request for the same vehicle fields.
+function shouldRouteSprCatalogToAdvisor({
+  isSprAutopartesTenant = false,
+  asksCatalogProduct = false,
+  sprCatalogMatched = false,
+  missingRequestReply = '',
+  query = '',
+  yearConfirmationReply = ''
+} = {}) {
+  return Boolean(
+    isSprAutopartesTenant
+    && asksCatalogProduct
+    && !sprCatalogMatched
+    && !String(missingRequestReply || '').trim()
+    && !String(yearConfirmationReply || '').trim()
+    && !isGenericSprCatalogRequest(query)
+  );
+}
+
 function getSprMissingRequestFields(value) {
   const query = canonicalizeSprPartSynonyms(value);
   // Greetings and courtesy are conversational turns, never incomplete vehicle
@@ -2715,6 +2736,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
     // "gracias" with the human advisor.
     if (companyId === SPR_COMPANY_ID && !botPausedByOwner
       && (convData.human_handoff === true || convData.bot_enabled === false)
+      && convData.catalog_review_required !== true
       && isSprNewRequestOrQuestion(messageText)) {
       convData.human_handoff = false;
       convData.bot_enabled = true;
@@ -3047,6 +3069,43 @@ Incluye:
 
       if (isShopifyPrefillIntro) {
         botReply = `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo.\n\nPara buscar correctamente en el catálogo, escríbeme *solo estos cuatro datos* en un mismo mensaje:\n🔧 Pieza\n🚗 Marca\n🚙 Modelo\n📅 Año\n\nEjemplo: *faro derecho Nissan Versa 2017*.`;
+      } else if (shouldRouteSprCatalogToAdvisor({
+        isSprAutopartesTenant,
+        asksCatalogProduct,
+        sprCatalogMatched,
+        missingRequestReply: sprMissingRequestReply,
+        query: catalogQueryText
+      })) {
+        convData.human_handoff = true;
+        convData.bot_enabled = false;
+        convData.status = 'pending';
+        convData.auto_reactivate_enabled = false;
+        convData.human_handoff_started_at = convData.human_handoff_started_at || timestamp;
+        convData.handoff_reason = 'catalog_no_exact_match';
+        convData.catalog_review_required = true;
+        convData.catalog_review_reason = 'no_exact_match_after_all_filters';
+        convData.catalog_review_query = messageText;
+        convData.needs_human_review = true;
+        convData.review_requested_at = timestamp;
+        botReply = buildSprAdvisorReviewReply(customerName);
+
+        const taskId = createUniqueId('task');
+        const taskData = {
+          id: taskId,
+          company_id: companyId,
+          lead_id: leadId,
+          lead_nombre: customerName,
+          titulo: `Verificar pieza sin coincidencia exacta de ${customerName}`,
+          tipo: 'whatsapp',
+          fecha_limite: new Date().toISOString(),
+          prioridad: 'Urgente',
+          completada: false,
+          fecha_creacion: timestamp,
+          nota: `Se agotaron los filtros del catálogo sin coincidencia confirmable. Revisar manualmente antes de cotizar. Mensaje: "${messageText}"`
+        };
+        try {
+          await db.doc(`followups/${taskId}`).set(taskData);
+        } catch (e) {}
       } else if (sprMissingRequestReply && !sprCatalogMatched) {
         botReply = sprMissingRequestReply;
       } else if (vehicleContextReply) {
@@ -3899,6 +3958,7 @@ module.exports = {
   isSprLikelyPieceFollowUp,
   isUnlistedSprProductRequest,
   isIncompleteSprCatalogRequest,
+  shouldRouteSprCatalogToAdvisor,
   getSprMissingRequestFields,
   buildSprMissingRequestReply,
   isSprNewRequestOrQuestion,
