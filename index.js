@@ -15,6 +15,7 @@ const admin = require('firebase-admin');
 const app = express();
 const PORT = process.env.PORT || 5000;
 const WEBHOOK_BODY_LIMIT = process.env.WEBHOOK_BODY_LIMIT || '1mb';
+const SERVER_STARTED_AT = new Date().toISOString();
 
 // Capture raw body for Meta HMAC-SHA256 signature verification
 app.use(cors());
@@ -1979,6 +1980,13 @@ app.get('/', (req, res) => {
 
 app.get('/health', (req, res) => {
   res.status(200).send('OK');
+});
+
+app.get('/version', (req, res) => {
+  res.json({
+    git_commit: process.env.RENDER_GIT_COMMIT || 'unknown',
+    started_at: SERVER_STARTED_AT
+  });
 });
 
 app.get('/api/status', (req, res) => {
