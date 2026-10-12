@@ -22,7 +22,11 @@ const {
   buildSprMissingRequestReply,
   buildSprCatalogContext,
   isSprLikelyPieceFollowUp,
-  buildSprCatalogReply
+  buildSprCatalogReply,
+  buildSprCatalogFallbackReply,
+  findSprCatalogRecoveryMatches,
+  findSprEngineMatches,
+  normalizeSprProduct
 } = require('../index.js');
 Module._load = originalLoad;
 
@@ -79,15 +83,73 @@ const completePieceReply = buildSprCatalogReply([
     regularPrice: 1740,
     offerPrice: 1740,
     available: true,
-    url: 'https://sprautopartes.mx/products/faro-derecho-nissan-versa-2020'
+    url: 'https://sprautopartes.mx/products/faro-derecho-nissan-versa-2020',
+    image: 'https://cdn.shopify.com/s/files/1/0000/products/faro-versa.jpg'
   }
 ], 'faro versa 2020');
 if (completePieceVehicleFields.length
   || !/precio normal/i.test(completePieceReply)
   || !/\$1,740\.00/.test(completePieceReply)
   || !/https:\/\/sprautopartes\.mx\/products\/faro-derecho-nissan-versa-2020/.test(completePieceReply)
+  || !/🖼️ Foto y detalles: https:\/\/cdn\.shopify\.com/i.test(completePieceReply)
   || /asesor/i.test(completePieceReply)) {
   failures.push({ completePieceVehicleFields, completePieceReply });
+}
+
+const normalizedWithImage = normalizeSprProduct({
+  title: 'FARO DERECHO NISSAN VERSA 2020',
+  handle: 'faro-derecho-nissan-versa-2020',
+  price: '1740',
+  image: { src: 'https://cdn.shopify.com/s/files/1/0000/products/faro.jpg' }
+});
+if (normalizedWithImage.image !== 'https://cdn.shopify.com/s/files/1/0000/products/faro.jpg') {
+  failures.push({ normalizedWithImage });
+}
+
+const recoveryCatalog = [
+  normalizeSprProduct({
+    title: 'FARO DERECHO NISSAN VERSA 2015-2019 TYC',
+    handle: 'faro-derecho-nissan-versa-2015',
+    price: 1740,
+    tags: 'NISSAN VERSA 2015 2019'
+  }),
+  normalizeSprProduct({
+    title: 'ESPEJO DERECHO NISSAN VERSA 2015-2019',
+    handle: 'espejo-derecho-nissan-versa-2015',
+    price: 900,
+    tags: 'NISSAN VERSA 2015 2019'
+  })
+];
+const recoveryMatches = findSprCatalogRecoveryMatches(recoveryCatalog, 'faro derecho nissan versa 2020');
+if (!recoveryMatches.length || !/faro/i.test(recoveryMatches[0].title) || /espejo/i.test(recoveryMatches[0].title)) {
+  failures.push({ recoveryMatches: recoveryMatches.map(item => item.title) });
+}
+
+const orientationCatalog = [
+  normalizeSprProduct({
+    title: 'PUERTA TRASERA DERECHA MITSUBISHI MIRAGE 2015-2018',
+    handle: 'puerta-trasera-derecha-mirage',
+    price: 7062,
+    tags: 'MITSUBISHI MIRAGE 2015 2018'
+  }),
+  normalizeSprProduct({
+    title: 'PUERTA TRASERA IZQUIERDA MITSUBISHI MIRAGE 2015-2018',
+    handle: 'puerta-trasera-izquierda-mirage',
+    price: 7062,
+    tags: 'MITSUBISHI MIRAGE 2015 2018'
+  })
+];
+const orientationMatches = findSprEngineMatches(
+  orientationCatalog,
+  'puerta trasera lado copiloto Mitsubishi Mirage 2015 hatchback'
+);
+if (orientationMatches.length !== 1 || !/derecha/i.test(orientationMatches[0].title)) {
+  failures.push({ orientationMatches: orientationMatches.map(item => item.title) });
+}
+
+const fallbackReply = buildSprCatalogFallbackReply('puerta Mitsubishi Mirage 2015');
+if (!/precio, foto y enlace/i.test(fallbackReply) || /no tenemos|asesor|lo voy a buscar/i.test(fallbackReply)) {
+  failures.push({ fallbackReply });
 }
 
 const genericVehicleCases = [
@@ -119,7 +181,7 @@ for (const piece of ['CLAXON', 'BOMBA DE AGUA', 'SENSOR ABS']) {
   }
 }
 
-const total = cases.length + 3 + 3 + 3 + genericVehicleCases.length + 1 + 3;
+const total = cases.length + 3 + 3 + 3 + genericVehicleCases.length + 1 + 3 + 6;
 console.log(`SPR handoff regressions: ${total - failures.length}/${total} passed`);
 if (failures.length) {
   console.error(JSON.stringify(failures, null, 2));
