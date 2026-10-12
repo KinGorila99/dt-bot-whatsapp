@@ -9,6 +9,7 @@ const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
 const fs = require('fs');
+const path = require('path');
 const admin = require('firebase-admin');
 
 const app = express();
@@ -70,12 +71,12 @@ const TENANT_SAFE_ONBOARDING_POLICY = Object.freeze({
   no_cross_tenant_content: true
 });
 
-// Owner-requested safety pause while the SPR CRM outbound path is being
-// repaired. Inbound messages and CRM history continue to be recorded, but
-// this tenant must not receive an automatic bot reply until the pause is
-// explicitly removed. DT Marketing is intentionally not included.
+// Optional per-tenant pause. The SPR bot is active by default now that the
+// outbound CRM path and the October catalog are ready. A pause can still be
+// requested explicitly through PAUSED_BOT_COMPANIES without affecting other
+// tenants such as DT Marketing.
 const PAUSED_BOT_COMPANIES = new Set(
-  String(process.env.PAUSED_BOT_COMPANIES || 'comp_1787600762092')
+  String(process.env.PAUSED_BOT_COMPANIES || '')
     .split(',')
     .map(value => value.trim())
     .filter(Boolean)
@@ -273,10 +274,10 @@ function stripSprVehicleDetailLines(value) {
     .join('\n');
 }
 
-const SPR_EXPLICIT_PART_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carrocer[ií]a)\b/i;
+const SPR_EXPLICIT_PART_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|bieleta(?:s)?|balero(?:s)?|maza(?:s)?|homocin[eé]tica(?:s)?|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|salpicadera(?:s)?|carrocer[ií]a)\b/i;
 
 function hasSprExplicitPartRequest(value) {
-  const query = normalizeBotText(stripSprVehicleDetailLines(value));
+  const query = normalizeSprCatalogText(normalizeBotText(stripSprVehicleDetailLines(value)));
   return SPR_EXPLICIT_PART_PATTERN.test(query) || isUnlistedSprProductRequest(query);
 }
 
@@ -310,7 +311,43 @@ const SPR_CATALOG_TERM_ALIASES = new Map([
   ['faccia', 'fascia'],
   ['kickn', 'kicks'],
   ['kiccks', 'kicks'],
-  ['kikcs', 'kicks']
+  ['kikcs', 'kicks'],
+  ['amort', 'amortiguador'],
+  ['amorts', 'amortiguador'],
+  ['shock', 'amortiguador'],
+  ['shocks', 'amortiguador'],
+  ['strut', 'amortiguador'],
+  ['struts', 'amortiguador'],
+  ['pierna', 'amortiguador'],
+  ['piernas', 'amortiguador'],
+  ['canilla', 'bieleta'],
+  ['canillas', 'bieleta'],
+  ['link', 'bieleta'],
+  ['links', 'bieleta'],
+  ['bielita', 'bieleta'],
+  ['bearing', 'balero'],
+  ['bearings', 'balero'],
+  ['rodamiento', 'balero'],
+  ['rodamientos', 'balero'],
+  ['hub', 'maza'],
+  ['hubs', 'maza'],
+  ['homocinetica', 'balero'],
+  ['homocineticas', 'balero'],
+  ['headlamp', 'faro'],
+  ['headlamps', 'faro'],
+  ['stop', 'calavera'],
+  ['stops', 'calavera'],
+  ['bumper', 'defensa'],
+  ['bumpers', 'defensa'],
+  ['retrovisor', 'espejo'],
+  ['retrovisores', 'espejo'],
+  ['tijera', 'suspension'],
+  ['tijeras', 'suspension'],
+  ['bandeja', 'suspension'],
+  ['bandejas', 'suspension'],
+  ['cacahuate', 'cajuela'],
+  ['cachahuate', 'cajuela'],
+  ['cajuela', 'cajuela']
 ]);
 
 function normalizeSprCatalogText(value) {
@@ -410,7 +447,11 @@ const SPR_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_CATALOG_TTL_MS
 // product matching; the public Shopify search remains a compatibility fallback
 // until the digital catalog is configured.
 const SPR_DIGITAL_CATALOG_URL = String(process.env.SPR_DIGITAL_CATALOG_URL || '').trim();
-const SPR_DIGITAL_CATALOG_FILE = String(process.env.SPR_DIGITAL_CATALOG_FILE || '').trim();
+const DEFAULT_SPR_DIGITAL_CATALOG_FILE = path.join(__dirname, 'spr_catalog_october_2026.json');
+const SPR_DIGITAL_CATALOG_FILE = String(
+  process.env.SPR_DIGITAL_CATALOG_FILE
+    || (fs.existsSync(DEFAULT_SPR_DIGITAL_CATALOG_FILE) ? DEFAULT_SPR_DIGITAL_CATALOG_FILE : '')
+).trim();
 const SPR_DIGITAL_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_DIGITAL_CATALOG_TTL_MS || 300000));
 // Shopify product titles usually omit trim/package words that customers include
 // in natural language (for example, "GL" or "Mind"). Keep the vehicle model,
@@ -539,6 +580,8 @@ function normalizeSprProduct(product) {
     ? variants.some(item => item.available !== false)
     : product?.available !== false;
   const handle = String(product?.handle || '').trim();
+  const sku = String(variant.sku || product?.sku || product?.codigo || product?.code || '').replace(/^'+/, '').trim();
+  const productUrl = String(product?.url || product?.product_url || product?.link || '').trim();
   return {
     id: product?.id || handle,
     title,
@@ -548,11 +591,12 @@ function normalizeSprProduct(product) {
     tags,
     description: stripSprHtml(product?.body_html),
     available,
+    sku,
     regularPrice,
     offerPrice: hasSeptemberOffer ? offerPrice : currentPrice,
     hasSeptemberOffer,
     discountEligible,
-    url: handle ? 'https://sprautopartes.mx/products/' + handle : 'https://sprautopartes.mx/collections/spr-engine-series'
+    url: productUrl || (handle ? 'https://sprautopartes.mx/products/' + handle : 'https://sprautopartes.mx/collections/spr-engine-series')
   };
 }
 
@@ -614,14 +658,22 @@ function normalizeDigitalCatalogRow(row) {
   const title = String(
     source.title || source.name || source.product_name || source.nombre || source.descripcion_corta || ''
   ).trim();
-  const price = source.price ?? source.precio ?? source.precio_normal ?? source.regular_price ?? source.sale_price ?? '';
-  const compareAtPrice = source.compare_at_price ?? source.precio_lista ?? source.precio_regular ?? '';
-  const availableValue = source.available ?? source.disponible ?? source.in_stock ?? source.existencia;
+  const price = source.price ?? source.precio ?? source.precio_normal ?? source.regular_price ?? source.sale_price
+    ?? source.variant_price ?? source['Variant Price'] ?? '';
+  const compareAtPrice = source.compare_at_price ?? source.precio_lista ?? source.precio_regular
+    ?? source.variant_compare_at_price ?? source['Variant Compare At Price'] ?? '';
+  const availableValue = source.available ?? source.disponible ?? source.in_stock ?? source.existencia
+    ?? source.variant_available ?? source['Variant Available'];
+  const sku = String(
+    source.sku || source.codigo || source.code || source.clave || source.variant_sku || source['Variant SKU'] || ''
+  ).replace(/^'+/, '').trim();
+  const explicitUrl = String(source.url || source.product_url || source.link || source.productUrl || '').trim();
   const variants = Array.isArray(source.variants) && source.variants.length
     ? source.variants
     : [{
       price,
       compare_at_price: compareAtPrice,
+      sku,
       available: availableValue === '' || availableValue === null || availableValue === undefined
         ? true
         : !['false', '0', 'no', 'agotado', 'sin existencia'].includes(normalizeBotText(availableValue))
@@ -638,18 +690,28 @@ function normalizeDigitalCatalogRow(row) {
     source.model,
     source.año,
     source.year,
+    source.compatibility,
+    source.compatibilidad,
+    source.vehicle_make,
+    source.vehicle_model,
+    source.year_start,
+    source.year_end,
+    sku,
     source.categoria,
-    source.category
+    source.category,
+    source.description,
+    source.descripcion
   ].flatMap(value => Array.isArray(value) ? value : [value]).filter(Boolean).join(' ');
   return normalizeSprProduct({
     ...source,
-    id: source.id || source.sku || source.codigo || source.clave,
+    id: source.id || sku,
     title,
     vendor: source.vendor || source.brand || source.marca || 'SPR Autopartes',
     product_type: source.product_type || source.category || source.categoria || '',
     tags: rowTags,
     body_html: source.body_html || source.description || source.descripcion || '',
     handle: source.handle || source.slug || '',
+    url: explicitUrl,
     variants
   });
 }
@@ -778,7 +840,8 @@ function findSprEngineMatches(items, lowerText) {
     { key: 'motor', pattern: /\bmotor(?:es)?\b/ },
     { key: 'cabeza', pattern: /\b(cabeza(?:s)?|culata(?:s)?)\b/ },
     { key: 'amortiguador', pattern: /\bamortiguador(?:es)?\b/ },
-    { key: 'suspension', pattern: /\bsuspension\b/ },
+    { key: 'suspension', pattern: /\b(suspension|bieleta)\b/ },
+    { key: 'balero', pattern: /\b(balero|maza|homocin[eé]tica)\b/ },
     { key: 'freno', pattern: /\b(freno(?:s)?|balata(?:s)?|pastilla(?:s)?)\b/ },
     { key: 'aceite', pattern: /\b(aceite(?:s)?|lubricante(?:s)?|motul|valvoline|pentosin)\b/ },
     { key: 'direccion', pattern: /\b(direccion|terminal|rotula|caja de direccion)\b/ },
@@ -789,11 +852,44 @@ function findSprEngineMatches(items, lowerText) {
     { key: 'soporte', pattern: /\bsoporte(?:s)?\b/ },
     { key: 'iluminacion', pattern: /\b(faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?)\b/ },
     { key: 'colision', pattern: /\b(guia(?:s)?|fascia(?:s)?|moldura(?:s)?|defensa(?:s)?|parrilla(?:s)?|cofre|salpicadera(?:s)?)\b/ },
-    { key: 'carroceria', pattern: /\b(parrilla(?:s)?|defensa(?:s)?|cofre|salpicadera(?:s)?|carroceria)\b/ }
+    { key: 'carroceria', pattern: /\b(parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|salpicadera(?:s)?|carroceria)\b/ }
   ];
   const requestedCategory = categoryRules.find(rule => rule.pattern.test(normalizedQuery));
+  // A broad family (for example, “iluminación” or “colisión”) is not enough
+  // to answer a concrete request. Keep the requested part itself as a hard
+  // constraint so a calavera cannot be replaced with an espejo, or a cajuela
+  // with a salpicadera just because they share a catalog family.
+  const requestedPartPatterns = [
+    { key: 'motor', pattern: /\bmotor(?:es)?\b/ },
+    { key: 'cabeza', pattern: /\b(cabeza(?:s)?|culata(?:s)?)\b/ },
+    { key: 'amortiguador', pattern: /\bamortiguador(?:es)?\b/ },
+    { key: 'bieleta', pattern: /\bbieleta(?:s)?\b/ },
+    { key: 'balero', pattern: /\b(balero(?:s)?|maza(?:s)?|homocin[eé]tica(?:s)?)\b/ },
+    { key: 'calavera', pattern: /\bcalavera(?:s)?\b/ },
+    { key: 'faro', pattern: /\bfaro(?:s)?\b/ },
+    { key: 'espejo', pattern: /\bespejo(?:s)?\b/ },
+    { key: 'fascia', pattern: /\bfascia(?:s)?\b/ },
+    { key: 'guia', pattern: /\bgu[ií]a(?:s)?\b/ },
+    { key: 'moldura', pattern: /\bmoldura(?:s)?\b/ },
+    { key: 'parrilla', pattern: /\bparrilla(?:s)?\b/ },
+    { key: 'defensa', pattern: /\bdefensa(?:s)?\b/ },
+    { key: 'cofre', pattern: /\bcofre\b/ },
+    { key: 'cajuela', pattern: /\bcajuela\b/ },
+    { key: 'salpicadera', pattern: /\bsalpicadera(?:s)?\b/ },
+    { key: 'puerta', pattern: /\bpuerta(?:s)?\b/ },
+    { key: 'radiador', pattern: /\bradiador(?:es)?\b/ },
+    { key: 'bomba', pattern: /\bbomba(?:s)?\b/ },
+    { key: 'turbo', pattern: /\bturbo(?:s)?\b/ },
+    { key: 'embrague', pattern: /\b(embrague|clutch)\b/ },
+    { key: 'direccion', pattern: /\b(direccion|terminal(?:es)?|rotula(?:s)?)\b/ }
+  ].filter(({ pattern }) => pattern.test(normalizedQuery));
   const requestedYears = [...normalizedQuery.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => Number(match[0]));
-  const requestedOrientation = normalizedQuery.match(/\b(izquierdo|izquierda|derecho|derecha|delantero|delantera|trasero|trasera)\b/)?.[1] || '';
+  // Prefer the side (left/right) over the position (front/rear). A query such
+  // as “puerta delantera izquierda” must never return the right-hand part just
+  // because “delantera” appears first.
+  const requestedOrientations = [...normalizedQuery.matchAll(/\b(izquierdo|izquierda|derecho|derecha|delantero|delantera|trasero|trasera)\b/g)]
+    .map(match => match[1])
+    .filter((value, index, values) => values.indexOf(value) === index);
   const negativeFogRequest = /\b(?:no|sin|evitar|ningun|ninguna)\b(?:\s+\w+){0,8}\s+(?:faro\s+de\s+)?niebla\b/.test(normalizedQuery);
   const asksFogLight = !negativeFogRequest && /\b(?:faro\s+de\s+niebla|niebla|antiniebla)\b/.test(normalizedQuery);
   const asksMainLight = !asksFogLight && /\b(?:faro|faros|principal|delantero|delantera)\b/.test(normalizedQuery);
@@ -821,13 +917,15 @@ function findSprEngineMatches(items, lowerText) {
     return requestedYears.some(year => explicitYears.includes(year) || ranges.some(([start, end]) => year >= Math.min(start, end) && year <= Math.max(start, end)));
   };
   const itemMatchesRequestedOrientation = item => {
-    if (!requestedOrientation) return true;
+    if (!requestedOrientations.length) return true;
     const title = item.normalizedTitle || '';
-    if (requestedOrientation.startsWith('izquier')) return /\bizquierd[oa]\b/.test(title);
-    if (requestedOrientation.startsWith('derech')) return /\bderech[oa]\b/.test(title);
-    if (requestedOrientation.startsWith('delanter')) return /\b(?:delanter[oa]|frontal)\b/.test(title);
-    if (requestedOrientation.startsWith('traser')) return /\btraser[oa]\b/.test(title);
-    return true;
+    return requestedOrientations.every(requestedOrientation => {
+      if (requestedOrientation.startsWith('izquier')) return /\bizquierd[oa]\b/.test(title);
+      if (requestedOrientation.startsWith('derech')) return /\bderech[oa]\b/.test(title);
+      if (requestedOrientation.startsWith('delanter')) return /\b(?:delanter[oa]|frontal)\b/.test(title);
+      if (requestedOrientation.startsWith('traser')) return /\btraser[oa]\b/.test(title);
+      return true;
+    });
   };
   const scored = items.map(item => {
     let score = 0;
@@ -872,7 +970,7 @@ function findSprEngineMatches(items, lowerText) {
     relevant = yearMatches;
   }
 
-  if (requestedOrientation) {
+  if (requestedOrientations.length) {
     const orientationMatches = relevant.filter(row => itemMatchesRequestedOrientation(row.item));
     if (!orientationMatches.length) return [];
     relevant = orientationMatches;
@@ -882,6 +980,12 @@ function findSprEngineMatches(items, lowerText) {
     const lightingMatches = relevant.filter(row => asksFogLight ? itemHasFogLight(row.item) : !itemHasFogLight(row.item));
     if (!lightingMatches.length) return [];
     relevant = lightingMatches;
+  }
+
+  if (requestedPartPatterns.length) {
+    const exactPartMatches = relevant.filter(row => requestedPartPatterns.every(({ pattern }) => pattern.test(row.haystack)));
+    if (!exactPartMatches.length) return [];
+    relevant = exactPartMatches;
   }
 
   // Every meaningful make/model token must appear in the same product. A
@@ -1702,6 +1806,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
     }
     const catalogContextText = buildSprCatalogContext(recentCustomerMessages, messageText);
 
+    const botPausedByOwner = PAUSED_BOT_COMPANIES.has(String(companyId));
     if (!convData) {
       convData = {
         id: convId,
@@ -1744,6 +1849,24 @@ app.post('/webhook/whatsapp', async (req, res) => {
       convData.last_message_at = timestamp;
       convData.updated_at = timestamp;
       convData.unread_count = (convData.unread_count || 0) + 1;
+    }
+
+    // The previous emergency pause marked existing SPR conversations for
+    // human review. Once the explicit pause is removed, the next customer
+    // message resumes only that owner-pause state; other advisor handoffs
+    // remain untouched and still require the normal idle timeout.
+    if (!botPausedByOwner && convData.handoff_reason === 'bot_paused_by_owner') {
+      convData.human_handoff = false;
+      convData.bot_enabled = true;
+      convData.status = 'active';
+      convData.auto_reactivate_enabled = true;
+      convData.human_handoff_started_at = null;
+      convData.needs_human_review = false;
+      convData.review_requested_at = null;
+      convData.handoff_reason = null;
+      convData.auto_reactivated_at = timestamp;
+      convData.auto_reactivation_reason = 'owner_pause_removed';
+      console.log('🤖 [Owner Pause Removed] Conversation [' + convId + '] resumed for the reactivated SPR bot.');
     }
 
     // 4. Save Inbound Message
@@ -1829,8 +1952,6 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const tenantDisplayName = String(
       tenantCompany?.nombre || botSettings?.business_name || botSettings?.business_description || 'nuestro negocio'
     ).trim();
-
-    const botPausedByOwner = PAUSED_BOT_COMPANIES.has(String(companyId));
 
     // Check for Human Handoff Intent
     const lowerText = normalizeBotText(messageText);
@@ -1976,7 +2097,11 @@ Incluye:
         botSettings?.bot_name || (isSprAutopartesTenant ? 'SPR BOT' : 'asistente virtual')
       ).trim();
       const catalogQueryText = catalogContextText || messageText;
-      const catalogLowerText = normalizeBotText(catalogQueryText);
+      // Normalize colloquial spellings before every stage of the lookup. The
+      // same canonical query must reach matching, strict vehicle filters and
+      // the final reply; otherwise “facia”, “amort” or “retrovisor” could
+      // match in the first pass and then be discarded by the second one.
+      const catalogLowerText = normalizeSprCatalogText(catalogQueryText);
       const sprVehicleDetails = isSprAutopartesTenant
         ? extractSprVehicleDetails(catalogQueryText)
         : {};
