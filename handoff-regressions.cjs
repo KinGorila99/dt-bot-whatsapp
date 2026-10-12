@@ -50,6 +50,13 @@ if (!/asesor/i.test(advisorReply) || !/pausadas/i.test(advisorReply) || /no tene
   failures.push({ advisorReply });
 }
 
+for (const conversationalTurn of ['HOLA', 'Buenos días', 'Gracias, te agradezco']) {
+  const fields = getSprMissingRequestFields(conversationalTurn);
+  if (fields.length || buildSprMissingRequestReply(fields, conversationalTurn)) {
+    failures.push({ conversationalTurn, fields });
+  }
+}
+
 const missing = getSprMissingRequestFields('SENTRA 2018');
 const missingReply = buildSprMissingRequestReply(missing, 'SENTRA 2018');
 if (missing.join('|') !== 'pieza|marca'
@@ -93,7 +100,7 @@ for (const piece of ['CLAXON', 'BOMBA DE AGUA', 'SENSOR ABS']) {
   }
 }
 
-const total = cases.length + 3 + genericVehicleCases.length + 1 + 3;
+const total = cases.length + 3 + 3 + genericVehicleCases.length + 1 + 3;
 console.log(`SPR handoff regressions: ${total - failures.length}/${total} passed`);
 if (failures.length) {
   console.error(JSON.stringify(failures, null, 2));

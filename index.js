@@ -1386,6 +1386,10 @@ function isIncompleteSprCatalogRequest(value) {
 
 function getSprMissingRequestFields(value) {
   const query = canonicalizeSprPartSynonyms(value);
+  // Greetings and courtesy are conversational turns, never incomplete vehicle
+  // profiles. Keep them ahead of catalog heuristics so "Hola" cannot be
+  // treated as a model that is missing a piece, brand, or year.
+  if (isFriendlyGreetingText(query) || isCourtesyText(query)) return [];
   if (isUnlistedSprProductRequest(query) && !SPR_CATALOG_CONTEXT_PATTERN.test(query)) return [];
   const hasPart = hasSprExplicitPartRequest(query);
   const hasMake = [...SPR_VEHICLE_MAKES].some(make => new RegExp(`\\b${escapeSprRegex(make)}\\b`, 'i').test(query));
