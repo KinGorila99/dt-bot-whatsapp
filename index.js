@@ -1871,7 +1871,7 @@ function isUnlistedSprProductRequest(value) {
   const purchaseIntent = /\b(busco|buscando|necesito|ocupo|quiero|tienen|tendrian|tendran|hay|venden|manejan|consiguen|cotizar|cotizacion)\b/.test(query);
   const automotiveContext = /\b(carro|auto|vehiculo|coche|tienda|refaccion|refacciones|pieza|producto|articulo|accesorio|rayon|rayones|compatibilidad)\b/.test(query);
   if (!purchaseIntent || !automotiveContext || SPR_CATALOG_CONTEXT_PATTERN.test(query)) return false;
-    const hasKnownPart = /\b(?:base de amortiguador|junta homocinetica|caja de direccion|soporte de motor|amortiguador|bieleta|terminal|rotula|balero|maza|flecha|faro|calavera|fascia|espejo|embrague|tornillo)\b/.test(query); if (hasKnownPart) return true; const residual = query
+      const residual = query = /\b(?:base de amortiguador|junta homocinetica|caja de direccion|soporte de motor|amortiguador|bieleta|terminal|rotula|balero|maza|flecha|faro|calavera|fascia|espejo|embrague|tornillo)\b/.test(query); if (hasKnownPart) return true; const residual = query
     .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
     .replace(/\s+/g, ' ')
     .trim();
