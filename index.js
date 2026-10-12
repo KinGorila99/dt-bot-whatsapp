@@ -71,12 +71,11 @@ const TENANT_SAFE_ONBOARDING_POLICY = Object.freeze({
   no_cross_tenant_content: true
 });
 
-// Optional per-tenant pause. The SPR bot is active by default now that the
-// outbound CRM path and the October catalog are ready. A pause can still be
-// requested explicitly through PAUSED_BOT_COMPANIES without affecting other
-// tenants such as DT Marketing.
+// Per-tenant pause. SPR remains paused by default until the owner explicitly
+// reactivates it. An environment value can add or replace paused tenants
+// without affecting other tenants such as DT Marketing.
 const PAUSED_BOT_COMPANIES = new Set(
-  String(process.env.PAUSED_BOT_COMPANIES || '')
+  String(process.env.PAUSED_BOT_COMPANIES || 'comp_1787600762092')
     .split(',')
     .map(value => value.trim())
     .filter(Boolean)
