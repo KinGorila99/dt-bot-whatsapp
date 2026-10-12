@@ -1,4 +1,4 @@
-SPR_EXPLICIT_PART_PATTERN/**
+/**
  * DT Bot Core & DT CRM Core — Production WhatsApp Cloud API Server
  * Built by DT Marketing
  */
