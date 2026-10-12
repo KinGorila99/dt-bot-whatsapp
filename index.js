@@ -2473,7 +2473,7 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
 
   } catch (err) {
     console.error('Error in agent send message:', err.response?.data?.error?.message || err.message);
-    const metaErrorObj = err.response?.data?.error;
+    const metaErrorObj = err.response?.data?.error; const isClosedWhatsAppWindow = metaErrorObj?.code === 131047 || /re-engagement message/i.test(String(metaErrorObj?.message || err.message || ""));
 
     if (dedupDocRef) {
       try {
@@ -2485,7 +2485,7 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
       } catch (e) {}
     }
 
-    return res.status(500).json({
+    if (isClosedWhatsAppWindow) { return res.status(409).json({ success: false, error_code: 'WHATSAPP_WINDOW_CLOSED', retryable: false, requires_template: true, error: 'La ventana de atención de WhatsApp está cerrada. El cliente debe escribir primero o debes usar una plantilla aprobada por Meta.' }); } return res.status(500).json({
       success: false,
       error: metaErrorObj?.message || err.message
     });
