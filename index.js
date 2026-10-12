@@ -608,7 +608,7 @@ const SPR_PART_SYNONYM_GROUPS = [
   { canonical: 'espejo', aliases: ['espejo', 'retrovisor', 'retrovisores'] },
   { canonical: 'soporte de motor', aliases: ['soporte de motor', 'base de motor', 'taco de motor'] },
   { canonical: 'embrague', aliases: ['embrague', 'clutch', 'repset'] },
-  { canonical: 'tornillo', aliases: ['tornillo', 'estabilizador', 'cacahuate', 'cachahuate', 'cachuate', 'cahuate', 'cacuate'] }
+  { canonical: 'tornillo', aliases: ['tornillo', 'estabilizador', 'cacahuate', 'cachahuate', 'cachuate', 'cahuate', 'cacuate'] }, { canonical: 'anticongelante', aliases: ['anticongelante', 'refrigerante', 'coolant'] }
 ];
 
 function escapeSprRegex(value) {
