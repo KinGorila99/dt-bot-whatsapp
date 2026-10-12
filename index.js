@@ -1289,6 +1289,11 @@ function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
     const normalized = normalizeBotText(value);
     return SPR_CATALOG_CONTEXT_PATTERN.test(normalized) && hasSprVehicleReference(normalized);
   });
+  const previousVehicleMessage = [...previous].reverse().find(value => {
+    const normalized = normalizeBotText(value);
+    return hasSprVehicleReference(normalized)
+      && (/\b(?:19|20)\d{2}\b/.test(normalized) || [...SPR_VEHICLE_MAKES].some(make => new RegExp(`\\b${escapeSprRegex(make)}\\b`, 'i').test(normalized)));
+  });
   const currentHasVehicle = hasSprVehicleReference(currentNormalized);
   const currentHasCatalogTerm = SPR_CATALOG_CONTEXT_PATTERN.test(currentNormalized)
     || SPR_CATALOG_REFINEMENT_PATTERN.test(currentNormalized)
@@ -1298,6 +1303,13 @@ function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
   // (for example: "faro de Versa 2017" -> "quiero el faro principal").
   if (previousCatalogMessage && currentHasCatalogTerm && !currentHasVehicle) {
     return previousCatalogMessage + ' ' + current;
+  }
+
+  // The first turn may contain only a model/year (for example, "Sentra
+  // 2018"), followed by the actual piece. Preserve that vehicle context so
+  // "faro derecho" becomes a searchable request instead of a dead end.
+  if (previousVehicleMessage && currentHasCatalogTerm && !currentHasVehicle) {
+    return previousVehicleMessage + ' ' + current;
   }
 
   if (previous.length && isFollowUpRefinement && SPR_CATALOG_CONTEXT_PATTERN.test(previousNormalized)) {
@@ -1317,6 +1329,58 @@ function isIncompleteSprCatalogRequest(value) {
   const query = canonicalizeSprPartSynonyms(value);
   if (SPR_CATALOG_CONTEXT_PATTERN.test(query)) return false;
   return /\b(precio|precios|cuanto|cuesta|costo|cotizacion|cotizar|cotiza|disponible|disponibilidad|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|principal|niebla|antiniebla)\b/.test(query);
+}
+
+function getSprMissingRequestFields(value) {
+  const query = canonicalizeSprPartSynonyms(value);
+  if (isUnlistedSprProductRequest(query) && !SPR_CATALOG_CONTEXT_PATTERN.test(query)) return [];
+  const hasPart = hasSprExplicitPartRequest(query);
+  const hasMake = [...SPR_VEHICLE_MAKES].some(make => new RegExp(`\\b${escapeSprRegex(make)}\\b`, 'i').test(query));
+  const hasYear = /\b(?:19|20)\d{2}\b/.test(query);
+  const hasModel = hasSprVehicleReference(query);
+  const hasVehicleClue = hasMake || hasModel || hasYear;
+  if (!hasVehicleClue) return [];
+  // A piece plus model and year is enough to attempt the catalog lookup. The
+  // make can be confirmed from the catalog (for example, "Sentra" implies
+  // the Nissan family in the supplied catalog); only ask for it after a
+  // failed search, rather than ending the conversation before searching.
+  if (hasPart && hasModel && hasYear) return [];
+  const missing = [];
+  if (!hasPart) missing.push('pieza');
+  if (!hasMake) missing.push('marca');
+  if (!hasModel) missing.push('modelo');
+  if (!hasYear) missing.push('año');
+  return missing;
+}
+
+function buildSprMissingRequestReply(missingFields, source = '') {
+  const fields = Array.isArray(missingFields) ? missingFields.filter(Boolean) : [];
+  if (!fields.length) return '';
+  const readable = fields.length === 1
+    ? fields[0]
+    : `${fields.slice(0, -1).join(', ')} y ${fields[fields.length - 1]}`;
+  const vehicleHint = normalizeBotText(source)
+    .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const intro = vehicleHint
+    ? `✅ Ya tengo registrado: *${vehicleHint.toUpperCase()}*.`
+    : '✅ Ya recibí parte de los datos.';
+  const directQuestion = fields.includes('pieza') && fields.includes('marca')
+    ? '¿Qué pieza necesitas y de qué marca es?'
+    : fields.includes('pieza')
+      ? '¿Qué pieza necesitas?'
+      : `¿Me compartes ${readable}?`;
+  return `${intro}
+${directQuestion}
+
+Para buscarla correctamente solo me falta: *${readable}*.
+Compárteme ese dato y te respondo con la pieza, precio y enlace del catálogo.
+
+Puedes elegir una opción:
+1️⃣ Completar los datos: *pieza, marca, modelo y año*.
+2️⃣ Describir la pieza si no conoces su nombre exacto.
+3️⃣ Escribir *asesor* para que una persona revise tu caso.`;
 }
 
 // Once a conversation is handed to an advisor, a short acknowledgement such
@@ -2368,6 +2432,10 @@ Incluye:
       const vehicleContextReply = vehicleOnlyCatalogContext
         ? buildSprVehicleConfirmationReply(sprVehicleDetails)
         : '';
+      const sprMissingRequestFields = isSprAutopartesTenant && !vehicleOnlyCatalogContext
+        ? getSprMissingRequestFields(catalogQueryText)
+        : [];
+      const sprMissingRequestReply = buildSprMissingRequestReply(sprMissingRequestFields, catalogQueryText);
       const asksCatalogProduct = !isShopifyPrefillIntro
         && !vehicleOnlyCatalogContext
         && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera|carroceria)\b/.test(lowerText) || SPR_EXPLICIT_PART_PATTERN.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText));
@@ -2407,6 +2475,8 @@ Incluye:
 
       if (isShopifyPrefillIntro) {
         botReply = `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo.\n\nPara buscar correctamente en el catálogo, escríbeme *solo estos cuatro datos* en un mismo mensaje:\n🔧 Pieza\n🚗 Marca\n🚙 Modelo\n📅 Año\n\nEjemplo: *faro derecho Nissan Versa 2017*.`;
+      } else if (sprMissingRequestReply) {
+        botReply = sprMissingRequestReply;
       } else if (vehicleContextReply) {
         botReply = vehicleContextReply;
       } else if (sprCatalogReply) {
@@ -3211,6 +3281,8 @@ module.exports = {
   buildSprCatalogContext,
   isUnlistedSprProductRequest,
   isIncompleteSprCatalogRequest,
+  getSprMissingRequestFields,
+  buildSprMissingRequestReply,
   isSprNewRequestOrQuestion,
   buildSprAdvisorReviewReply,
   isSprStoreLocationQuestion,
