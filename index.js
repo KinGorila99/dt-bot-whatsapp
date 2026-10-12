@@ -143,6 +143,64 @@ function timestampMs(value) {
   return Number.isFinite(time) ? time : 0;
 }
 
+function sanitizeMetaLogValue(value, key = '') {
+  const normalizedKey = String(key || '').toLowerCase();
+  if (/^(access_token|authorization|token|password|secret|input|wa_id|phone|phone_number|display_phone_number|recipient_id|to|from)$/.test(normalizedKey)) {
+    return '[REDACTED]';
+  }
+  if (typeof value === 'string') {
+    return value
+      .replace(/(access_token|authorization|token|password|secret)=([^&\s]+)/gi, '$1=[REDACTED]')
+      .replace(/\b\d{10,15}\b/g, '[REDACTED_PHONE]');
+  }
+  if (Array.isArray(value)) return value.map(item => sanitizeMetaLogValue(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([entryKey, entryValue]) => [
+      entryKey,
+      sanitizeMetaLogValue(entryValue, entryKey)
+    ]));
+  }
+  return value;
+}
+
+function serializeMetaLogBody(body) {
+  try {
+    return JSON.stringify(sanitizeMetaLogValue(body));
+  } catch (error) {
+    return JSON.stringify({ log_serialization_error: error.message });
+  }
+}
+
+function logMetaApiResponse(operation, response) {
+  console.log(`[Meta API] operation=${operation} http_status=${response?.status ?? 'unknown'} response_body=${serializeMetaLogBody(response?.data ?? null)}`);
+}
+
+function logMetaApiError(operation, error) {
+  const response = error?.response;
+  const body = response?.data ?? { error: error?.message || 'Unknown Meta API error' };
+  console.error(`[Meta API] operation=${operation} http_status=${response?.status ?? 'no_response'} response_body=${serializeMetaLogBody(body)}`);
+}
+
+function getWebhookEventType(value) {
+  const hasMessages = Array.isArray(value?.messages) && value.messages.length > 0;
+  const hasStatuses = Array.isArray(value?.statuses) && value.statuses.length > 0;
+  if (hasMessages && hasStatuses) return 'ambos';
+  if (hasMessages) return 'mensaje';
+  if (hasStatuses) return 'estado';
+  return 'ninguno';
+}
+
+function logWebhookEvent(value, result, reason, details = {}) {
+  console.log(`[WhatsApp Webhook] ${JSON.stringify({
+    hora: new Date().toISOString(),
+    phone_number_id: value?.metadata?.phone_number_id || 'no_informado',
+    tipo_evento: getWebhookEventType(value),
+    resultado: result,
+    motivo: sanitizeMetaLogValue(reason),
+    ...details
+  })}`);
+}
+
 function isAlertEmailConfigured() {
   return Boolean(RESEND_API_KEY && ALERT_EMAIL_FROM && ALERT_EMAIL_TO.length);
 }
@@ -2257,10 +2315,12 @@ app.get('/webhook/whatsapp', (req, res) => {
 
   if (mode === 'subscribe' && (token === MASTER_VERIFY_TOKEN || (token && token.startsWith('dt_')))) {
     console.log('✅ Meta Webhook verification handshake successful.');
+    logWebhookEvent({}, 'procesado', 'handshake de verificación aceptado', { tipo_evento: 'verificacion' });
     return res.status(200).send(challenge);
   }
 
-  console.warn('❌ Meta Webhook verification rejected. Invalid Verify Token:', token);
+  console.warn('❌ Meta Webhook verification rejected. Invalid Verify Token.');
+  logWebhookEvent({}, 'descartado', 'token de verificación inválido', { tipo_evento: 'verificacion' });
   return res.status(403).send('Forbidden: Verify token mismatch');
 });
 
@@ -2272,6 +2332,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
   // 1. Verify HMAC-SHA256 Signature
   if (!verifyMetaSignature(req)) {
     console.error('❌ Webhook rejected: Invalid HMAC-SHA256 Signature');
+    logWebhookEvent(req.body?.entry?.[0]?.changes?.[0]?.value, 'descartado', 'firma HMAC-SHA256 inválida');
     return res.status(401).send('Unauthorized: Invalid Signature');
   }
 
@@ -2280,21 +2341,31 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
   try {
     const body = req.body;
-    if (!body || body.object !== 'whatsapp_business_account') return;
+    if (!body || body.object !== 'whatsapp_business_account') {
+      logWebhookEvent(body?.entry?.[0]?.changes?.[0]?.value, 'descartado', 'payload vacío o object distinto de whatsapp_business_account');
+      return;
+    }
 
     const entry = body.entry?.[0];
     const changes = entry?.changes?.[0];
     const value = changes?.value;
+    logWebhookEvent(value, 'recibido', 'firma validada; inicio de procesamiento');
 
     // Meta sends delivery/read/failure updates in a separate webhook event.
     // Persist them immediately so the CRM never presents an accepted request as delivered.
     const statuses = Array.isArray(value?.statuses) ? value.statuses : [];
     if (statuses.length > 0) {
-      if (!db) return;
+      if (!db) {
+        logWebhookEvent(value, 'descartado', 'base de datos no inicializada; no se pudo procesar el estado ni el mensaje');
+        return;
+      }
       for (const statusEvent of statuses) {
         const externalId = String(statusEvent.id || '').trim();
         const rawStatus = String(statusEvent.status || '').trim().toLowerCase();
-        if (!externalId || !rawStatus) continue;
+        if (!externalId || !rawStatus) {
+          logWebhookEvent(value, 'descartado', 'estado sin id de mensaje o sin status');
+          continue;
+        }
         const deliveryStatus = ['sent', 'delivered', 'read', 'failed'].includes(rawStatus) ? rawStatus : 'accepted';
         const updatedAt = statusEvent.timestamp
           ? new Date(Number(statusEvent.timestamp) * 1000).toISOString()
@@ -2343,6 +2414,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
           console.log('📬 [WhatsApp Delivery] ' + externalId + ': ' + deliveryStatus + (errorMessage ? ' — ' + errorMessage : ''));
         } catch (statusError) {
           console.error('Error persisting WhatsApp delivery status for ' + externalId + ':', statusError.message);
+          logWebhookEvent(value, 'descartado', `no se pudo persistir el estado ${rawStatus}: ${statusError.message}`, { message_id: externalId });
         }
       }
       // A payload can contain delivery statuses and a customer message at
@@ -2350,18 +2422,25 @@ app.post('/webhook/whatsapp', async (req, res) => {
       // message branch below from saving the inbound turn in the CRM.
     }
 
-    if (!value?.messages || value.messages.length === 0) return;
+    if (!value?.messages || value.messages.length === 0) {
+      logWebhookEvent(value, 'procesado', statuses.length > 0 ? 'estado(s) procesado(s); no había mensaje entrante' : 'evento sin mensaje entrante');
+      return;
+    }
 
     const message = value.messages[0];
     const contact = value.contacts?.[0];
     const metadata = value.metadata;
 
     const messageId = message.id;
-    if (!messageId) return;
+    if (!messageId) {
+      logWebhookEvent(value, 'descartado', 'mensaje sin message.id');
+      return;
+    }
 
     // --- ATOMIC PERSISTENT DEDUPLICATION IN FIRESTORE ---
     if (!db) {
       console.error('❌ Database not initialized. Cannot process message safely.');
+      logWebhookEvent(value, 'descartado', 'base de datos no inicializada; no se pudo guardar el mensaje', { message_id: messageId });
       return;
     }
 
@@ -2395,11 +2474,13 @@ app.post('/webhook/whatsapp', async (req, res) => {
       });
     } catch (txErr) {
       console.error('Deduplication transaction error:', txErr);
+      logWebhookEvent(value, 'descartado', `error en deduplicación: ${txErr.message}`, { message_id: messageId });
       return;
     }
 
     if (!shouldProcess) {
       console.log(`⚠️ [Deduplication] Message [${messageId}] is already processed or being processed. Skipping.`);
+      logWebhookEvent(value, 'descartado', 'mensaje duplicado o ya en procesamiento', { message_id: messageId });
       return;
     }
 
@@ -2434,6 +2515,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
           completed_at: new Date().toISOString()
         }, { merge: true });
       } catch (e) {}
+      logWebhookEvent(value, 'descartado', 'phone_number_id sin integración registrada para ningún tenant', { message_id: messageId });
       return;
     }
 
@@ -2461,10 +2543,11 @@ app.post('/webhook/whatsapp', async (req, res) => {
           }, { merge: true });
         }
       } catch (e) {}
+      logWebhookEvent(value, 'descartado', 'payload sintético de prueba de Meta; no se creó conversación ni respuesta', { message_id: messageId, company_id: companyId });
       return;
     }
 
-    console.log(`📥 [WhatsApp Inbound] Company: ${companyId} | From: ${customerName} (+${customerPhone}) | Message: "${messageText}"`);
+    console.log(`📥 [WhatsApp Inbound] Company: ${companyId} | Phone ID: ${phoneNumberId} | Message received.`);
 
     // Mark inbound webhook reception verified on real customer message (separate from outbound verification)
     if (intDocId) {
@@ -2712,6 +2795,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
         }, { merge: true });
       } catch (e) {}
 
+      logWebhookEvent(value, 'procesado', 'mensaje guardado; bot pausado porque la conversación está asignada a un asesor', { message_id: messageId, company_id: companyId });
       return;
     }
 
@@ -3071,13 +3155,15 @@ Si quieres atención inmediata, escribe *asesor*`;
           }
         );
 
+        logMetaApiResponse('respuesta_del_bot', metaRes);
         metaMessageId = metaRes.data?.messages?.[0]?.id || null;
         if (!metaMessageId) {
           throw new Error('Meta respondió sin un ID de mensaje. El CRM no marcará el envío como aceptado.');
         }
         outboundSuccess = true;
-        console.log(`🤖 [DT Bot Accepted] To: +${customerPhone} | Meta Msg ID: ${metaMessageId}`);
+        console.log(`🤖 [DT Bot Accepted] Phone ID: ${phoneNumberId} | Meta Msg ID: ${metaMessageId}`);
       } catch (metaErr) {
+        logMetaApiError('respuesta_del_bot', metaErr);
         console.error('❌ Meta Graph API Error sending reply:', metaErr.response?.data?.error?.message || metaErr.message);
       }
     }
@@ -3145,8 +3231,15 @@ Si quieres atención inmediata, escribe *asesor*`;
       }, { merge: true });
     } catch (e) {}
 
+    logWebhookEvent(value, 'procesado', outboundSuccess ? 'mensaje guardado y respuesta del bot aceptada por Meta' : 'mensaje guardado; no se envió respuesta automática', {
+      message_id: messageId,
+      company_id: companyId,
+      bot_replied: outboundSuccess
+    });
+
   } catch (err) {
     console.error('Error processing WhatsApp Webhook:', err);
+    logWebhookEvent(req.body?.entry?.[0]?.changes?.[0]?.value, 'descartado', `error inesperado durante el procesamiento: ${err.message}`);
   }
 });
 
@@ -3464,11 +3557,12 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
       }
     );
 
+    logMetaApiResponse('envio_manual', metaRes);
     const metaMsgId = metaRes.data?.messages?.[0]?.id || null;
     if (!metaMsgId) {
       throw new Error('Meta respondió sin un ID de mensaje. El CRM no marcará el envío como aceptado.');
     }
-    console.log(`📤 [Advisor Message Accepted] By: ${user_name || user.nombre} to +${cleanPhone} | Meta Msg ID: ${metaMsgId}`);
+    console.log(`📤 [Advisor Message Accepted] Company: ${company_id} | Meta Msg ID: ${metaMsgId}`);
 
     // Update idempotency lock with success
     let postMetaLockError = null;
@@ -3550,6 +3644,7 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
     });
 
   } catch (err) {
+    logMetaApiError('envio_manual', err);
     console.error('Error in agent send message:', err.response?.data?.error?.message || err.message);
     const metaErrorObj = err.response?.data?.error;
     if (metaErrorObj?.code || metaErrorObj?.message) {
@@ -3691,6 +3786,7 @@ app.post('/api/test-message', authenticateUser, async (req, res) => {
       }
     );
 
+    logMetaApiResponse('prueba_manual', metaRes);
     const metaMsgId = metaRes.data?.messages?.[0]?.id || null;
     if (!metaMsgId) throw new Error('Meta respondió sin un ID de mensaje. La prueba no se marcará como exitosa.');
     if (company_id && activeWabaId && activeToken) { try { await http.post(`https://graph.facebook.com/${GRAPH_API_VERSION}/${activeWabaId}/subscribed_apps`, {}, { headers: { Authorization: `Bearer ${activeToken}` } }); console.log(`✅ WhatsApp WABA subscription ensured: ${activeWabaId}`); } catch (subErr) { console.warn('⚠️ WABA subscription could not be ensured:', subErr.response?.data?.error?.message || subErr.message); } }
@@ -3702,6 +3798,7 @@ app.post('/api/test-message', authenticateUser, async (req, res) => {
       note: 'Meta aceptó la plantilla oficial hello_world para abrir la conversación. Responde al mensaje recibido y luego podrás probar textos libres durante 24 horas.'
     });
   } catch (err) {
+    logMetaApiError('prueba_manual', err);
     const metaErr = err.response?.data?.error;
     let friendlyMessage = metaErr?.message || err.message;
 
@@ -3725,6 +3822,7 @@ app.post('/api/test-message', authenticateUser, async (req, res) => {
             }
           }
         );
+        logMetaApiResponse('prueba_manual_plantilla_fallback', templateRes);
         const templateMsgId = templateRes.data?.messages?.[0]?.id || null;
         if (!templateMsgId) throw new Error('Meta respondió sin un ID de mensaje para la plantilla.');
         return res.status(200).json({
@@ -3735,6 +3833,7 @@ app.post('/api/test-message', authenticateUser, async (req, res) => {
           note: 'Meta requirió una plantilla porque no había una conversación activa. Se envió la plantilla oficial hello_world; responde a ese mensaje para abrir la ventana de 24 horas y poder probar texto libre.'
         });
       } catch (templateErr) {
+        logMetaApiError('prueba_manual_plantilla_fallback', templateErr);
         const templateMetaErr = templateErr.response?.data?.error;
         friendlyMessage = templateMetaErr?.message || templateErr.message;
       }
