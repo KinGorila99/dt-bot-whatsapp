@@ -1238,8 +1238,6 @@ async function resolveOutboundTenant(dbInstance, companyId, preferredPhoneNumber
     const intData = doc.data() || {};
     const phoneNumberId = String(intData.phone_number_id || '').trim();
     if (!phoneNumberId) continue;
-    if (preferredPhoneNumberId && phoneNumberId !== String(preferredPhoneNumberId).trim()) continue;
-
     let accessToken = null;
     try {
       const secDoc = await dbInstance.doc(`integrations/${doc.id}/secrets/tokens`).get();
@@ -2358,6 +2356,17 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
   }
 
   const dedupDocRef = db.doc(`outbound_requests/${company_id}_${cleanClientId}`);
+  const markOutboundAttemptFailed = async (errorMessage) => {
+    try {
+      await dedupDocRef.set({
+        status: 'failed',
+        error: String(errorMessage || 'Error antes de contactar Meta'),
+        failed_at: new Date().toISOString()
+      }, { merge: true });
+    } catch (lockError) {
+      console.warn('Could not release outbound idempotency lock:', lockError.message);
+    }
+  };
   let existingRecord = null;
 
   try {
@@ -2424,6 +2433,7 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
     }
   } catch (e) {
     console.error('Error fetching tenant credentials:', e.message);
+    await markOutboundAttemptFailed(e.message);
     return res.status(500).json({
       success: false,
       error: 'Error al consultar credenciales de integración en la base de datos.'
@@ -2431,6 +2441,7 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
   }
 
   if (!activePhoneNumberId || !activeToken) {
+    await markOutboundAttemptFailed('Credenciales de WhatsApp Cloud API no configuradas para esta empresa.');
     return res.status(400).json({
       success: false,
       error: 'Credenciales de WhatsApp Cloud API no configuradas para esta empresa.'
@@ -2750,6 +2761,8 @@ module.exports = {
   verifyMetaSignature,
   isSyntheticMetaPayload,
   resolveTenant,
+  resolveOutboundTenant,
+  mergeBufferedDeliveryStatus,
   setDb,
   setAdminAuth,
   setHttpClient,
