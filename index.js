@@ -1850,9 +1850,12 @@ function isSprNewRequestOrQuestion(value) {
     && /\b(horario|envio|envios|ubicacion|direccion|garantia|precio|precios|disponible|existencia|stock|catalogo|producto|pieza|refaccion|asesor|compatibilidad)\b/.test(query);
   if (hasQuestion) return true;
   if (isCourtesyText(query)) return false;
-  return SPR_CATALOG_CONTEXT_PATTERN.test(query)
-    || SPR_EXPLICIT_PART_PATTERN.test(query)
-    || /\b(busco|buscando|necesito|ocupo|quiero|cotizar|cotizacion|precio|precios|disponible|existencia|stock|catalogo|producto|productos|pieza|piezas|refaccion|refacciones)\b/.test(query);
+  if (/^(ok|okay|listo|recibido|entendido)\b/.test(query)
+    || /\b(?:el|la) asesor(?:a)?\b.*\b(?:ya me atendio|me atendio|me ayudo)\b/.test(query)) return false;
+  // Once an SPR conversation has been paused, every non-courtesy customer
+  // message is a fresh turn for the bot. Unknown wording must still receive
+  // the catalog prompt instead of leaving the customer with no reply.
+  return true;
 }
 
 function buildSprAdvisorReviewReply(customerName = '') {
@@ -2691,7 +2694,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
     // human review. Once the explicit pause is removed, the next customer
     // message resumes only that owner-pause state; other advisor handoffs
     // remain untouched and still require the normal idle timeout.
-    if (!botPausedByOwner && convData.handoff_reason === 'bot_paused_by_owner') {
+    if (companyId === SPR_COMPANY_ID && !botPausedByOwner && convData.handoff_reason === 'bot_paused_by_owner') {
       convData.human_handoff = false;
       convData.bot_enabled = true;
       convData.status = 'active';
@@ -2710,7 +2713,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
     // fresh automated turn. This prevents every advisor send from leaving the
     // customer silently paused while preserving acknowledgements such as
     // "gracias" with the human advisor.
-    if (!botPausedByOwner
+    if (companyId === SPR_COMPANY_ID && !botPausedByOwner
       && (convData.human_handoff === true || convData.bot_enabled === false)
       && isSprNewRequestOrQuestion(messageText)) {
       convData.human_handoff = false;
@@ -3096,7 +3099,7 @@ Si quieres atención inmediata, escribe *asesor*`;
         // exhaustive and recovery passes still receives a useful catalog
         // prompt; it is never routed to an advisor, denied as out of stock or
         // left unanswered. Other tenants keep their configured review policy.
-        if (isSprAutopartesTenant && asksCatalogProduct) {
+        if (isSprAutopartesTenant) {
           botReply = buildSprCatalogFallbackReply(catalogQueryText);
           convData.human_handoff = false;
           convData.bot_enabled = true;
@@ -4102,4 +4105,3 @@ app.post('/api/catalog/digital/refresh', authenticateUser, async (req, res) => {
     return res.status(502).json({ success: false, error: 'No se pudo cargar el catálogo digital ni la fuente de respaldo.' });
   }
 });
-
