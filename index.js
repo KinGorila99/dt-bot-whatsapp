@@ -274,7 +274,7 @@ function stripSprVehicleDetailLines(value) {
     .join('\n');
 }
 
-const SPR_EXPLICIT_PART_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|bieleta(?:s)?|balero(?:s)?|maza(?:s)?|homocin[eé]tica(?:s)?|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera(?:s)?|carrocer[ií]a)\b/i;
+const SPR_EXPLICIT_PART_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|bieleta(?:s)?|balero(?:s)?|maza(?:s)?|homocin[eé]tica(?:s)?|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|stop|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera(?:s)?|carrocer[ií]a)\b/i;
 
 function hasSprExplicitPartRequest(value) {
   const query = normalizeSprCatalogText(normalizeBotText(stripSprVehicleDetailLines(value)));
@@ -335,8 +335,6 @@ const SPR_CATALOG_TERM_ALIASES = new Map([
   ['homocineticas', 'balero'],
   ['headlamp', 'faro'],
   ['headlamps', 'faro'],
-  ['stop', 'calavera'],
-  ['stops', 'calavera'],
   ['bumper', 'defensa'],
   ['bumpers', 'defensa'],
   ['retrovisor', 'espejo'],
@@ -585,7 +583,7 @@ function normalizeSprProduct(product) {
   return {
     id: product?.id || handle,
     title,
-    normalizedTitle: normalizeBotText(title),
+    normalizedTitle: normalizeSprCatalogText(title),
     vendor,
     productType,
     tags,
@@ -854,7 +852,8 @@ function findSprEngineMatches(items, lowerText) {
     { key: 'colision', pattern: /\b(guia(?:s)?|fascia(?:s)?|moldura(?:s)?|defensa(?:s)?|parrilla(?:s)?|cofre|salpicadera(?:s)?)\b/ },
     { key: 'carroceria', pattern: /\b(parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|salpicadera(?:s)?|carroceria)\b/ }
   ];
-  const requestedCategory = categoryRules.find(rule => rule.pattern.test(normalizedQuery));
+  const requestedCategory = categoryRules.find(rule => rule.key !== 'motor' && rule.pattern.test(normalizedQuery))
+    || categoryRules.find(rule => rule.pattern.test(normalizedQuery));
   // A broad family (for example, “iluminación” or “colisión”) is not enough
   // to answer a concrete request. Keep the requested part itself as a hard
   // constraint so a calavera cannot be replaced with an espejo, or a cajuela
@@ -866,6 +865,7 @@ function findSprEngineMatches(items, lowerText) {
     { key: 'bieleta', pattern: /\bbieleta(?:s)?\b/ },
     { key: 'balero', pattern: /\b(balero(?:s)?|maza(?:s)?|homocin[eé]tica(?:s)?)\b/ },
     { key: 'calavera', pattern: /\bcalavera(?:s)?\b/ },
+    { key: 'stop', pattern: /\bstop\b/ },
     { key: 'faro', pattern: /\bfaro(?:s)?\b/ },
     { key: 'espejo', pattern: /\bespejo(?:s)?\b/ },
     { key: 'fascia', pattern: /\bfascia(?:s)?\b/ },
@@ -891,11 +891,13 @@ function findSprEngineMatches(items, lowerText) {
     .map(match => match[1])
     .filter((value, index, values) => values.indexOf(value) === index);
   const negativeFogRequest = /\b(?:no|sin|evitar|ningun|ninguna)\b(?:\s+\w+){0,8}\s+(?:faro\s+de\s+)?niebla\b/.test(normalizedQuery);
-  const asksFogLight = !negativeFogRequest && /\b(?:faro\s+de\s+niebla|niebla|antiniebla)\b/.test(normalizedQuery);
-  const asksMainLight = !asksFogLight && /\b(?:faro|faros|principal|delantero|delantera)\b/.test(normalizedQuery);
+  const mentionsBodyPartWithFogFeature = /\b(defensa(?:s)?|parrilla(?:s)?|fascia(?:s)?|moldura(?:s)?|cofre|salpicadera(?:s)?|carrocer[ií]a|puerta(?:s)?|cajuela)\b/.test(normalizedQuery);
+  const asksFogLight = !negativeFogRequest && !mentionsBodyPartWithFogFeature && /\b(?:faro\s+de\s+niebla|niebla|antiniebla)\b/.test(normalizedQuery);
+  const asksMainLight = !asksFogLight && !mentionsBodyPartWithFogFeature && /\b(?:faro|faros|principal|delantero|delantera)\b/.test(normalizedQuery);
   const wantsHead = /\b(cabeza(?:s)?|culata(?:s)?)\b/.test(normalizedQuery);
   const wantsMotorAccessory = /\b(soporte(?:s)?|base(?:s)?|taco(?:s)?|montura(?:s)?|mount(?:s)?|sensor(?:es)?|accesorio(?:s)?)\b/.test(normalizedQuery);
-  const wantsMotor = /\bmotor(?:es)?\b/.test(normalizedQuery) && !wantsHead && !wantsMotorAccessory;
+  const hasNonMotorCatalogPart = /\b(cabeza(?:s)?|culata(?:s)?|amortiguador(?:es)?|suspension|bieleta(?:s)?|balero(?:s)?|maza(?:s)?|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|direccion|terminal(?:es)?|rotula(?:s)?|radiador(?:es)?|bomba(?:s)?|turbo(?:s)?|embrague|clutch|soporte(?:s)?|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|guia(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera(?:s)?|carroceria)\b/.test(normalizedQuery);
+  const wantsMotor = /\bmotor(?:es)?\b/.test(normalizedQuery) && !wantsHead && !wantsMotorAccessory && !hasNonMotorCatalogPart;
   const motorAccessoryPattern = /\b(soporte(?:s)?|base(?:s)?|taco(?:s)?|montura(?:s)?|mount(?:s)?|sensor(?:es)?|accesorio(?:s)?)\b/;
   // A request for a motor must never be answered with a cylinder head. The
   // catalog uses both words in some titles (for example, "cabeza motor"), so
@@ -907,7 +909,8 @@ function findSprEngineMatches(items, lowerText) {
       && /\b(?:motor|engine(?:\s+series)?)\b/.test(row.haystack)
       && !/\b(?:cabeza|culata)\b/.test(row.haystack))
     : rows;
-  const itemHasFogLight = item => /\b(?:niebla|antiniebla)\b/.test(item.normalizedTitle);
+  const itemHasFogLight = item => /\b(?:niebla|antiniebla)\b/.test(item.normalizedTitle)
+    && !/\bsin\s+(?:faro\s+de\s+)?niebla\b/.test(item.normalizedTitle);
   const itemMatchesRequestedYear = item => {
     if (!requestedYears.length) return true;
     const source = String(item.title || '') + ' ' + String(item.description || '') + ' ' + String(item.tags || '');
@@ -976,7 +979,7 @@ function findSprEngineMatches(items, lowerText) {
     relevant = orientationMatches;
   }
 
-  if (requestedCategory?.key === 'iluminacion') {
+  if (requestedCategory?.key === 'iluminacion' && !mentionsBodyPartWithFogFeature) {
     const lightingMatches = relevant.filter(row => asksFogLight ? itemHasFogLight(row.item) : !itemHasFogLight(row.item));
     if (!lightingMatches.length) return [];
     relevant = lightingMatches;
@@ -1053,7 +1056,7 @@ function buildSprFocusedSearchQuery(value) {
 // the customer's previous catalog request. Keep the vehicle and part from
 // that previous turn so a side/orientation answer cannot jump to another
 // make or model.
-const SPR_CATALOG_CONTEXT_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|bieleta(?:s)?|balero(?:s)?|maza(?:s)?|homocin[eé]tica(?:s)?|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|producto(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera(?:s)?|carrocer[ií]a)\b/;
+const SPR_CATALOG_CONTEXT_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|bieleta(?:s)?|balero(?:s)?|maza(?:s)?|homocin[eé]tica(?:s)?|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|producto(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|stop|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera(?:s)?|carrocer[ií]a)\b/;
 const SPR_CATALOG_REFINEMENT_PATTERN = /\b(delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|frente|atr[aá]s|modelo|a[nñ]o|versi[oó]n|principal|niebla|antiniebla|motor)\b/;
 
 // Do not guess a vehicle from a generic part request. Ask for the vehicle
