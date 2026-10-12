@@ -21,7 +21,8 @@ const {
   getSprMissingRequestFields,
   buildSprMissingRequestReply,
   buildSprCatalogContext,
-  isSprLikelyPieceFollowUp
+  isSprLikelyPieceFollowUp,
+  buildSprCatalogReply
 } = require('../index.js');
 Module._load = originalLoad;
 
@@ -71,6 +72,24 @@ if (!/sentra 2018 faro derecho/i.test(combinedContext)) {
   failures.push({ combinedContext });
 }
 
+const completePieceVehicleFields = getSprMissingRequestFields('FARO VERSA 2020');
+const completePieceReply = buildSprCatalogReply([
+  {
+    title: 'FARO DERECHO NISSAN VERSA 2020-2025 TYC',
+    regularPrice: 1740,
+    offerPrice: 1740,
+    available: true,
+    url: 'https://sprautopartes.mx/products/faro-derecho-nissan-versa-2020'
+  }
+], 'faro versa 2020');
+if (completePieceVehicleFields.length
+  || !/precio normal/i.test(completePieceReply)
+  || !/\$1,740\.00/.test(completePieceReply)
+  || !/https:\/\/sprautopartes\.mx\/products\/faro-derecho-nissan-versa-2020/.test(completePieceReply)
+  || /asesor/i.test(completePieceReply)) {
+  failures.push({ completePieceVehicleFields, completePieceReply });
+}
+
 const genericVehicleCases = [
   ['VERSA 2017', 'FARO IZQUIERDO'],
   ['TIGUAN 2019', 'ESPEJO DERECHO'],
@@ -100,7 +119,7 @@ for (const piece of ['CLAXON', 'BOMBA DE AGUA', 'SENSOR ABS']) {
   }
 }
 
-const total = cases.length + 3 + 3 + genericVehicleCases.length + 1 + 3;
+const total = cases.length + 3 + 3 + 3 + genericVehicleCases.length + 1 + 3;
 console.log(`SPR handoff regressions: ${total - failures.length}/${total} passed`);
 if (failures.length) {
   console.error(JSON.stringify(failures, null, 2));
