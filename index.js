@@ -2326,7 +2326,16 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
     });
   }
 
-  const cleanPhone = to_phone.replace(/[^0-9]/g, '');
+  // Use the same canonical WhatsApp phone format as inbound webhooks. Older
+  // Mexican contacts can still be stored as 521XXXXXXXXXX; Meta Cloud API
+  // expects the current 52XXXXXXXXXX form for outbound messages.
+  const cleanPhone = normalizeWhatsAppPhone(to_phone);
+  if (!cleanPhone) {
+    return res.status(400).json({
+      success: false,
+      error: 'El teléfono destino no tiene un formato válido para WhatsApp.'
+    });
+  }
   let preferredPhoneNumberId = null;
 
   // 4. Strict Conversation Verification (must exist, match company, and match recipient)
@@ -2365,7 +2374,7 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
     }
 
     // Validate recipient matching between request and conversation
-    const convTarget = (convData.external_user_id || convData.contact_phone || '').replace(/[^0-9]/g, '');
+    const convTarget = normalizeWhatsAppPhone(convData.external_user_id || convData.contact_phone || '');
     if (convTarget && !cleanPhone.endsWith(convTarget.slice(-10))) {
       return res.status(400).json({
         success: false,
@@ -2802,6 +2811,7 @@ module.exports = {
   setHttpClient,
   GRAPH_API_VERSION,
   MASTER_VERIFY_TOKEN,
+  normalizeWhatsAppPhone,
   parseDigitalCatalogPayload,
   normalizeDigitalCatalogRow,
   getSprDigitalCatalog,
