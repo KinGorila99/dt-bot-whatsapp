@@ -1,4 +1,4 @@
-/**
+SPR_EXPLICIT_PART_PATTERN/**
  * DT Bot Core & DT CRM Core — Production WhatsApp Cloud API Server
  * Built by DT Marketing
  */
@@ -555,7 +555,7 @@ function stripSprVehicleDetailLines(value) {
     .join('\n');
 }
 
-const SPR_EXPLICIT_PART_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|bieleta(?:s)?|balero(?:s)?|maza(?:s)?|homocin[eé]tica(?:s)?|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|stop|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera(?:s)?|carrocer[ií]a)\b/i;
+const SPR_EXPLICIT_PART_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|bieleta(?:s)?|balero(?:s)?|maza(?:s)?|homocin[eé]tica(?:s)?|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|anticongelante|refrigerante|coolant|lubricante|aditivo|liquido(?:s)?|buj[ií]a(?:s)?|bater[ií]a(?:s)?|filtro(?:s)?|llanta(?:s)?|neum[aá]tico(?:s)?|rin(?:es)?|birlo(?:s)?|plumilla(?:s)?|escobilla(?:s)?|fusible(?:s)?|foco(?:s)?|refacci[oó]n(?:es)?|pieza(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|stop|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera(?:s)?|carrocer[ií]a)\b/i;
 
 function hasSprExplicitPartRequest(value) {
   const query = normalizeSprCatalogText(normalizeBotText(stripSprVehicleDetailLines(value)));
@@ -1634,7 +1634,7 @@ function buildSprCatalogSearchQueries(value) {
 // the customer's previous catalog request. Keep the vehicle and part from
 // that previous turn so a side/orientation answer cannot jump to another
 // make or model.
-const SPR_CATALOG_CONTEXT_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|bieleta(?:s)?|balero(?:s)?|maza(?:s)?|homocin[eé]tica(?:s)?|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|producto(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|stop|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera(?:s)?|carrocer[ií]a)\b/;
+const SPR_CATALOG_CONTEXT_PATTERN = /\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|amortiguador(?:es)?|suspensi[oó]n|bieleta(?:s)?|balero(?:s)?|maza(?:s)?|homocin[eé]tica(?:s)?|freno(?:s)?|balata(?:s)?|pastilla(?:s)?|aceite|anticongelante|refrigerante|coolant|lubricante|aditivo|liquido(?:s)?|buj[ií]a(?:s)?|bater[ií]a(?:s)?|filtro(?:s)?|llanta(?:s)?|neum[aá]tico(?:s)?|rin(?:es)?|birlo(?:s)?|plumilla(?:s)?|escobilla(?:s)?|fusible(?:s)?|foco(?:s)?|refacci[oó]n(?:es)?|pieza(?:s)?|producto(?:s)?|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|faro(?:s)?|calavera(?:s)?|stop|l[aá]mpara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera(?:s)?|carrocer[ií]a)\b/;
 const SPR_CATALOG_REFINEMENT_PATTERN = /\b(delantero|delantera|delanteros|delanteras|trasero|trasera|traseros|traseras|izquierdo|izquierda|izquierdos|izquierdas|derecho|derecha|derechos|derechas|lateral|laterales|lado|frente|atr[aá]s|modelo|a[nñ]o|versi[oó]n|principal|niebla|antiniebla|motor)\b/;
 
 // Do not guess a vehicle from a generic part request. Ask for the vehicle
@@ -3002,7 +3002,7 @@ Incluye:
       const sprMissingRequestReply = buildSprMissingRequestReply(sprMissingRequestFields, catalogQueryText);
       const asksCatalogProduct = !isShopifyPrefillIntro
         && !vehicleOnlyCatalogContext
-        && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera|carroceria)\b/.test(lowerText) || SPR_EXPLICIT_PART_PATTERN.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText) || (catalogContextText !== messageText && isSprLikelyPieceFollowUp(messageText)));
+        && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|anticongelante|refrigerante|coolant|lubricante|aditivo|liquido(?:s)?|buj[ií]a(?:s)?|bater[ií]a(?:s)?|filtro(?:s)?|llanta(?:s)?|neum[aá]tico(?:s)?|rin(?:es)?|birlo(?:s)?|plumilla(?:s)?|escobilla(?:s)?|fusible(?:s)?|foco(?:s)?|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera|carroceria)\b/.test(lowerText) || SPR_EXPLICIT_PART_PATTERN.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText) || (catalogContextText !== messageText && isSprLikelyPieceFollowUp(messageText)));
       let sprCatalogReply = ''; let sprCatalogMatched = false;
       if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
