@@ -1094,7 +1094,7 @@ async function getSprEngineCatalog() {
   if (sprCatalogFetchPromise) return sprCatalogFetchPromise;
   sprCatalogFetchPromise = (async () => {
     try {
-      const digitalItems = await getSprDigitalCatalog();
+      const digitalItems = [];
       if (digitalItems.length) {
         sprCatalogSource = 'digital';
         sprCatalogCache = { fetchedAt: Date.now(), items: digitalItems };
@@ -3016,11 +3016,11 @@ Incluye:
           if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
             sprMatches = findSprExhaustiveMatches(catalogItems, catalogQueryText);
           }
-          // Once a digital catalog is configured, keep the lookup inside that
-          // catalog so prices and availability come from the supplied source.
-          // The public Shopify search is only used while no digital catalog is
-          // available yet; this avoids mixing stale web results with the file.
-          if (!sprMatches.length && sprCatalogSource !== 'digital' && !isGenericSprCatalogRequest(catalogLowerText)) {
+          // If the official page misses, use SPR's own product-search endpoint as the second filter.
+          // Keep the lookup on SPR's own site so current price and link data are returned.
+          // The second filter is attempted for every concrete request; do not skip it when
+          // an export exists, because the page search can contain a valid current product.
+          if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
             const focusedSearchQuery = buildSprFocusedSearchQuery(catalogQueryText);
             const searchedItems = await searchSprCatalog(focusedSearchQuery);
             sprMatches = findSprEngineMatches(searchedItems, catalogLowerText);
