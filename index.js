@@ -2410,7 +2410,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
     // customer silently paused while preserving acknowledgements such as
     // "gracias" with the human advisor.
     if (!botPausedByOwner
-      && convData.human_handoff === true
+      && (convData.human_handoff === true || convData.bot_enabled === false)
       && isSprNewRequestOrQuestion(messageText)) {
       convData.human_handoff = false;
       convData.bot_enabled = true;
