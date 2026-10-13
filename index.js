@@ -757,7 +757,7 @@ function formatWhatsAppReply(value) {
 
 const SPR_ENGINE_COLLECTION_URL = process.env.SPR_FULL_CATALOG_URL || process.env.SPR_ENGINE_COLLECTION_URL || 'https://sprautopartes.mx/products.json?limit=250';
 const SPR_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_CATALOG_TTL_MS || 60000));
-// A complete digital catalog lly omit trim/package words that customers include
+// Shopify product titles usually omit trim/package words that customers include
 // in natural language (for example, "GL" or "Mind"). Keep the vehicle model,
 // year and requested part strict while treating these descriptors as optional.
 const SPR_OPTIONAL_VEHICLE_WORDS = new Set(['gl', 'gls', 'gle', 'glx', 'lt', 'ls', 'le', 'lx', 'ex', 'se', 'sv', 'sr', 'slt', 'xlt', 'xl', 'xle', 'xse', 'mind', 'mild', 'sport', 'touring', 'limited', 'premium', 'plus', 'classic', 'sedan', 'hatchback', 'hb', 'coupe', 'convertible']);
@@ -767,8 +767,6 @@ const SPR_OPTIONAL_VEHICLE_WORDS_PATTERN = /\b(gl|gls|gle|glx|lt|ls|le|lx|ex|se|
 const SPR_SEPTEMBER_DISCOUNT_PERCENT = 0;
 let sprCatalogCache = { fetchedAt: 0, items: [] };
 let sprCatalogFetchPromise = null;
-let sprDigitalCatalogCache = { fetchedAt: 0, items: [] };
-let sprDigitalCatalogFetchPromise = null;
 let sprCatalogSource = 'none';
 // SPR does not provide a reliable inventory signal. Collision and lighting
 // availability is checked against Aldo Autopartes when the public lookup responds.
@@ -777,7 +775,9 @@ const ALDO_STOCK_TIMEOUT_MS = Math.max(3000, Number(process.env.ALDO_STOCK_TIMEO
 const ALDO_STOCK_CACHE_TTL_MS = Math.max(15000, Number(process.env.ALDO_STOCK_CACHE_TTL_MS || 60000));
 const ALDO_STOCK_QUERY_PARAMS = String(process.env.ALDO_STOCK_QUERY_PARAMS || 'q,search')
   .split(',')
-  .map(vaa(?:s)?|defensa(?:s)?|fascia(?:s)?|cofre|salpicadera(?:s)?|tolva(?:s)?|bisagra(?:s)?|moldura(?:s)?|manija(?:s)?|rejilla(?:s)?|puerta(?:s)?|cajuela|carroceria)\b/;
+  .map(value => value.trim())
+  .filter(Boolean);
+const ALDO_STOCK_CATEGORY_PATTERN = /\b(colision|choque|faro(?:s)?|niebla|calavera(?:s)?|lampara(?:s)?|luz|luces|iluminacion|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|fascia(?:s)?|cofre|salpicadera(?:s)?|tolva(?:s)?|bisagra(?:s)?|moldura(?:s)?|manija(?:s)?|rejilla(?:s)?|puerta(?:s)?|cajuela|carroceria)\b/;
 const aldoStockCache = new Map();
 
 function isAldoStockCategoryQuery(value) {
@@ -3926,4 +3926,76 @@ app.post('/api/meta/embedded-signup/complete', authenticateUser, async (req, res
   }
   const appSecret = process.env.META_APP_SECRET || '';
   if (!body.code || !appSecret) {
-    return res.status(400).json({ success: false, error: appSecret ? 'Meta no devolvió el código temporal de aut[Truncated]
+    return res.status(400).json({ success: false, error: appSecret ? 'Meta no devolvió el código temporal de autorización.' : 'Falta configurar META_APP_SECRET en Render.' });
+  }
+  if (!db) return res.status(503).json({ success: false, error: 'La base de datos no está disponible para guardar la conexión.' });
+  const http = customHttpClient || axios;
+  try {
+    const exchanged = await http.get(`https://graph.facebook.com/${GRAPH_API_VERSION}/oauth/access_token`, {
+            params: { client_id: META_ESU_APP_ID, client_secret: appSecret, code: String(body.code) }
+    });
+    const accessToken = exchanged.data?.access_token;
+    if (!accessToken) throw new Error('Meta no devolvió un token de acceso.');
+
+    let wabaId = String(body.waba_id || '').trim();
+    let phoneId = String(body.phone_number_id || '').trim();
+    let displayPhone = String(body.display_phone_number || '').trim();
+    let verifiedName = String(body.verified_name || '').trim();
+    let businessName = '';
+    if (!wabaId || !phoneId) {
+      return res.status(422).json({ success: false, error: 'Meta no devolvió la cuenta de WhatsApp y el número seleccionados. No se modificó la conexión existente.' });
+    }
+    if (wabaId) {
+      try {
+        const waba = await http.get(`https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}`, { params: { fields: 'id,name', access_token: accessToken } });
+        businessName = waba.data?.name || '';
+      } catch (_) {}
+    }
+    if (phoneId) {
+      try {
+        const phone = await http.get(`https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneId}`, { params: { fields: 'id,display_phone_number,verified_name,whatsapp_business_account_id', access_token: accessToken } });
+        displayPhone = displayPhone || phone.data?.display_phone_number || '';
+        verifiedName = verifiedName || phone.data?.verified_name || '';
+        wabaId = phone.data?.whatsapp_business_account_id || wabaId;
+      } catch (_) {}
+    }
+    if (!wabaId || !phoneId) return res.status(422).json({ success: false, error: 'Meta no devolvió el WABA y el número necesarios para completar la conexión.' });
+    try { await http.post(`https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}/subscribed_apps`, {}, { params: { access_token: accessToken } }); } catch (subscriptionError) { const message = subscriptionError.response?.data?.error?.message || subscriptionError.message; return res.status(502).json({ success: false, error: `Meta no autorizó la suscripción del webhook: ${message}` }); }
+
+    const now = new Date().toISOString();
+    const integrationId = `int_wa_${companyId}`;
+    const integration = {
+      id: integrationId, company_id: companyId, provider: 'whatsapp', status: 'connected',
+      onboarding_method: 'embedded_signup', display_phone_number: displayPhone, phone_number_id: phoneId,
+      whatsapp_business_account_id: wabaId, verified_name: verifiedName || businessName || 'WhatsApp Business',
+      tenant_owned: true, billing_owner: 'client', billing_scope: 'tenant_messaging_account',
+      policy_version: TENANT_POLICY_VERSION,
+      has_token: true, webhook_verified: true, outbound_verified: false,
+      meta_business_id: String(body.meta_business_id || '').trim(), last_verified_at: now, last_sync_at: now,
+      updated_at: now, created_at: now, created_by_user_id: user.uid, created_by_user_name: user.nombre || 'Administrador'
+    };
+    const batch = db.batch();
+    batch.set(db.doc(`integrations/${integrationId}`), integration, { merge: true });
+    batch.set(db.doc(`integrations/${integrationId}/secrets/tokens`), { access_token: accessToken, has_token: true, source: 'embedded_signup', updated_at: now, company_id: companyId }, { merge: true });
+    batch.set(db.doc(`tenant_onboarding/${companyId}`), {
+      company_id: companyId,
+      policy_version: TENANT_POLICY_VERSION,
+      status: 'connected',
+      checklist: {
+        tenant_identity: true,
+        own_waba: true,
+        verified_phone_number: true,
+        webhook_subscribed: true,
+        client_billing_owner: true,
+        bot_safe_defaults: true
+      },
+      updated_at: now
+    }, { merge: true });
+    await batch.commit(); try { const companyRef = db.doc(`companies/${companyId}`); const companySnap = await companyRef.get(); if (companySnap.exists) { const companyData = companySnap.data() || {}; const existingIntegrations = companyData.integraciones || {}; const activeIntegrations = Array.isArray(existingIntegrations.activeIntegrations) ? existingIntegrations.activeIntegrations.filter(item => item.id !== integrationId && item.provider !== "whatsapp") : []; activeIntegrations.push(integration); await companyRef.set({ integraciones: { ...existingIntegrations, activeIntegrations, whatsapp: { ...(existingIntegrations.whatsapp || {}), enabled: true, businessNumber: displayPhone, phoneNumberId: phoneId, wabaId, has_token: true, tenant_owned: true, billing_owner: 'client', policy_version: TENANT_POLICY_VERSION } } }, { merge: true }); } } catch (companySyncError) { console.warn("Embedded Signup company cache sync pending:", companySyncError.message); }
+    res.json({ success: true, company_id: companyId, waba_id: wabaId, phone_number_id: phoneId, display_phone_number: displayPhone, verified_name: verifiedName || businessName, status: 'connected' });
+  } catch (err) {
+    const metaError = err.response?.data?.error;
+    console.error('Embedded Signup completion error:', metaError?.message || err.message);
+    res.status(502).json({ success: false, error: metaError?.message || 'Meta no pudo completar la conexión de WhatsApp.' });
+  }
+});
