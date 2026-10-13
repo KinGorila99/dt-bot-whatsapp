@@ -90,6 +90,44 @@ const contextualCases = [
 ];
 
 const failures = [];
+
+// A steering-rack request must never fall back to an unrelated product that
+// only shares the vehicle/year and a broad “Dirección” department tag.
+const steeringRackRequest = 'Cremallera dirección RAM 1500 2007';
+const steeringRackWrongPart = {
+  id: 'ram-clutch-wrong-family',
+  title: 'KIT CLUTCH DODGE TRUCK RAM 1500 V6 3.7 LTS 2002-2013 LUK',
+  normalizedTitle: normalizeBotText('KIT CLUTCH DODGE TRUCK RAM 1500 V6 3.7 LTS 2002-2013 LUK'),
+  vendor: 'LUK', productType: 'KIT DE CLUTCH', tags: 'SPR Autopartes, Suspensión y Dirección RAM 1500 2002-2013',
+  description: '', discountEligible: false, regularPrice: 8258, offerPrice: 8258, available: true,
+  url: 'https://sprautopartes.mx/products/ram-clutch-wrong-family'
+};
+const steeringRackExactPart = {
+  id: 'ram-steering-rack-exact',
+  title: 'CREMALLERA DIRECCIÓN RAM 1500 2002-2008',
+  normalizedTitle: normalizeBotText('CREMALLERA DIRECCIÓN RAM 1500 2002-2008'),
+  vendor: 'SPR', productType: 'DIRECCIÓN', tags: 'RAM 1500 2002-2008',
+  description: '', discountEligible: false, regularPrice: 6200, offerPrice: 6200, available: true,
+  url: 'https://sprautopartes.mx/products/ram-cremallera-direccion'
+};
+const steeringRackQuery = canonicalizeSprPartSynonyms(steeringRackRequest);
+const wrongPartMatches = filterStrictSprVehicleMatches(
+  findSprEngineMatches([steeringRackWrongPart], steeringRackQuery),
+  steeringRackQuery
+);
+const exactPartMatches = filterStrictSprVehicleMatches(
+  findSprEngineMatches([steeringRackExactPart], steeringRackQuery),
+  steeringRackQuery
+);
+if (wrongPartMatches.length || exactPartMatches.length !== 1 || exactPartMatches[0].id !== steeringRackExactPart.id) {
+  failures.push({
+    request: steeringRackRequest,
+    normalized: steeringRackQuery,
+    wrongPartMatches: wrongPartMatches.map(item => item.title),
+    exactPartMatches: exactPartMatches.map(item => item.title)
+  });
+}
+
 for (const request of requests) {
   const normalized = canonicalizeSprPartSynonyms(request);
   const matches = filterStrictSprVehicleMatches(findSprEngineMatches([target], normalized), normalized);
@@ -109,7 +147,7 @@ for (const testCase of contextualCases) {
   }
 }
 
-const totalCases = requests.length + contextualCases.length;
+const totalCases = requests.length + contextualCases.length + 1;
 console.log(`SPR catalog regressions: ${totalCases - failures.length}/${totalCases} passed`);
 if (failures.length) {
   console.error(JSON.stringify(failures, null, 2));
