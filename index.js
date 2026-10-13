@@ -7,6 +7,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const FormData = require('form-data');
 const crypto = require('crypto');
 const fs = require('fs');
 const admin = require('firebase-admin');
@@ -14,6 +15,7 @@ const admin = require('firebase-admin');
 const app = express();
 const PORT = process.env.PORT || 5000;
 const WEBHOOK_BODY_LIMIT = process.env.WEBHOOK_BODY_LIMIT || '1mb';
+const MEDIA_BODY_LIMIT = process.env.MEDIA_BODY_LIMIT || '12mb';
 const SERVER_STARTED_AT = new Date().toISOString();
 const RESEND_API_URL = 'https://api.resend.com/emails';
 const RESEND_API_KEY = String(process.env.RESEND_API_KEY || '').trim();
@@ -29,6 +31,10 @@ const SPR_INACTIVITY_STATE_PATH = 'system_alert_state/spr_inactivity';
 
 // Capture raw body for Meta HMAC-SHA256 signature verification
 app.use(cors());
+// Media messages are posted as JSON with a base64 payload from the CRM. Keep
+// this larger parser scoped to the media endpoint so webhook bodies retain the
+// normal 1 MB safety limit.
+app.use('/api/send-media', express.json({ limit: MEDIA_BODY_LIMIT }));
 app.use(express.json({
   limit: WEBHOOK_BODY_LIMIT,
   verify: (req, res, buf) => {
@@ -3669,6 +3675,228 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
  * Protected with Firebase Auth & Role Verification (ADMINISTRADOR or SUPERADMIN only)
  * Supports testing with both explicitly passed credentials and saved company credentials.
  */
+/**
+ * Send an image or document from the CRM through the tenant's WhatsApp Cloud
+ * API connection. The CRM sends a bounded base64 payload; the backend uploads
+ * it to Meta first and then sends the resulting media ID to the customer.
+ */
+app.post('/api/send-media', authenticateUser, async (req, res) => {
+  const {
+    to_phone,
+    company_id,
+    conversation_id,
+    user_name,
+    client_message_id,
+    message_type,
+    filename,
+    mime_type,
+    data_base64,
+    caption
+  } = req.body || {};
+  const user = req.authenticatedUser;
+  const allowedRoles = ['SUPERADMIN', 'ADMINISTRADOR', 'ASESOR'];
+
+  if (!allowedRoles.includes(user.rol)) {
+    return res.status(403).json({
+      success: false,
+      error: 'Acceso denegado: tu rol no tiene permisos para enviar archivos.'
+    });
+  }
+  if (!company_id || !to_phone || !data_base64 || !client_message_id) {
+    return res.status(400).json({
+      success: false,
+      error: 'Faltan company_id, to_phone, data_base64 o client_message_id.'
+    });
+  }
+  if (user.rol !== 'SUPERADMIN' && user.company_id !== company_id) {
+    return res.status(403).json({
+      success: false,
+      error: 'Acceso denegado: no puedes enviar archivos desde otra empresa.'
+    });
+  }
+
+  const cleanPhone = normalizeWhatsAppPhone(to_phone);
+  if (!cleanPhone) {
+    return res.status(400).json({ success: false, error: 'El teléfono destino no es válido.' });
+  }
+
+  const mime = String(mime_type || 'application/octet-stream').trim().toLowerCase();
+  const requestedType = String(message_type || '').trim().toLowerCase();
+  const mediaType = requestedType === 'image' || mime.startsWith('image/') ? 'image' : 'document';
+  const safeFilename = String(filename || (mediaType === 'image' ? 'imagen' : 'documento'))
+    .replace(/[\\/:*?"<>|\r\n]/g, '_')
+    .slice(0, 180);
+  const rawBase64 = String(data_base64).replace(/^data:[^;]+;base64,/, '').replace(/\s/g, '');
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(rawBase64)) {
+    return res.status(400).json({ success: false, error: 'El archivo no tiene un formato base64 válido.' });
+  }
+  const fileBuffer = Buffer.from(rawBase64, 'base64');
+  const maxBytes = Math.max(1, Number(process.env.MEDIA_MAX_BYTES || 10 * 1024 * 1024));
+  if (!fileBuffer.length || fileBuffer.length > maxBytes) {
+    return res.status(413).json({
+      success: false,
+      error: `El archivo debe pesar entre 1 byte y ${Math.floor(maxBytes / (1024 * 1024))} MB.`
+    });
+  }
+
+  let preferredPhoneNumberId = null;
+  if (conversation_id) {
+    if (!db) return res.status(503).json({ success: false, error: 'Base de datos no disponible.' });
+    const convSnap = await db.doc(`conversations/${conversation_id}`).get();
+    if (!convSnap.exists) {
+      return res.status(404).json({ success: false, error: 'La conversación indicada no existe.' });
+    }
+    const convData = convSnap.data() || {};
+    if (convData.company_id !== company_id) {
+      return res.status(403).json({ success: false, error: 'La conversación pertenece a otra empresa.' });
+    }
+    const convTarget = normalizeWhatsAppPhone(convData.external_user_id || convData.contact_phone || '');
+    if (convTarget && !cleanPhone.endsWith(convTarget.slice(-10))) {
+      return res.status(400).json({ success: false, error: 'El teléfono no coincide con la conversación.' });
+    }
+    preferredPhoneNumberId = convData.phone_number_id || convData.whatsapp_phone_number_id || null;
+  }
+
+  if (!db) return res.status(503).json({ success: false, error: 'Base de datos no disponible.' });
+  const cleanClientId = String(client_message_id).trim().replace(/[^a-zA-Z0-9_-]/g, '');
+  if (cleanClientId.length < 3) {
+    return res.status(400).json({ success: false, error: 'client_message_id no es válido.' });
+  }
+  const dedupDocRef = db.doc(`outbound_requests/${company_id}_${cleanClientId}`);
+  let existingRecord = null;
+  try {
+    await db.runTransaction(async transaction => {
+      const snap = await transaction.get(dedupDocRef);
+      const data = snap.exists ? snap.data() || {} : {};
+      const stale = data.started_at_ms && Date.now() - data.started_at_ms > 60000;
+      if (data.status === 'completed' && data.meta_message_id) {
+        existingRecord = data;
+        return;
+      }
+      if (data.status === 'in_flight' && !stale) {
+        existingRecord = { in_flight: true };
+        return;
+      }
+      transaction.set(dedupDocRef, {
+        company_id,
+        client_message_id: cleanClientId,
+        status: 'in_flight',
+        started_at: new Date().toISOString(),
+        started_at_ms: Date.now()
+      });
+    });
+  } catch (error) {
+    console.error('[Media idempotency] lock failed:', error.message);
+    return res.status(500).json({ success: false, error: 'No se pudo asegurar el envío único.' });
+  }
+  if (existingRecord?.in_flight) {
+    return res.status(409).json({ success: false, error: 'El archivo ya está siendo procesado.' });
+  }
+  if (existingRecord?.meta_message_id) {
+    return res.status(200).json({ success: true, message_id: existingRecord.meta_message_id, is_duplicate: true });
+  }
+
+  let activePhoneNumberId = null;
+  let activeToken = null;
+  try {
+    const outboundTenant = await resolveOutboundTenant(db, company_id, preferredPhoneNumberId);
+    activePhoneNumberId = outboundTenant?.phoneNumberId || null;
+    activeToken = outboundTenant?.accessToken || null;
+  } catch (error) {
+    await dedupDocRef.set({ status: 'failed', error: error.message, failed_at: new Date().toISOString() }, { merge: true });
+    return res.status(500).json({ success: false, error: 'No se pudieron consultar las credenciales de WhatsApp.' });
+  }
+  if (!activePhoneNumberId || !activeToken) {
+    await dedupDocRef.set({ status: 'failed', error: 'Credenciales no configuradas', failed_at: new Date().toISOString() }, { merge: true });
+    return res.status(400).json({ success: false, error: 'Credenciales de WhatsApp no configuradas para esta empresa.' });
+  }
+
+  const http = customHttpClient || axios;
+  try {
+    const form = new FormData();
+    form.append('messaging_product', 'whatsapp');
+    form.append('type', mime);
+    form.append('file', fileBuffer, { filename: safeFilename, contentType: mime });
+    const uploadRes = await http.post(
+      `https://graph.facebook.com/${GRAPH_API_VERSION}/${activePhoneNumberId}/media`,
+      form,
+      { headers: { Authorization: `Bearer ${activeToken}`, ...form.getHeaders() }, maxBodyLength: Infinity, maxContentLength: Infinity }
+    );
+    logMetaApiResponse('subida_media_manual', uploadRes);
+    const mediaId = uploadRes.data?.id || null;
+    if (!mediaId) throw new Error('Meta no devolvió un ID de archivo.');
+
+    const mediaPayload = {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: cleanPhone,
+      type: mediaType,
+      [mediaType]: { id: mediaId }
+    };
+    const normalizedCaption = String(caption || '').trim();
+    if (normalizedCaption) mediaPayload[mediaType].caption = normalizedCaption;
+    if (mediaType === 'document') mediaPayload.document.filename = safeFilename;
+    const metaRes = await http.post(
+      `https://graph.facebook.com/${GRAPH_API_VERSION}/${activePhoneNumberId}/messages`,
+      mediaPayload,
+      { headers: { Authorization: `Bearer ${activeToken}`, 'Content-Type': 'application/json' } }
+    );
+    logMetaApiResponse('envio_media_manual', metaRes);
+    const metaMsgId = metaRes.data?.messages?.[0]?.id || null;
+    if (!metaMsgId) throw new Error('Meta respondió sin un ID de mensaje.');
+
+    await dedupDocRef.set({ status: 'completed', meta_message_id: metaMsgId, media_id: mediaId, completed_at: new Date().toISOString(), delivered_to_meta: true }, { merge: true });
+    const createdAt = new Date().toISOString();
+    if (conversation_id) {
+      const msgId = cleanClientId.startsWith('msg_') ? cleanClientId : `msg_${cleanClientId}`;
+      const displayContent = normalizedCaption || `📎 ${safeFilename}`;
+      const msgRef = db.doc(`messages/${msgId}`);
+      await msgRef.set({
+        id: msgId,
+        company_id,
+        conversation_id,
+        direction: 'outbound',
+        channel: 'whatsapp',
+        content: displayContent,
+        sender_type: 'agent',
+        user_name: user_name || user.nombre,
+        created_at: createdAt,
+        delivery_status: 'accepted',
+        external_message_id: metaMsgId,
+        phone_number_id: activePhoneNumberId,
+        media_id: mediaId,
+        media_type: mediaType,
+        media_mime_type: mime,
+        media_filename: safeFilename,
+        media_caption: normalizedCaption || null
+      });
+      await mergeBufferedDeliveryStatus(db, metaMsgId, msgRef);
+      await db.doc(`conversations/${conversation_id}`).set({
+        last_message: displayContent,
+        last_message_sender: 'agent',
+        last_message_at: createdAt,
+        updated_at: createdAt,
+        human_handoff: true,
+        bot_enabled: false,
+        auto_reactivate_enabled: true,
+        human_handoff_started_at: createdAt,
+        last_agent_message_at: createdAt
+      }, { merge: true });
+    }
+    return res.status(200).json({ success: true, message_id: metaMsgId, media_id: mediaId, media_type: mediaType, delivery_status: 'accepted' });
+  } catch (error) {
+    logMetaApiError('envio_media_manual', error);
+    await dedupDocRef.set({ status: 'failed', error: error.response?.data?.error?.message || error.message, failed_at: new Date().toISOString() }, { merge: true }).catch(() => {});
+    const metaError = error.response?.data?.error;
+    return res.status(error.response?.status || 500).json({
+      success: false,
+      error_code: metaError?.code ? `META_${metaError.code}` : 'WHATSAPP_MEDIA_SEND_FAILED',
+      meta_error_code: metaError?.code || null,
+      error: metaError?.message || error.message || 'No se pudo enviar el archivo.'
+    });
+  }
+});
+
 app.post('/api/test-message', authenticateUser, async (req, res) => {
   const { phone_number_id, access_token, to_phone, message_text, company_id } = req.body;
   const user = req.authenticatedUser;
