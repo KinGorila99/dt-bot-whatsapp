@@ -510,7 +510,7 @@ function isFriendlyGreetingText(value) {
 }
 
 function isCourtesyText(value) {
-  const text = normalizeBotText(value);
+  const text = normalizeBotText(value).replace(/^(?:(?:ou+|wow+|wao+|ah+|ay+|oh+|ooo+|jaja+)\s+)+/, '').trim();
   return /^(?:(?:muchas|muchisimas|mil)\s+)?gracias(?:\s+(?:por|igualmente|de todos modos|todo|tu|su|te|le)\b.*)?$/.test(text)
     || /^(?:(?:te|le)\s+)?agradezco\b/.test(text);
 }
