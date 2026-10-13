@@ -1,4 +1,4 @@
-/**
+let sprMatches = [];          let officialSearchItems = [];          try {            const officialQuery = buildSprFocusedSearchQuery(catalogQueryText);            officialSearchItems = await searchSprCatalog(officialQuery);            const officialStrictMatches = filterStrictSprVehicleMatches(              findSprEngineMatches(officialSearchItems, catalogLowerText),              catalogLowerText            );            const officialMatches = officialStrictMatches.length              ? officialStrictMatches              : findSprExhaustiveMatches(officialSearchItems, catalogQueryText);            if (officialMatches.length || isGenericSprCatalogRequest(catalogLowerText)) {              catalogItems = officialSearchItems;              sprMatches = officialMatches;            }          } catch (officialSearchError) {            console.warn('⚠️ SPR official search failed; using collection fallback:', officialSearchError.message);          }          if (!sprMatches.length) {            sprMatches = findSprEngineMatches(catalogItems, catalogLowerText);            sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);          }/**
  * DT Bot Core & DT CRM Core — Production WhatsApp Cloud API Server
  * Built by DT Marketing
  */
@@ -2905,23 +2905,7 @@ Incluye:
           } catch (catalogLoadError) {
             console.warn('⚠️ SPR collection load failed; continuing with official search:', catalogLoadError.message);
           }
-          let sprMatches = findSprEngineMatches(catalogItems, catalogLowerText);
-          sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
-          // A strict first pass is useful for avoiding cross-part answers, but
-          // it must not be the only pass. Query the official SPR search
-          // endpoint with canonical synonyms and keyword order before routing
-          // an otherwise valid request to review.
-          if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
-            sprMatches = findSprExhaustiveMatches(catalogItems, catalogQueryText);
-          }
-          // If the first official catalog page misses, use SPR's own product-search
-          // endpoint as the second filter. It tries the canonical piece name,
-          // every known synonym and both word orders, returning live price and
-          // link data from SPR.
-          if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
-            const exhaustiveSearch = await searchSprCatalogExhaustively(catalogItems, catalogQueryText);
-            catalogItems = exhaustiveSearch.items;
-            sprMatches = exhaustiveSearch.matches;
+          let sprMatches = [];          let officialSearchItems = [];          // Always consult SPR's live search first. This keeps prices, links and          // newly published products current for every piece request instead of          // trusting a potentially stale collection response.          try {            const officialQuery = buildSprFocusedSearchQuery(catalogQueryText);            officialSearchItems = await searchSprCatalog(officialQuery);            const officialStrictMatches = filterStrictSprVehicleMatches(              findSprEngineMatches(officialSearchItems, catalogLowerText),              catalogLowerText            );            const officialMatches = officialStrictMatches.length              ? officialStrictMatches              : findSprExhaustiveMatches(officialSearchItems, catalogQueryText);            if (officialMatches.length || isGenericSprCatalogRequest(catalogLowerText)) {              catalogItems = officialSearchItems;              sprMatches = officialMatches;            }          } catch (officialSearchError) {            console.warn('⚠️ SPR official search failed; using collection fallback:', officialSearchError.message);          }          // If the live search is unavailable or too narrow, keep the existing          // collection and exhaustive official-query fallback so valid requests          // still receive a response instead of being sent to an advisor.          if (!sprMatches.length) {            sprMatches = findSprEngineMatches(catalogItems, catalogLowerText);            sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);          }          if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {            sprMatches = findSprExhaustiveMatches(catalogItems, catalogQueryText);          }          if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {            const exhaustiveSearch = await searchSprCatalogExhaustively(              [...catalogItems, ...officialSearchItems],              catalogQueryText            );            catalogItems = exhaustiveSearch.items;            sprMatches = exhaustiveSearch.matches;
           }
           // A strict miss must not end the conversation. Run one final ranked pass
           // over all official results so
