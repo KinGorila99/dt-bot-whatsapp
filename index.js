@@ -131,7 +131,8 @@ function mergeTenantSafeBotSettings(tenant, settings) {
   };
 }
 // Auto-reactivate the bot after an advisor has been idle.
-const HUMAN_HANDOFF_IDLE_MINUTES = Math.max(5, Number(process.env.HUMAN_HANDOFF_IDLE_MINUTES || 30));
+// Keep bot silent for five minutes after the last advisor message.
+const HUMAN_HANDOFF_IDLE_MINUTES = 5;
 
 function timestampMs(value) {
   if (!value) return 0;
