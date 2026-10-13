@@ -2905,7 +2905,46 @@ Incluye:
           } catch (catalogLoadError) {
             console.warn('⚠️ SPR collection load failed; continuing with official search:', catalogLoadError.message);
           }
-          let sprMatches = [];          let officialSearchItems = [];          // Always consult SPR's live search first. This keeps prices, links and          // newly published products current for every piece request instead of          // trusting a potentially stale collection response.          try {            const officialQuery = buildSprFocusedSearchQuery(catalogQueryText);            officialSearchItems = await searchSprCatalog(officialQuery);            const officialStrictMatches = filterStrictSprVehicleMatches(              findSprEngineMatches(officialSearchItems, catalogLowerText),              catalogLowerText            );            const officialMatches = officialStrictMatches.length              ? officialStrictMatches              : findSprExhaustiveMatches(officialSearchItems, catalogQueryText);            if (officialMatches.length || isGenericSprCatalogRequest(catalogLowerText)) {              catalogItems = officialSearchItems;              sprMatches = officialMatches;            }          } catch (officialSearchError) {            console.warn('⚠️ SPR official search failed; using collection fallback:', officialSearchError.message);          }          // If the live search is unavailable or too narrow, keep the existing          // collection and exhaustive official-query fallback so valid requests          // still receive a response instead of being sent to an advisor.          if (!sprMatches.length) {            sprMatches = findSprEngineMatches(catalogItems, catalogLowerText);            sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);          }          if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {            sprMatches = findSprExhaustiveMatches(catalogItems, catalogQueryText);          }          if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {            const exhaustiveSearch = await searchSprCatalogExhaustively(              [...catalogItems, ...officialSearchItems],              catalogQueryText            );            catalogItems = exhaustiveSearch.items;            sprMatches = exhaustiveSearch.matches;
+                    let sprMatches = [];
+          let officialSearchItems = [];
+          // Always consult SPR's live search first. This keeps prices, links and
+          // newly published products current for every piece request instead of
+          // trusting a potentially stale collection response.
+          try {
+            const officialQuery = buildSprFocusedSearchQuery(catalogQueryText);
+            officialSearchItems = await searchSprCatalog(officialQuery);
+            const officialStrictMatches = filterStrictSprVehicleMatches(
+              findSprEngineMatches(officialSearchItems, catalogLowerText),
+              catalogLowerText
+            );
+            const officialMatches = officialStrictMatches.length
+              ? officialStrictMatches
+              : findSprExhaustiveMatches(officialSearchItems, catalogQueryText);
+            if (officialMatches.length || isGenericSprCatalogRequest(catalogLowerText)) {
+              catalogItems = officialSearchItems;
+              sprMatches = officialMatches;
+            }
+          } catch (officialSearchError) {
+            console.warn('⚠️ SPR official search failed; using collection fallback:', officialSearchError.message);
+          }
+
+          // If the live search is unavailable or too narrow, keep the existing
+          // collection and exhaustive official-query fallback so valid requests
+          // still receive a response instead of being sent to an advisor.
+          if (!sprMatches.length) {
+            sprMatches = findSprEngineMatches(catalogItems, catalogLowerText);
+            sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
+          }
+          if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
+            sprMatches = findSprExhaustiveMatches(catalogItems, catalogQueryText);
+          }
+          if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
+            const exhaustiveSearch = await searchSprCatalogExhaustively(
+              [...catalogItems, ...officialSearchItems],
+              catalogQueryText
+            );
+            catalogItems = exhaustiveSearch.items;
+            sprMatches = exhaustiveSearch.matches;
           }
           // A strict miss must not end the conversation. Run one final ranked pass
           // over all official results so
