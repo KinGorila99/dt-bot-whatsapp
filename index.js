@@ -1999,7 +1999,7 @@ async function resolveTenant(dbInstance, phoneNumberId, wabaId) {
   }
 
   return {
-    companyId,
+    
     intDocId,
     intDoc,
     accessToken
@@ -2013,7 +2013,7 @@ async function resolveTenant(dbInstance, phoneNumberId, wabaId) {
  * Prefer the conversation's phone number when available, then a connected
  * and verified integration that actually has a token.
  */
-async function resolveOutboundTenant(dbInstance, companyId, preferredPhoneNumberId = null) {
+async function resolveOutboundTenant(dbInstance,  preferredPhoneNumberId = null) {
   if (!dbInstance || !companyId) return null;
   // Keep this lookup to one equality filter.  The previous compound
   // company_id + provider query required a Firestore composite index that
@@ -2598,7 +2598,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
     // customer silently paused while preserving acknowledgements such as
     // "gracias" with the human advisor.
     if (companyId === SPR_COMPANY_ID && !botPausedByOwner
-      && (convData.human_handoff === true || convData.bot_enabled === false)
+      && (convData.human_handoff === true || convData.bot_enabled === false)      && (!convData.last_agent_message_at || shouldAutoReactivateBot(convData))
       && isSprNewRequestOrQuestion(messageText)) {
       convData.human_handoff = false;
       convData.bot_enabled = true;
