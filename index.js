@@ -896,7 +896,10 @@ function normalizeSprProduct(product) {
     : product?.available !== false;
   const handle = String(product?.handle || '').trim();
   const sku = String(variant.sku || product?.sku || product?.codigo || product?.code || '').replace(/^'+/, '').trim();
-  const productUrl = String(product?.url || product?.product_url || product?.link || '').trim();
+  const rawProductUrl = String(product?.url || product?.product_url || product?.link || '').trim();
+  const productUrl = rawProductUrl.startsWith('/')
+    ? 'https://sprautopartes.mx' + rawProductUrl
+    : rawProductUrl;
   const image = normalizeSprImageUrl(
     product?.image || product?.featured_image || product?.featuredImage
       || product?.image_url || product?.imageUrl || product?.imagen || product?.foto
@@ -2896,7 +2899,12 @@ Incluye:
       let sprCatalogReply = ''; let sprCatalogMatched = false;
       if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
-          let catalogItems = await getSprEngineCatalog();
+          let catalogItems = [];
+          try {
+            catalogItems = await getSprEngineCatalog();
+          } catch (catalogLoadError) {
+            console.warn('⚠️ SPR collection load failed; continuing with official search:', catalogLoadError.message);
+          }
           let sprMatches = findSprEngineMatches(catalogItems, catalogLowerText);
           sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
           // A strict first pass is useful for avoiding cross-part answers, but
