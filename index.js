@@ -2901,7 +2901,7 @@ Incluye:
         try {
           let catalogItems = [];
           try {
-            catalogItems = await getSprEngineCatalog();
+            catalogItems = [];
           } catch (catalogLoadError) {
             console.warn('⚠️ SPR collection load failed; continuing with official search:', catalogLoadError.message);
           }
@@ -2925,12 +2925,13 @@ Incluye:
               sprMatches = officialMatches;
             }
           } catch (officialSearchError) {
-            console.warn('⚠️ SPR official search failed; using collection fallback:', officialSearchError.message);
+            console.warn('⚠️ SPR official search failed; no local catalog fallback was used:', officialSearchError.message);
           }
 
-          // If the live search is unavailable or too narrow, keep the existing
-          // collection and exhaustive official-query fallback so valid requests
-          // still receive a response instead of being sent to an advisor.
+          // Continue only with official results and bounded official-query variants.
+          // No local export or collection fallback is consulted.
+          
+          catalogItems = officialSearchItems;
           if (!sprMatches.length) {
             sprMatches = findSprEngineMatches(catalogItems, catalogLowerText);
             sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
