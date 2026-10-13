@@ -9,7 +9,6 @@ const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
 const fs = require('fs');
-const path = require('path');
 const admin = require('firebase-admin');
 
 const app = express();
@@ -758,18 +757,7 @@ function formatWhatsAppReply(value) {
 
 const SPR_ENGINE_COLLECTION_URL = process.env.SPR_FULL_CATALOG_URL || process.env.SPR_ENGINE_COLLECTION_URL || 'https://sprautopartes.mx/products.json?limit=250';
 const SPR_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_CATALOG_TTL_MS || 60000));
-// A complete digital catalog can be mounted as JSON/CSV through an environment
-// URL or local file. When present, it is the primary source for prices and
-// product matching; the public Shopify search remains a compatibility fallback
-// until the digital catalog is configured.
-const SPR_DIGITAL_CATALOG_URL = String(process.env.SPR_DIGITAL_CATALOG_URL || '').trim();
-const DEFAULT_SPR_DIGITAL_CATALOG_FILE = path.join(__dirname, 'spr_catalog_october_2026.json');
-const SPR_DIGITAL_CATALOG_FILE = String(
-  process.env.SPR_DIGITAL_CATALOG_FILE
-    || (fs.existsSync(DEFAULT_SPR_DIGITAL_CATALOG_FILE) ? DEFAULT_SPR_DIGITAL_CATALOG_FILE : '')
-).trim();
-const SPR_DIGITAL_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_DIGITAL_CATALOG_TTL_MS || 300000));
-// Shopify product titles usually omit trim/package words that customers include
+// A complete digital catalog lly omit trim/package words that customers include
 // in natural language (for example, "GL" or "Mind"). Keep the vehicle model,
 // year and requested part strict while treating these descriptors as optional.
 const SPR_OPTIONAL_VEHICLE_WORDS = new Set(['gl', 'gls', 'gle', 'glx', 'lt', 'ls', 'le', 'lx', 'ex', 'se', 'sv', 'sr', 'slt', 'xlt', 'xl', 'xle', 'xse', 'mind', 'mild', 'sport', 'touring', 'limited', 'premium', 'plus', 'classic', 'sedan', 'hatchback', 'hb', 'coupe', 'convertible']);
@@ -789,9 +777,7 @@ const ALDO_STOCK_TIMEOUT_MS = Math.max(3000, Number(process.env.ALDO_STOCK_TIMEO
 const ALDO_STOCK_CACHE_TTL_MS = Math.max(15000, Number(process.env.ALDO_STOCK_CACHE_TTL_MS || 60000));
 const ALDO_STOCK_QUERY_PARAMS = String(process.env.ALDO_STOCK_QUERY_PARAMS || 'q,search')
   .split(',')
-  .map(value => value.trim())
-  .filter(Boolean);
-const ALDO_STOCK_CATEGORY_PATTERN = /\b(colision|choque|faro(?:s)?|niebla|calavera(?:s)?|lampara(?:s)?|luz|luces|iluminacion|espejo(?:s)?|parrilla(?:s)?|defensa(?:s)?|fascia(?:s)?|cofre|salpicadera(?:s)?|tolva(?:s)?|bisagra(?:s)?|moldura(?:s)?|manija(?:s)?|rejilla(?:s)?|puerta(?:s)?|cajuela|carroceria)\b/;
+  .map(vaa(?:s)?|defensa(?:s)?|fascia(?:s)?|cofre|salpicadera(?:s)?|tolva(?:s)?|bisagra(?:s)?|moldura(?:s)?|manija(?:s)?|rejilla(?:s)?|puerta(?:s)?|cajuela|carroceria)\b/;
 const aldoStockCache = new Map();
 
 function isAldoStockCategoryQuery(value) {
@@ -934,181 +920,21 @@ function normalizeSprProduct(product) {
   };
 }
 
-function parseDelimitedCatalogLine(line, delimiter) {
-  const values = [];
-  let value = '';
-  let quoted = false;
-  for (let index = 0; index < line.length; index += 1) {
-    const char = line[index];
-    const next = line[index + 1];
-    if (char === '"' && quoted && next === '"') {
-      value += '"';
-      index += 1;
-    } else if (char === '"') {
-      quoted = !quoted;
-    } else if (char === delimiter && !quoted) {
-      values.push(value.trim());
-      value = '';
-    } else {
-      value += char;
-    }
-  }
-  values.push(value.trim());
-  return values;
-}
-
-function parseDigitalCatalogPayload(payload) {
-  let source = payload;
-  if (Buffer.isBuffer(source)) source = source.toString('utf8');
-  if (typeof source === 'string') {
-    const text = source.replace(/^\uFEFF/, '').trim();
-    if (!text) return [];
-    try {
-      source = JSON.parse(text);
-    } catch (_) {
-      const lines = text.split(/\r?\n/).filter(Boolean);
-      if (lines.length < 2) return [];
-      const delimiter = lines[0].includes(';') && !lines[0].includes(',') ? ';' : ',';
-      const headers = parseDelimitedCatalogLine(lines[0], delimiter).map(header => normalizeBotText(header).replace(/\s+/g, '_'));
-      return lines.slice(1).map(line => {
-        const values = parseDelimitedCatalogLine(line, delimiter);
-        return headers.reduce((row, header, index) => {
-          row[header] = values[index] || '';
-          return row;
-        }, {});
-      });
-    }
-  }
-
-  if (Array.isArray(source)) return source;
-  if (source && Array.isArray(source.products)) return source.products;
-  if (source && Array.isArray(source.items)) return source.items;
-  if (source && Array.isArray(source.data)) return source.data;
-  return [];
-}
-
-function normalizeDigitalCatalogRow(row) {
-  const source = row && typeof row === 'object' ? row : {};
-  const title = String(
-    source.title || source.name || source.product_name || source.nombre || source.descripcion_corta || ''
-  ).trim();
-  const price = source.price ?? source.precio ?? source.precio_normal ?? source.regular_price ?? source.sale_price
-    ?? source.variant_price ?? source['Variant Price'] ?? '';
-  const compareAtPrice = source.compare_at_price ?? source.precio_lista ?? source.precio_regular
-    ?? source.variant_compare_at_price ?? source['Variant Compare At Price'] ?? '';
-  const availableValue = source.available ?? source.disponible ?? source.in_stock ?? source.existencia
-    ?? source.variant_available ?? source['Variant Available'];
-  const sku = String(
-    source.sku || source.codigo || source.code || source.clave || source.variant_sku || source['Variant SKU'] || ''
-  ).replace(/^'+/, '').trim();
-  const explicitUrl = String(source.url || source.product_url || source.link || source.productUrl || '').trim();
-  const variants = Array.isArray(source.variants) && source.variants.length
-    ? source.variants
-    : [{
-      price,
-      compare_at_price: compareAtPrice,
-      sku,
-      available: availableValue === '' || availableValue === null || availableValue === undefined
-        ? true
-        : !['false', '0', 'no', 'agotado', 'sin existencia'].includes(normalizeBotText(availableValue))
-    }];
-  const rowTags = [
-    source.tags,
-    source.keywords,
-    source.sinonimos,
-    source.sinónimos,
-    source.marca,
-    source.brand,
-    source.make,
-    source.modelo,
-    source.model,
-    source.año,
-    source.year,
-    source.compatibility,
-    source.compatibilidad,
-    source.vehicle_make,
-    source.vehicle_model,
-    source.year_start,
-    source.year_end,
-    sku,
-    source.categoria,
-    source.category,
-    source.description,
-    source.descripcion
-  ].flatMap(value => Array.isArray(value) ? value : [value]).filter(Boolean).join(' ');
-  return normalizeSprProduct({
-    ...source,
-    id: source.id || sku,
-    title,
-    vendor: source.vendor || source.brand || source.marca || 'SPR Autopartes',
-    product_type: source.product_type || source.category || source.categoria || '',
-    tags: rowTags,
-    body_html: source.body_html || source.description || source.descripcion || '',
-    handle: source.handle || source.slug || '',
-    url: explicitUrl,
-    image: source.image || source.featured_image || source.featuredImage || source.image_url
-      || source.imageUrl || source.imagen || source.foto || source.thumbnail || source.images,
-    variants
-  });
-}
-
-async function getSprDigitalCatalog() {
-  const now = Date.now();
-  if (sprDigitalCatalogCache.items.length > 0 && now - sprDigitalCatalogCache.fetchedAt < SPR_DIGITAL_CATALOG_TTL_MS) {
-    return sprDigitalCatalogCache.items;
-  }
-  if (!SPR_DIGITAL_CATALOG_URL && !SPR_DIGITAL_CATALOG_FILE) return [];
-  if (sprDigitalCatalogFetchPromise) return sprDigitalCatalogFetchPromise;
-
-  sprDigitalCatalogFetchPromise = (async () => {
-    let payload;
-    if (SPR_DIGITAL_CATALOG_FILE) {
-      payload = await fs.promises.readFile(SPR_DIGITAL_CATALOG_FILE);
-    } else {
-      const response = await axios.get(SPR_DIGITAL_CATALOG_URL, {
-        timeout: 15000,
-        responseType: 'text',
-        headers: { 'User-Agent': 'DT Bot Core / SPR digital catalog sync', Accept: 'application/json,text/csv,text/plain' }
-      });
-      payload = response.data;
-    }
-    const items = parseDigitalCatalogPayload(payload)
-      .map(normalizeDigitalCatalogRow)
-      .filter(item => item.title && item.regularPrice > 0);
-    if (!items.length) throw new Error('El catálogo digital no contiene productos con precio válido');
-    sprDigitalCatalogCache = { fetchedAt: Date.now(), items };
-    return items;
-  })().finally(() => {
-    sprDigitalCatalogFetchPromise = null;
-  });
-  return sprDigitalCatalogFetchPromise;
-}
+const SPR_OFFICIAL_SEARCH_URL = 'https://sprautopartes.mx/search/suggest.json';
 
 async function getSprEngineCatalog() {
   const now = Date.now();
   if (sprCatalogCache.items.length > 0 && now - sprCatalogCache.fetchedAt < SPR_CATALOG_TTL_MS) return sprCatalogCache.items;
   if (sprCatalogFetchPromise) return sprCatalogFetchPromise;
   sprCatalogFetchPromise = (async () => {
-    try {
-      const digitalItems = [];
-      if (digitalItems.length) {
-        sprCatalogSource = 'digital';
-        sprCatalogCache = { fetchedAt: Date.now(), items: digitalItems };
-        console.log(`📚 [SPR Digital Catalog] ${digitalItems.length} productos cargados como fuente principal.`);
-        return digitalItems;
-      }
-    } catch (digitalError) {
-      console.warn('⚠️ SPR digital catalog unavailable; using Shopify fallback:', digitalError.message);
-    }
-
     const response = await axios.get(SPR_ENGINE_COLLECTION_URL, {
       timeout: 9000,
-      headers: { 'User-Agent': 'DT Bot Core / SPR catalog sync' }
+      headers: { 'User-Agent': 'DT Bot Core / SPR official catalog' }
     });
     const products = Array.isArray(response.data?.products) ? response.data.products : [];
-    if (!products.length) throw new Error('SPR catalog returned no products');
+    if (!products.length) throw new Error('SPR official catalog returned no products');
     const items = products.map(normalizeSprProduct).filter(item => item.title && item.regularPrice > 0);
-    sprCatalogSource = 'shopify';
+    sprCatalogSource = 'official_shopify_catalog';
     sprCatalogCache = { fetchedAt: Date.now(), items };
     return items;
   })().finally(() => {
@@ -1153,7 +979,7 @@ async function getTenantKnowledgeBase(dbInstance, companyId) {
 }
 
 async function searchSprCatalog(query) {
-  const response = await axios.get('https://sprautopartes.mx/search/suggest.json', {
+  const response = await axios.get(SPR_OFFICIAL_SEARCH_URL, {
     timeout: 9000,
     params: {
       q: String(query || '').trim(),
@@ -1640,6 +1466,30 @@ function buildSprCatalogSearchQueries(value) {
     queries.push(`tornillo estabilizador ${vehicleText}`.trim(), `${vehicleText} tornillo estabilizador`.trim());
   }
   return [...new Set(queries.map(query => String(query || '').replace(/\s+/g, ' ').trim()).filter(Boolean))].slice(0, 16);
+}
+
+// Query SPR's official search endpoint with bounded canonical variants.
+// The local export is intentionally not used: prices, links and new products
+// must come from the live SPR website on every cache refresh.
+async function searchSprCatalogExhaustively(catalogItems, query) {
+  const merged = new Map();
+  for (const item of Array.isArray(catalogItems) ? catalogItems : []) {
+    const key = item.id || item.url || item.handle || item.title;
+    if (key) merged.set(String(key), item);
+  }
+  const queries = buildSprCatalogSearchQueries(query);
+  const results = await Promise.allSettled(queries.map(searchQuery => searchSprCatalog(searchQuery)));
+  for (const result of results) {
+    if (result.status !== 'fulfilled') continue;
+    for (const item of result.value || []) {
+      const key = item.id || item.url || item.handle || item.title;
+      if (key && !merged.has(String(key))) merged.set(String(key), item);
+    }
+  }
+  const items = [...merged.values()];
+  let matches = filterStrictSprVehicleMatches(findSprEngineMatches(items, query), query);
+  if (!matches.length) matches = findSprExhaustiveMatches(items, query);
+  return { items, matches, queries };
 }
 
 // A short follow-up such as "delantero" or "izquierdo" is a refinement of
@@ -3049,25 +2899,23 @@ Incluye:
           let sprMatches = findSprEngineMatches(catalogItems, catalogLowerText);
           sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
           // A strict first pass is useful for avoiding cross-part answers, but
-          // it must not be the only pass. Investigate the complete digital
-          // catalog with canonical synonyms and keyword order before routing
+          // it must not be the only pass. Query the official SPR search
+          // endpoint with canonical synonyms and keyword order before routing
           // an otherwise valid request to review.
           if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
             sprMatches = findSprExhaustiveMatches(catalogItems, catalogQueryText);
           }
-          // If the local export misses, use SPR's own product-search endpoint as
-          // the second filter. It tries the canonical piece name, every known
-          // synonym and both word orders. Keep the lookup on SPR's own site so
-          // current price and link data are returned. This second filter runs
-          // even when an export exists, because the page can contain a product
-          // added after the last export.
+          // If the first official catalog page misses, use SPR's own product-search
+          // endpoint as the second filter. It tries the canonical piece name,
+          // every known synonym and both word orders, returning live price and
+          // link data from SPR.
           if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
             const exhaustiveSearch = await searchSprCatalogExhaustively(catalogItems, catalogQueryText);
             catalogItems = exhaustiveSearch.items;
             sprMatches = exhaustiveSearch.matches;
           }
-          // The digital catalog is authoritative, but a strict miss must not
-          // end the conversation. Run one final ranked pass over all rows so
+          // A strict miss must not end the conversation. Run one final ranked pass
+          // over all official results so
           // typos, colloquial wording, omitted brand names and different word
           // order still return the closest catalog options with their prices
           // and links. Exact matches always win before this recovery pass.
@@ -3986,9 +3834,6 @@ module.exports = {
   businessMinutesSince,
   isSprBusinessWindow,
   normalizeSprProduct,
-  parseDigitalCatalogPayload,
-  normalizeDigitalCatalogRow,
-  getSprDigitalCatalog,
   extractSprVehicleDetails,
   stripSprVehicleDetailLines,
   hasSprExplicitPartRequest,
@@ -4081,103 +3926,4 @@ app.post('/api/meta/embedded-signup/complete', authenticateUser, async (req, res
   }
   const appSecret = process.env.META_APP_SECRET || '';
   if (!body.code || !appSecret) {
-    return res.status(400).json({ success: false, error: appSecret ? 'Meta no devolvió el código temporal de autorización.' : 'Falta configurar META_APP_SECRET en Render.' });
-  }
-  if (!db) return res.status(503).json({ success: false, error: 'La base de datos no está disponible para guardar la conexión.' });
-  const http = customHttpClient || axios;
-  try {
-    const exchanged = await http.get(`https://graph.facebook.com/${GRAPH_API_VERSION}/oauth/access_token`, {
-            params: { client_id: META_ESU_APP_ID, client_secret: appSecret, code: String(body.code) }
-    });
-    const accessToken = exchanged.data?.access_token;
-    if (!accessToken) throw new Error('Meta no devolvió un token de acceso.');
-
-    let wabaId = String(body.waba_id || '').trim();
-    let phoneId = String(body.phone_number_id || '').trim();
-    let displayPhone = String(body.display_phone_number || '').trim();
-    let verifiedName = String(body.verified_name || '').trim();
-    let businessName = '';
-    if (!wabaId || !phoneId) {
-      return res.status(422).json({ success: false, error: 'Meta no devolvió la cuenta de WhatsApp y el número seleccionados. No se modificó la conexión existente.' });
-    }
-    if (wabaId) {
-      try {
-        const waba = await http.get(`https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}`, { params: { fields: 'id,name', access_token: accessToken } });
-        businessName = waba.data?.name || '';
-      } catch (_) {}
-    }
-    if (phoneId) {
-      try {
-        const phone = await http.get(`https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneId}`, { params: { fields: 'id,display_phone_number,verified_name,whatsapp_business_account_id', access_token: accessToken } });
-        displayPhone = displayPhone || phone.data?.display_phone_number || '';
-        verifiedName = verifiedName || phone.data?.verified_name || '';
-        wabaId = phone.data?.whatsapp_business_account_id || wabaId;
-      } catch (_) {}
-    }
-    if (!wabaId || !phoneId) return res.status(422).json({ success: false, error: 'Meta no devolvió el WABA y el número necesarios para completar la conexión.' });
-    try { await http.post(`https://graph.facebook.com/${GRAPH_API_VERSION}/${wabaId}/subscribed_apps`, {}, { params: { access_token: accessToken } }); } catch (subscriptionError) { const message = subscriptionError.response?.data?.error?.message || subscriptionError.message; return res.status(502).json({ success: false, error: `Meta no autorizó la suscripción del webhook: ${message}` }); }
-
-    const now = new Date().toISOString();
-    const integrationId = `int_wa_${companyId}`;
-    const integration = {
-      id: integrationId, company_id: companyId, provider: 'whatsapp', status: 'connected',
-      onboarding_method: 'embedded_signup', display_phone_number: displayPhone, phone_number_id: phoneId,
-      whatsapp_business_account_id: wabaId, verified_name: verifiedName || businessName || 'WhatsApp Business',
-      tenant_owned: true, billing_owner: 'client', billing_scope: 'tenant_messaging_account',
-      policy_version: TENANT_POLICY_VERSION,
-      has_token: true, webhook_verified: true, outbound_verified: false,
-      meta_business_id: String(body.meta_business_id || '').trim(), last_verified_at: now, last_sync_at: now,
-      updated_at: now, created_at: now, created_by_user_id: user.uid, created_by_user_name: user.nombre || 'Administrador'
-    };
-    const batch = db.batch();
-    batch.set(db.doc(`integrations/${integrationId}`), integration, { merge: true });
-    batch.set(db.doc(`integrations/${integrationId}/secrets/tokens`), { access_token: accessToken, has_token: true, source: 'embedded_signup', updated_at: now, company_id: companyId }, { merge: true });
-    batch.set(db.doc(`tenant_onboarding/${companyId}`), {
-      company_id: companyId,
-      policy_version: TENANT_POLICY_VERSION,
-      status: 'connected',
-      checklist: {
-        tenant_identity: true,
-        own_waba: true,
-        verified_phone_number: true,
-        webhook_subscribed: true,
-        client_billing_owner: true,
-        bot_safe_defaults: true
-      },
-      updated_at: now
-    }, { merge: true });
-    await batch.commit(); try { const companyRef = db.doc(`companies/${companyId}`); const companySnap = await companyRef.get(); if (companySnap.exists) { const companyData = companySnap.data() || {}; const existingIntegrations = companyData.integraciones || {}; const activeIntegrations = Array.isArray(existingIntegrations.activeIntegrations) ? existingIntegrations.activeIntegrations.filter(item => item.id !== integrationId && item.provider !== "whatsapp") : []; activeIntegrations.push(integration); await companyRef.set({ integraciones: { ...existingIntegrations, activeIntegrations, whatsapp: { ...(existingIntegrations.whatsapp || {}), enabled: true, businessNumber: displayPhone, phoneNumberId: phoneId, wabaId, has_token: true, tenant_owned: true, billing_owner: 'client', policy_version: TENANT_POLICY_VERSION } } }, { merge: true }); } } catch (companySyncError) { console.warn("Embedded Signup company cache sync pending:", companySyncError.message); }
-    res.json({ success: true, company_id: companyId, waba_id: wabaId, phone_number_id: phoneId, display_phone_number: displayPhone, verified_name: verifiedName || businessName, status: 'connected' });
-  } catch (err) {
-    const metaError = err.response?.data?.error;
-    console.error('Embedded Signup completion error:', metaError?.message || err.message);
-    res.status(502).json({ success: false, error: metaError?.message || 'Meta no pudo completar la conexión de WhatsApp.' });
-  }
-});
-
-// Clear the in-memory catalog cache after SPR provides a refreshed digital
-// catalog. This keeps the update quick without restarting Render and does not
-// expose the configured URL or any credentials.
-app.post('/api/catalog/digital/refresh', authenticateUser, async (req, res) => {
-  const user = req.authenticatedUser || {};
-  if (!['SUPERADMIN', 'ADMINISTRADOR'].includes(user.rol)) {
-    return res.status(403).json({ success: false, error: 'Solo un administrador puede actualizar el catálogo digital.' });
-  }
-  sprDigitalCatalogCache = { fetchedAt: 0, items: [] };
-  sprCatalogCache = { fetchedAt: 0, items: [] };
-  sprCatalogSource = 'none';
-  try {
-    const items = await getSprEngineCatalog();
-    return res.json({
-      success: true,
-      source: sprCatalogSource,
-      products_loaded: items.length,
-      message: sprCatalogSource === 'digital'
-        ? 'Catálogo digital cargado como fuente principal.'
-        : 'No hay catálogo digital configurado; se mantiene la fuente web de respaldo.'
-    });
-  } catch (error) {
-    console.error('Digital catalog refresh error:', error.message);
-    return res.status(502).json({ success: false, error: 'No se pudo cargar el catálogo digital ni la fuente de respaldo.' });
-  }
-});
+    return res.status(400).json({ success: false, error: appSecret ? 'Meta no devolvió el código temporal de aut[Truncated]
