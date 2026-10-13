@@ -458,30 +458,26 @@ async function loadWhatsAppConversation(dbInstance, companyId, phone) {
 async function migrateConversationMessages(dbInstance, legacyId, canonicalId) {
   if (!legacyId || !canonicalId || legacyId === canonicalId) return;
   try {
-    const oldMessages = await dbInstance.collection('messages')
-      .where('conversation_id', '==', legacyId)
-      .get();
-    if (!oldMessages.empty) {
-      let batch = dbInstance.batch();
-      let writes = 0;
+    let migratedCount = 0;
+    while (true) {
+      const oldMessages = await dbInstance.collection('messages')
+        .where('conversation_id', '==', legacyId)
+        .limit(100)
+        .get();
+      if (oldMessages.empty) break;
+      const batch = dbInstance.batch();
       for (const messageDoc of oldMessages.docs) {
         batch.set(messageDoc.ref, { conversation_id: canonicalId }, { merge: true });
-        writes += 1;
-        if (writes === 450) {
-          await batch.commit();
-          batch = dbInstance.batch();
-          writes = 0;
-        }
       }
-      if (writes) await batch.commit();
+      await batch.commit();
+      migratedCount += oldMessages.size;
     }
     await dbInstance.doc(`conversations/${legacyId}`).delete();
-    console.log(`🧹 [Conversation Merge] ${legacyId} → ${canonicalId}`);
+    console.log(`🧹 [Conversation Merge] ${legacyId} → ${canonicalId} (${migratedCount} mensajes migrados en lotes de 100)`);
   } catch (error) {
     console.warn(`Could not merge legacy conversation ${legacyId}:`, error.message);
   }
 }
-
 function shouldAutoReactivateBot(conversation, now = Date.now()) {
   if (!conversation || conversation.status === 'closed') return false;
   if (conversation.auto_reactivate_enabled === false) return false;
