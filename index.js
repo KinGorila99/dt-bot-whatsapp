@@ -2752,7 +2752,6 @@ app.post('/webhook/whatsapp', async (req, res) => {
     // "gracias" with the human advisor.
     if (companyId === SPR_COMPANY_ID && !botPausedByOwner
       && (convData.human_handoff === true || convData.bot_enabled === false)
-      && convData.catalog_review_required !== true
       && isSprNewRequestOrQuestion(messageText)) {
       convData.human_handoff = false;
       convData.bot_enabled = true;
@@ -2766,6 +2765,12 @@ app.post('/webhook/whatsapp', async (req, res) => {
       convData.auto_reactivation_reason = 'customer_new_request';
       convData.assigned_user_id = null;
       convData.assigned_user_name = null;
+      // A prior catalog review belongs to the previous customer turn. A new
+      // piece or concrete question must start a clean automated turn instead
+      // of remaining silently blocked by the stale review marker.
+      convData.catalog_review_required = false;
+      convData.catalog_review_reason = null;
+      convData.catalog_review_query = null;
       console.log('🤖 [New Customer Request] Conversation [' + convId + '] resumed for a new piece or FAQ question.');
     }
 
