@@ -2020,7 +2020,7 @@ async function resolveTenant(dbInstance, phoneNumberId, wabaId) {
  * Prefer the conversation's phone number when available, then a connected
  * and verified integration that actually has a token.
  */
-async function resolveOutboundTenant(dbInstance,  preferredPhoneNumberId = null) {
+async function resolveOutboundTenant(dbInstance, companyId, preferredPhoneNumberId = null) {
   if (!dbInstance || !companyId) return null;
   // Keep this lookup to one equality filter.  The previous compound
   // company_id + provider query required a Firestore composite index that
@@ -2127,7 +2127,7 @@ app.get('/', (req, res) => {
   });
 });
 
-app.get('/health', (req, res) => {return {
+app.get('/health', (req, res) => {
   res.status(200).send('OK');
 });
 
