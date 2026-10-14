@@ -2007,9 +2007,7 @@ async function resolveTenant(dbInstance, phoneNumberId, wabaId) {
     }
   }
 
-  return {
-    
-    intDocId,
+  return {    companyId,    intDocId,
     intDoc,
     accessToken
   };
@@ -2129,7 +2127,7 @@ app.get('/', (req, res) => {
   });
 });
 
-app.get('/health', (req, res) => {
+app.get('/health', (req, res) => {return {
   res.status(200).send('OK');
 });
 
