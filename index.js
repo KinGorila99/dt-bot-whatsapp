@@ -605,6 +605,10 @@ const SPR_PART_SYNONYM_GROUPS = [
   { canonical: 'maza', aliases: ['maza', 'cubo', 'hub', 'hubs'] },
   { canonical: 'flecha', aliases: ['flecha', 'semieje', 'eje homocinetico'] },
   { canonical: 'faro', aliases: ['faro delantero', 'faro', 'headlamp', 'headlamps'] },
+  // "Rejilla" and "parrilla" are used interchangeably in Mexican catalogs.
+  // Keep them as one explicit part family so a request for a fog-light kit
+  // cannot fall through to an unrelated product that only shares the vehicle.
+  { canonical: 'rejilla', aliases: ['rejilla', 'rejillas', 'parrilla', 'parrillas'] },
   { canonical: 'calavera', aliases: ['calavera', 'mica trasera', 'stop', 'rear lamp'] },
   { canonical: 'fascia', aliases: ['fascia', 'facia', 'fasia', 'faccia', 'defensa', 'bumper', 'bumpers'] },
   { canonical: 'espejo', aliases: ['espejo', 'retrovisor', 'retrovisores'] },
@@ -1041,6 +1045,7 @@ function findSprStrictMatches(items, lowerText) {
     { key: 'calavera', pattern: /\bcalavera(?:s)?\b/ },
     { key: 'stop', pattern: /\bstop\b/ },
     { key: 'faro', pattern: /\bfaro(?:s)?\b/ },
+    { key: 'rejilla', pattern: /\brejilla(?:s)?\b/ },
     { key: 'espejo', pattern: /\bespejo(?:s)?\b/ },
     { key: 'fascia', pattern: /\bfascia(?:s)?\b/ },
     { key: 'guia', pattern: /\bgu[ií]a(?:s)?\b/ },
@@ -1200,6 +1205,19 @@ function findSprStrictMatches(items, lowerText) {
 function filterStrictSprVehicleMatches(matches, query) {
   const normalized = normalizeSprCatalogText(query);
   const requestedYears = [...normalized.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => Number(match[0]));
+  const requestedPartPatterns = [
+    // "motor" is also commonly supplied as an engine specification alongside
+    // another requested part (for example, "amortiguador ... motor 4.6").
+    // The dedicated motor matcher handles motor-only requests, so do not make
+    // that specification a second hard part requirement here.
+    /\b(?:cabeza|culata)(?:s)?\b/, /\bamortiguador(?:es)?\b/,
+    /\bbieleta(?:s)?\b/, /\b(?:balero|maza|homocinetica)(?:s)?\b/,
+    /\bcalavera(?:s)?\b/, /\bstop\b/, /\bfaro(?:s)?\b/, /\brejilla(?:s)?\b/,
+    /\bespejo(?:s)?\b/, /\bfascia(?:s)?\b/, /\bguia(?:s)?\b/, /\bmoldura(?:s)?\b/,
+    /\bdefensa(?:s)?\b/, /\bcofre\b/, /\bcajuela\b/, /\bsalpicadera(?:s)?\b/,
+    /\bpuerta(?:s)?\b/, /\bradiador(?:es)?\b/, /\bbomba(?:s)?\b/, /\bturbo(?:s)?\b/,
+    /\b(?:embrague|clutch)\b/, /\b(?:direccion|terminal|rotula)(?:es|s)?\b/
+  ].filter(pattern => pattern.test(normalized));
   const qualifierPattern = /\b(remanufacturad[oa]s?|reconstruid[oa]s?|usad[oa]s?|nuev[oa]s?|complet[oa]s?|original(?:es)?|generico(?:s)?|generica(?:s)?)\b/g;
   const identityTokens = normalized
     .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
@@ -1214,6 +1232,10 @@ function filterStrictSprVehicleMatches(matches, query) {
 
   return matches.filter(item => {
     const haystack = canonicalizeSprPartSynonyms([item.normalizedTitle, normalizeBotText(item.vendor), normalizeBotText(item.productType), normalizeBotText(item.tags)].join(' '));
+    // Preserve every concrete part named by the customer. This final guard is
+    // intentionally independent of vehicle/year matching because the live
+    // catalog search can return broad results for a model name.
+    if (requestedPartPatterns.some(pattern => !pattern.test(haystack))) return false;
     if (!identityTokens.every(token => sprTokenMatches(haystack, token))) return false;
     if (!requestedYears.length) return true;
     const source = [item.title, item.description, item.tags].map(value => String(value || '')).join(' ');
@@ -1278,6 +1300,7 @@ function findSprExhaustiveMatches(items, query, skipExact = false) {
     ['motor', /\b(?:motor|engine(?:\s+series)?)\b/], ['cabeza', /\b(?:cabeza|culata)\b/],
     ['amortiguador', /\bamortiguador\b/], ['bieleta', /\bbieleta\b/],
     ['balero', /\b(?:balero|maza|junta homocinetica)\b/], ['faro', /\bfaro\b/],
+    ['rejilla', /\brejilla\b/],
     ['calavera', /\b(?:calavera|stop)\b/], ['espejo', /\bespejo\b/],
     ['fascia', /\bfascia\b/], ['guia', /\bguia\b/], ['moldura', /\bmoldura\b/],
     ['parrilla', /\bparrilla\b/], ['defensa', /\bdefensa\b/], ['cofre', /\bcofre\b/],
@@ -1289,6 +1312,7 @@ function findSprExhaustiveMatches(items, query, skipExact = false) {
   ];
   const matchingCategories = partRules.filter(([, pattern]) => pattern.test(normalized));
   const requestedCategory = matchingCategories.find(([key]) => key !== 'motor') || matchingCategories[0];
+  const requiredPartPatterns = matchingCategories.filter(([key]) => key !== 'motor');
   const requestsSteeringRack = /\bcaja de direccion\b/.test(normalized);
   const wantsMotor = requestedCategory?.[0] === 'motor'
     && !/\b(?:cabeza|culata|soporte|base|taco|montura|mount|sensor|accesorio)\b/.test(normalized);
@@ -1324,6 +1348,10 @@ function findSprExhaustiveMatches(items, query, skipExact = false) {
   return (Array.isArray(items) ? items : []).filter(item => {
     const haystack = canonicalizeSprPartSynonyms([item.normalizedTitle, item.title, item.vendor, item.productType, item.tags, item.description, item.handle].filter(Boolean).join(' '));
     if (requestedCategory && !requestedCategory[1].test(haystack)) return false;
+    // When a customer names more than one concrete part (for example,
+    // "faros antiniebla y rejillas"), every requested family must be present
+    // in the same product. Matching only the vehicle is not sufficient.
+    if (requiredPartPatterns.some(([, pattern]) => !pattern.test(haystack))) return false;
     // A steering-rack request must contain the rack/caja de dirección family
     // explicitly. Department tags containing only “dirección” are not a match.
     if (requestsSteeringRack && !/\bcaja de direccion\b/.test(haystack)) return false;

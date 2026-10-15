@@ -90,6 +90,37 @@ const contextualCases = [
 ];
 
 const failures = [];
+
+// A Polo fog-light/rejilla request must never be satisfied by a clutch that
+// only mentions Polo in a long compatibility list. This reproduces the bad
+// answer reported from the live SPR conversation.
+const poloFogKitRequest = 'Kit faros antiniebla y rejillas polo 2015 Hatchback';
+const poloFogKitItems = [
+  {
+    id: 'polo-clutch-unrelated',
+    title: 'KIT CLUTCH SEAT CORDOBA 4L 2.0 LTS 2003-2009 IBIZA 4L 2.0 LTS 2003-2015 115 HP SOHC VOLKSWAGEN POLO 4L 2.0 LTS 2003-2007 114 HP OHC 5 VELOCIDADES LUK',
+    normalizedTitle: normalizeBotText('KIT CLUTCH SEAT CORDOBA 4L 2.0 LTS 2003-2009 IBIZA 4L 2.0 LTS 2003-2015 115 HP SOHC VOLKSWAGEN POLO 4L 2.0 LTS 2003-2007 114 HP OHC 5 VELOCIDADES LUK'),
+    vendor: 'LUK', productType: 'CLUTCH', tags: '', description: '', regularPrice: 4057
+  },
+  {
+    id: 'polo-fog-rejilla',
+    title: 'KIT FAROS ANTINIEBLA Y REJILLAS VOLKSWAGEN POLO 2015 HATCHBACK',
+    normalizedTitle: normalizeBotText('KIT FAROS ANTINIEBLA Y REJILLAS VOLKSWAGEN POLO 2015 HATCHBACK'),
+    vendor: '', productType: 'ILUMINACION', tags: '', description: '', regularPrice: 2000
+  }
+];
+const poloFogKitQuery = canonicalizeSprPartSynonyms(poloFogKitRequest);
+const poloFogKitMatches = filterStrictSprVehicleMatches(
+  findSprEngineMatches(poloFogKitItems, poloFogKitQuery),
+  poloFogKitQuery
+);
+if (poloFogKitMatches.length !== 1 || poloFogKitMatches[0].id !== 'polo-fog-rejilla') {
+  failures.push({
+    request: poloFogKitRequest,
+    matches: poloFogKitMatches.map(item => item.title)
+  });
+}
+
 for (const request of requests) {
   const normalized = canonicalizeSprPartSynonyms(request);
   const matches = filterStrictSprVehicleMatches(findSprEngineMatches([target], normalized), normalized);
@@ -109,7 +140,7 @@ for (const testCase of contextualCases) {
   }
 }
 
-const totalCases = requests.length + contextualCases.length;
+const totalCases = requests.length + contextualCases.length + 1;
 console.log(`SPR catalog regressions: ${totalCases - failures.length}/${totalCases} passed`);
 if (failures.length) {
   console.error(JSON.stringify(failures, null, 2));
