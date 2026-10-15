@@ -132,7 +132,7 @@ const hourQuestions = ['¿Qué horarios tienen?', '¿A qué hora abren?', '¿Cu�
 const shippingQuestions = ['¿Hacen envíos?', '¿Envían a todo México?', '¿Tienen entregas foráneas?', 'cobertura nacional', '¿Mandan a otro estado?'];
 for (let i = 0; i < 15; i += 1) {
   const value = locationQuestions[i % locationQuestions.length];
-  expect(`ubicación SPR ${i}`, isSprStoreLocationQuestion(value) && /Querétaro/.test(buildSprFaqReply(value, true)));
+  expect(`ubicación SPR ${i}`, isSprStoreLocationQuestion(value) && /Querétaro/.test(buildSprFaqReply(value, true)) && /maps\.app\.goo\.gl\/ZqsdJ3QQcTdqg7Mo9/.test(buildSprFaqReply(value, true)));
   expect(`aislamiento ubicación ${i}`, buildSprFaqReply(value, false) === '');
 }
 for (let i = 0; i < 15; i += 1) {
@@ -142,7 +142,7 @@ for (let i = 0; i < 15; i += 1) {
 }
 for (let i = 0; i < 15; i += 1) {
   const value = shippingQuestions[i % shippingQuestions.length];
-  expect(`envíos SPR ${i}`, /todo México/.test(buildSprFaqReply(value, true)));
+  expect(`envíos SPR ${i}`, /toda la República Mexicana/.test(buildSprFaqReply(value, true)));
   expect(`aislamiento envíos ${i}`, buildSprFaqReply(value, false) === '');
 }
 

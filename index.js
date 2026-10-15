@@ -95,6 +95,7 @@ const TENANT_SAFE_ONBOARDING_POLICY = Object.freeze({
 // not silently keep SPR offline; use SPR_BOT_ACTIVE=false when an explicit
 // pause is intended.
 const SPR_COMPANY_ID = 'comp_1787600762092';
+const SPR_STORE_MAP_URL = 'https://maps.app.goo.gl/ZqsdJ3QQcTdqg7Mo9';
 const SPR_BOT_ACTIVE = !/^(false|0|off|paused)$/i.test(
   String(process.env.SPR_BOT_ACTIVE ?? 'true').trim()
 );
@@ -690,13 +691,13 @@ function buildSprFaqReply(value, isSprAutopartesTenant) {
   if (!isSprAutopartesTenant) return '';
   const query = normalizeBotText(value);
   if (isSprStoreLocationQuestion(query)) {
-    return '📍 *Estamos ubicados en Querétaro, México.* 🚚 Realizamos envíos a todo México.';
+    return `📍 *Estamos ubicados en Querétaro, México.*\n🗺️ Ubicación: ${SPR_STORE_MAP_URL}`;
   }
   if (/\b(horario|horarios|hora|horas|abren|cierran|abierto|abiertos|atienden|atencion)\b/.test(query)) {
     return 'Atendemos de *Lunes a Sábado* de *9:00 am* a *7:30 pm*. ✅\nNuestro canal de WhatsApp y redes sociales recibe consultas las *24 horas*. 🕑';
   }
   if (/\b(envio|envios|enviamos|mandan|mandamos|entrega|entregan|cobertura|nacional|foraneo|foraneos|foranea|foraneas|otro estado|todo mexico)\b/.test(query)) {
-    return '🚚 Sí, realizamos envíos a todo México. Compárteme la pieza, marca, modelo y año para revisar tu cotización.';
+    return '🚚 Sí, realizamos envíos a toda la República Mexicana.';
   }
   return '';
 }
@@ -2900,6 +2901,12 @@ Incluye:
       const publicBotName = String(
         botSettings?.bot_name || (isSprAutopartesTenant ? 'SPR BOT' : 'asistente virtual')
       ).trim();
+      // Keep SPR's operational FAQ ahead of catalog matching. This prevents a
+      // shipping or store-location question from falling through to a product
+      // search or to the generic fallback.
+      const sprFaqReply = isSprAutopartesTenant
+        ? buildSprFaqReply(messageText, true)
+        : '';
       const catalogQueryText = catalogContextText || messageText;
       // Normalize colloquial spellings before every stage of the lookup. The
       // same canonical query must reach matching, strict vehicle filters and
@@ -2999,6 +3006,8 @@ Incluye:
 
       if (isShopifyPrefillIntro) {
         botReply = `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo.\n\nPara buscar correctamente en el catálogo, escríbeme *solo estos cuatro datos* en un mismo mensaje:\n🔧 Pieza\n🚗 Marca\n🚙 Modelo\n📅 Año\n\nEjemplo: *faro derecho Nissan Versa 2017*.`;
+      } else if (sprFaqReply) {
+        botReply = sprFaqReply;
       } else if (shouldRouteSprCatalogToAdvisor({
         isSprAutopartesTenant,
         asksCatalogProduct,
@@ -3124,7 +3133,7 @@ Si quieres atención inmediata, escribe *asesor*`;
     botReply = formatWhatsAppReply(botReply);
 
     // 6. Send Outbound WhatsApp Reply via Meta Graph API
-    const botIdentity = `${companyId} ${tenantDisplayName} ${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase(); const isDtMarketingTenant = companyId === 'comp_dt_marketing' || /\bdt\s*(marketing|crm)\b/.test(botIdentity); const tenantBotName = String(botSettings?.bot_name || tenantDisplayName || 'nuestro asistente').trim(); const crossTenantContent = /(dt marketing|dt crm core|api chat bot|paquete completo|escribe \*crm\*, \*whatsapp\* o \*paquete\*)/i; const asksLocation = isCustomerLocationQuestion(lowerText); if (!isDtMarketingTenant && (asksLocation || crossTenantContent.test(botReply))) { console.error(`[Cross-Tenant Content Blocked] Company: ${companyId} | Phone ID: ${phoneNumberId}`); botReply = asksLocation ? `📍 *Estamos ubicados en Querétaro, México.* 🚚 Realizamos envíos a todo México. Si ya deseas comprar, compártenos la pieza que buscas y los datos de tu vehículo para preparar tu cotización.` : `🤔 *Quiero ayudarte mejor.* Para orientarte sobre *${tenantBotName}*, ¿buscas una cotización, una pieza o servicio, información de envío, garantía o hablar con un asesor?`; } let outboundSuccess = false;
+    const botIdentity = `${companyId} ${tenantDisplayName} ${botSettings?.bot_name || ''} ${botSettings?.business_description || ''}`.toLowerCase(); const isDtMarketingTenant = companyId === 'comp_dt_marketing' || /\bdt\s*(marketing|crm)\b/.test(botIdentity); const isSprTenantForReply = companyId === SPR_COMPANY_ID || /\bspr\s*(bot|autopartes|engine)\b/i.test(botIdentity); const tenantBotName = String(botSettings?.bot_name || tenantDisplayName || 'nuestro asistente').trim(); const crossTenantContent = /(dt marketing|dt crm core|api chat bot|paquete completo|escribe \*crm\*, \*whatsapp\* o \*paquete\*)/i; const asksLocation = isCustomerLocationQuestion(lowerText); if (!isDtMarketingTenant && (asksLocation || crossTenantContent.test(botReply))) { console.error(`[Cross-Tenant Content Blocked] Company: ${companyId} | Phone ID: ${phoneNumberId}`); botReply = asksLocation ? (isSprTenantForReply ? (buildSprFaqReply(lowerText, true) || `📍 *Estamos ubicados en Querétaro, México.*\n🗺️ Ubicación: ${SPR_STORE_MAP_URL}`) : `📍 *Estamos ubicados en Querétaro, México.* 🚚 Realizamos envíos a todo México. Si ya deseas comprar, compártenos la pieza que buscas y los datos de tu vehículo para preparar tu cotización.`) : `🤔 *Quiero ayudarte mejor.* Para orientarte sobre *${tenantBotName}*, ¿buscas una cotización, una pieza o servicio, información de envío, garantía o hablar con un asesor?`; } let outboundSuccess = false;
     let metaMessageId = null;
 
     if (botReply && accessToken && phoneNumberId) {
