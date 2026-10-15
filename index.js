@@ -1735,28 +1735,29 @@ function buildSprMissingRequestReply(missingFields, source = '') {
   const readable = fields.length === 1
     ? fields[0]
     : `${fields.slice(0, -1).join(', ')} y ${fields[fields.length - 1]}`;
-  const vehicleHint = normalizeBotText(source)
+  const normalizedSource = canonicalizeSprPartSynonyms(source);
+  const requestedYears = [...normalizedSource.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => match[0]);
+  const requestedMakes = [...SPR_VEHICLE_MAKES]
+    .filter(make => new RegExp(`\\b${escapeSprRegex(make)}\\b`, 'i').test(normalizedSource));
+  const vehicleHintTokens = normalizedSource
     .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
+    .replace(/\b(?:buen|buenos|buenas|dia|d[ií]a|disculpe|disculpa|vi|v[ií]|pagina|p[aá]gina|web|sitio|gustaria|gustar[ií]a|saber|hacen|hace|envio|envios|m[eé]rida|yucatan|yucat[aá]n|quer[eé]taro|mexico|m[eé]xico)\b/gi, ' ')
+    .replace(/\b(?:19|20)\d{2}\b/g, ' ')
     .replace(/\s+/g, ' ')
-    .trim();
-  const intro = vehicleHint
-    ? `✅ Ya tengo registrado: *${vehicleHint.toUpperCase()}*.`
-    : '✅ Ya recibí parte de los datos.';
+    .trim()
+    .split(/\s+/)
+    .filter(token => token.length >= 3)
+    .slice(0, 2);
+  const vehicleHint = (requestedMakes.length || requestedYears.length)
+    ? [...new Set([...requestedMakes, ...vehicleHintTokens, ...requestedYears])].join(' ')
+    : '';
+  const intro = vehicleHint ? `✅ Ya tengo registrado: *${vehicleHint.toUpperCase()}*.` : '';
   const directQuestion = fields.includes('pieza') && fields.includes('marca')
     ? '¿Qué pieza necesitas y de qué marca es?'
     : fields.includes('pieza')
       ? '¿Qué pieza necesitas?'
       : `¿Me compartes ${readable}?`;
-  return `${intro}
-${directQuestion}
-
-
-Para afinar compatibilidad y darte la cotización con *precio, foto y enlace*, compárteme: *${readable}*.
-
-Si no conoces alguno, describe la pieza con tus propias palabras y revisaré las opciones relacionadas.
-
-
-`;
+  return [intro, directQuestion].filter(Boolean).join('\n');
 }
 
 // Once a conversation is handed to an advisor, a short acknowledgement such

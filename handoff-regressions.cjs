@@ -27,7 +27,7 @@ const {
   findSprCatalogRecoveryMatches,
   findSprEngineMatches,
   normalizeSprProduct
-} = require('../index.js');
+} = require('./index.js');
 Module._load = originalLoad;
 
 const cases = [
@@ -67,8 +67,19 @@ const missingReply = buildSprMissingRequestReply(missing, 'SENTRA 2018');
 if (missing.join('|') !== 'pieza|marca'
   || !/YA TENGO REGISTRADO.*SENTRA 2018/i.test(missingReply)
   || !/qu[eé] pieza necesitas/i.test(missingReply)
-  || !/1️⃣|2️⃣|3️⃣/.test(missingReply)) {
+  || /Para afinar compatibilidad|1️⃣|2️⃣|3️⃣/.test(missingReply)
+  || missingReply.length > 120) {
   failures.push({ missing, missingReply });
+}
+
+const noisyMissingReply = buildSprMissingRequestReply(
+  ['marca', 'año'],
+  'Buen día, disculpe vi en su página web una tolva; me gustaría saber si hacen envíos a Mérida, Yucatán.'
+);
+if (!/¿Me compartes marca y año\?/i.test(noisyMissingReply)
+  || /M[eé]rida|Yucat[aá]n|p[aá]gina web|env[ií]os/i.test(noisyMissingReply)
+  || noisyMissingReply.length > 80) {
+  failures.push({ noisyMissingReply });
 }
 
 const combinedContext = buildSprCatalogContext(['SENTRA 2018'], 'FARO DERECHO');
