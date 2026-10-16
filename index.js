@@ -584,6 +584,24 @@ function buildSprVehicleConfirmationReply(details) {
   return `✅ Perfecto, ya recibí los datos de tu vehículo:\n\n${visibleLines.join('\n')}\n\n🔧 ¿Qué pieza o refacción necesitas consultar?`;
 }
 
+// A short confirmation is only actionable when it answers a clear catalog or
+// purchase prompt from the bot. Without that context, phrases such as
+// "correcto" are ambiguous and must stay silent instead of falling through to
+// the generic safe-fallback question.
+function isSprSalesConfirmation(value) {
+  const normalized = normalizeBotText(value);
+  return /^(?:correcto|correcta|es correcto|es correcta|si|si es|exacto|exacta|asi es|confirmo|confirmado|confirmada|de acuerdo|esta bien|bien|ok|okay|va|perfecto|listo|recibido|esa es|ese es)$/.test(normalized);
+}
+
+function hasSprSalesPrompt(value) {
+  const normalized = normalizeBotText(value);
+  return /(?:catalogo|encontre|encontramos|opciones relacionadas|precio|disponibilidad|compatibilidad|aplicacion|pieza correcta|confirmar|quieres que revisemos|quieres comprar|deseas comprar|hacer el pedido|agregar al carrito)/.test(normalized);
+}
+
+function buildSprSalesContinuationReply() {
+  return `✅ Perfecto. Para continuar con tu compra entra a https://www.sprautopartes.mx/ y busca la pieza confirmada. Selecciónala, agrégala al carrito, captura tus datos de envío y completa el pedido. Si quieres validar otra vez la aplicación, compártenos marca, modelo y año.`;
+}
+
 // Customers often type collision parts phonetically or with one missing
 // letter. Normalize only well-known catalog variants in the query so a typo
 // such as "facia"/"kickn" does not turn an exact catalog match into a false
@@ -2524,6 +2542,12 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const conversationLookup = await loadWhatsAppConversation(db, companyId, customerPhone);
     const convId = conversationLookup.id;
     let convData = conversationLookup.data;
+    // Keep the bot's previous rendered message before this inbound turn
+    // replaces last_message. It is used to distinguish a sale confirmation
+    // from an isolated acknowledgement such as "correcto".
+    const previousBotMessage = convData?.last_message_sender === 'bot'
+      ? String(convData.last_message || '').trim()
+      : '';
 
     // If this contact was stored previously with a legacy id/phone format,
     // move its messages to the canonical conversation before appending the new
@@ -2766,6 +2790,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
     // for schedules or a catalog search.
     const isFriendlyGreeting = isFriendlyGreetingText(messageText);
     const isCourtesyMessage = isCourtesyText(messageText);
+    const isSalesConfirmation = isSprSalesConfirmation(messageText);
     const isShopifySuspensionIntro = /^hola vengo de spr autopartes y necesito asesoria para suspension marca modelo y ano$/.test(lowerText);
     const isShopifyPartsIntro = /^hola vengo de spr autopartes y me gustaria consultar sobre algunas piezas$/.test(lowerText);
     const isShopifyPrefillIntro = isShopifySuspensionIntro || isShopifyPartsIntro;
@@ -2897,6 +2922,7 @@ Incluye:
       var isSprAutopartesTenant = companyId === SPR_COMPANY_ID
         || /spr\s*(bot|autopartes|engine)/i.test(botIdentityForCatalog)
         || /spr autopartes/i.test(botIdentityForCatalog);
+      const hasPendingSalesPrompt = isSprAutopartesTenant && hasSprSalesPrompt(previousBotMessage);
       const publicBusinessName = isSprAutopartesTenant ? 'SPR Autopartes' : tenantDisplayName;
       const publicBotName = String(
         botSettings?.bot_name || (isSprAutopartesTenant ? 'SPR BOT' : 'asistente virtual')
@@ -3051,6 +3077,11 @@ Incluye:
         botReply = vehicleContextReply;
       } else if (sprCatalogReply) {
         botReply = sprCatalogReply;
+      } else if (isSalesConfirmation) {
+        // Continue only when the previous bot message clearly asked for a
+        // catalog/compatibility/purchase confirmation. Otherwise remain
+        // silent; a bare "correcto" does not provide a new sales action.
+        botReply = hasPendingSalesPrompt ? buildSprSalesContinuationReply() : '';
       } else if (isFriendlyGreeting) {
         const greetingPrefix = lowerText.includes('buenos dias')
           ? '☀️ ¡Muy buenos días!'
