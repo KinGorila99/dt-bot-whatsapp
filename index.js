@@ -772,6 +772,18 @@ function buildSprNonAutomotiveProductReply() {
   return '❌ Disculpa, en *SPR Autopartes* manejamos únicamente refacciones para automóviles. No manejamos ese producto.';
 }
 
+function isSprCatalogImageIssue(value) {
+  const query = canonicalizeSprPartSynonyms(value);
+  if (!query) return false;
+  const hasImageReference = /\b(?:foto(?:s)?|imagen(?:es)?|referencia|link|enlace|liga)\b/.test(query);
+  const cannotViewImage = /\b(?:no\s+(?:me\s+)?(?:aparece|sale|se\s+ve|veo|muestra|carga|abre|visualiza)|no\s+puedo\s+(?:ver|abrir|cargar)|no\s+(?:se\s+)?(?:muestra|carga|abre|ve)|no\s+funciona|no\s+hay)\b/.test(query);
+  return hasImageReference && cannotViewImage;
+}
+
+function buildSprCatalogImageUnavailableReply() {
+  return '📷 La imagen de referencia no se muestra en el enlace. No tengo la facultad de enviar fotos aparte desde este chat, así que te redirijo con un asesor para que te comparta la imagen y confirme la pieza. 👨‍💼';
+}
+
 function isSprIncompleteSingleMessageRequest(value) {
   const query = canonicalizeSprPartSynonyms(value);
   if (!query || isFriendlyGreetingText(query) || isCourtesyText(query)) return false;
@@ -3019,9 +3031,11 @@ Incluye:
         && isSprNonCatalogQuestion(messageText);
       const isSprNonAutomotiveRequest = isSprAutopartesTenant
         && isSprNonAutomotiveProductRequest(messageText);
+      const isSprImageIssue = isSprAutopartesTenant
+        && isSprCatalogImageIssue(messageText);
       const isSprIncompleteRequest = isSprAutopartesTenant
         && isSprIncompleteSingleMessageRequest(messageText);
-      const catalogQueryText = (sprFaqReply || isSprNonCatalogQuestionTurn || isSprHoursQuestion || isSprNonAutomotiveRequest || isSprIncompleteRequest)
+      const catalogQueryText = (sprFaqReply || isSprNonCatalogQuestionTurn || isSprHoursQuestion || isSprNonAutomotiveRequest || isSprImageIssue || isSprIncompleteRequest)
         ? messageText
         : (catalogContextText || messageText);
       // Normalize colloquial spellings before every stage of the lookup. The
@@ -3052,6 +3066,7 @@ Incluye:
         ? buildSprCompleteRequestPrompt(messageText)
         : buildSprMissingRequestReply(sprMissingRequestFields, catalogQueryText);
       const asksCatalogProduct = !isShopifyPrefillIntro
+        && !isSprImageIssue
         && !vehicleOnlyCatalogContext
         && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|anticongelante|refrigerante|coolant|lubricante|aditivo|liquido(?:s)?|buj[ií]a(?:s)?|bater[ií]a(?:s)?|filtro(?:s)?|llanta(?:s)?|neum[aá]tico(?:s)?|rin(?:es)?|birlo(?:s)?|plumilla(?:s)?|escobilla(?:s)?|fusible(?:s)?|foco(?:s)?|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|cremallera(?:s)?|rack(?:\s+and)?\s+pinion|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera|carroceria)\b/.test(lowerText) || SPR_EXPLICIT_PART_PATTERN.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText) || (catalogContextText !== messageText && isSprLikelyPieceFollowUp(messageText)));
       let sprCatalogReply = ''; let sprCatalogMatched = false;
@@ -3126,6 +3141,34 @@ Incluye:
         botReply = `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo.\n\nPara buscar correctamente en el catálogo, escríbeme *solo estos cuatro datos* en un mismo mensaje:\n🔧 Pieza\n🚗 Marca\n🚙 Modelo\n📅 Año\n\nEjemplo: *faro derecho Nissan Versa 2017*.`;
       } else if (isSprNonAutomotiveRequest) {
         botReply = buildSprNonAutomotiveProductReply();
+      } else if (isSprImageIssue) {
+        convData.human_handoff = true;
+        convData.bot_enabled = false;
+        convData.status = 'pending';
+        convData.auto_reactivate_enabled = true;
+        convData.human_handoff_started_at = convData.human_handoff_started_at || timestamp;
+        convData.handoff_reason = 'catalog_image_unavailable';
+        convData.needs_human_review = true;
+        convData.review_requested_at = timestamp;
+        botReply = buildSprCatalogImageUnavailableReply();
+
+        const taskId = createUniqueId('task');
+        const taskData = {
+          id: taskId,
+          company_id: companyId,
+          lead_id: leadId,
+          lead_nombre: customerName,
+          titulo: `Enviar foto de pieza a ${customerName}`,
+          tipo: 'whatsapp',
+          fecha_limite: new Date().toISOString(),
+          prioridad: 'Urgente',
+          completada: false,
+          fecha_creacion: timestamp,
+          nota: `El cliente no pudo ver la foto o imagen del enlace del catálogo. Compartir la imagen y confirmar la pieza manualmente. Mensaje: "${messageText}"`
+        };
+        try {
+          await db.doc(`followups/${taskId}`).set(taskData);
+        } catch (e) {}
       } else if (sprFaqReply) {
         botReply = sprFaqReply;
       } else if (isSprNonCatalogQuestionTurn) {
@@ -4268,6 +4311,8 @@ module.exports = {
   isSprNonCatalogQuestion,
   isSprNonAutomotiveProductRequest,
   buildSprNonAutomotiveProductReply,
+  isSprCatalogImageIssue,
+  buildSprCatalogImageUnavailableReply,
   isSprIncompleteSingleMessageRequest,
   buildSprCompleteRequestPrompt,
   buildSprCatalogFallbackReply,
