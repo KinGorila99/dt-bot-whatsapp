@@ -1792,9 +1792,6 @@ function getSprMissingRequestFields(value) {
 function buildSprMissingRequestReply(missingFields, source = '') {
   const fields = Array.isArray(missingFields) ? missingFields.filter(Boolean) : [];
   if (!fields.length) return '';
-  const readable = fields.length === 1
-    ? fields[0]
-    : `${fields.slice(0, -1).join(', ')} y ${fields[fields.length - 1]}`;
   const normalizedSource = canonicalizeSprPartSynonyms(source);
   const requestedYears = [...normalizedSource.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => match[0]);
   const requestedMakes = [...SPR_VEHICLE_MAKES]
@@ -1812,12 +1809,8 @@ function buildSprMissingRequestReply(missingFields, source = '') {
     ? [...new Set([...requestedMakes, ...vehicleHintTokens, ...requestedYears])].join(' ')
     : '';
   const intro = vehicleHint ? `✅ Ya tengo registrado: *${vehicleHint.toUpperCase()}*.` : '';
-  const directQuestion = fields.includes('pieza') && fields.includes('marca')
-    ? '¿Qué pieza necesitas y de qué marca es?'
-    : fields.includes('pieza')
-      ? '¿Qué pieza necesitas?'
-      : `¿Me compartes ${readable}?`;
-  return [intro, directQuestion].filter(Boolean).join('\n');
+  const completeRequestPrompt = 'Por favor, envíame *en un solo mensaje* estos cuatro datos: *pieza, marca, modelo y año*.\nEjemplo: *faro derecho Nissan Versa 2017*.\nAsí puedo revisar correctamente la compatibilidad, el precio y la existencia.';
+  return [intro, completeRequestPrompt].filter(Boolean).join('\n');
 }
 
 // Once a conversation is handed to an advisor, a short acknowledgement such
