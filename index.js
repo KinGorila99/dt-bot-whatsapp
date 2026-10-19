@@ -772,6 +772,23 @@ function buildSprNonAutomotiveProductReply() {
   return '❌ Disculpa, en *SPR Autopartes* manejamos únicamente refacciones para automóviles. No manejamos ese producto.';
 }
 
+function isSprIncompleteSingleMessageRequest(value) {
+  const query = canonicalizeSprPartSynonyms(value);
+  if (!query || isFriendlyGreetingText(query) || isCourtesyText(query)) return false;
+  const hasPart = hasSprExplicitPartRequest(query);
+  const hasMake = [...SPR_VEHICLE_MAKES].some(make => new RegExp(`\\b${escapeSprRegex(make)}\\b`, 'i').test(query));
+  const hasModel = hasSprVehicleReference(query);
+  const hasYear = /\b(?:19|20)\d{2}\b|\b(?:0\d|[1-9]\d)\b/.test(query);
+  const refinementOnly = SPR_CATALOG_REFINEMENT_PATTERN.test(query)
+    && !hasPart
+    && !hasMake
+    && !hasModel
+    && !hasYear;
+  const hasCatalogClue = hasPart || hasMake || hasModel || hasYear
+    || (isSprLikelyPieceFollowUp(query) && !refinementOnly);
+  return hasCatalogClue && !(hasPart && hasMake && hasModel && hasYear);
+}
+
 
 /**
  * Apply a consistent WhatsApp visual style to every automated reply.
@@ -1800,9 +1817,7 @@ function getSprMissingRequestFields(value) {
   return missing;
 }
 
-function buildSprMissingRequestReply(missingFields, source = '') {
-  const fields = Array.isArray(missingFields) ? missingFields.filter(Boolean) : [];
-  if (!fields.length) return '';
+function buildSprCompleteRequestPrompt(source = '') {
   const normalizedSource = canonicalizeSprPartSynonyms(source);
   const requestedYears = [...normalizedSource.matchAll(/\b(?:19|20)\d{2}\b/g)].map(match => match[0]);
   const requestedMakes = [...SPR_VEHICLE_MAKES]
@@ -1822,6 +1837,12 @@ function buildSprMissingRequestReply(missingFields, source = '') {
   const intro = vehicleHint ? `✅ Ya tengo registrado: *${vehicleHint.toUpperCase()}*.` : '';
   const completeRequestPrompt = 'Por favor, envíame *en un solo mensaje* estos cuatro datos: *pieza, marca, modelo y año*.\nEjemplo: *faro derecho Nissan Versa 2017*.\nAsí puedo revisar correctamente la compatibilidad, el precio y la existencia.';
   return [intro, completeRequestPrompt].filter(Boolean).join('\n');
+}
+
+function buildSprMissingRequestReply(missingFields, source = '') {
+  const fields = Array.isArray(missingFields) ? missingFields.filter(Boolean) : [];
+  if (!fields.length) return '';
+  return buildSprCompleteRequestPrompt(source);
 }
 
 // Once a conversation is handed to an advisor, a short acknowledgement such
@@ -2998,7 +3019,9 @@ Incluye:
         && isSprNonCatalogQuestion(messageText);
       const isSprNonAutomotiveRequest = isSprAutopartesTenant
         && isSprNonAutomotiveProductRequest(messageText);
-      const catalogQueryText = (sprFaqReply || isSprNonCatalogQuestionTurn || isSprHoursQuestion || isSprNonAutomotiveRequest)
+      const isSprIncompleteRequest = isSprAutopartesTenant
+        && isSprIncompleteSingleMessageRequest(messageText);
+      const catalogQueryText = (sprFaqReply || isSprNonCatalogQuestionTurn || isSprHoursQuestion || isSprNonAutomotiveRequest || isSprIncompleteRequest)
         ? messageText
         : (catalogContextText || messageText);
       // Normalize colloquial spellings before every stage of the lookup. The
@@ -3025,7 +3048,9 @@ Incluye:
       const sprMissingRequestFields = isSprAutopartesTenant && !vehicleOnlyCatalogContext
         ? getSprMissingRequestFields(catalogQueryText)
         : [];
-      const sprMissingRequestReply = buildSprMissingRequestReply(sprMissingRequestFields, catalogQueryText);
+      const sprMissingRequestReply = isSprIncompleteRequest
+        ? buildSprCompleteRequestPrompt(messageText)
+        : buildSprMissingRequestReply(sprMissingRequestFields, catalogQueryText);
       const asksCatalogProduct = !isShopifyPrefillIntro
         && !vehicleOnlyCatalogContext
         && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|anticongelante|refrigerante|coolant|lubricante|aditivo|liquido(?:s)?|buj[ií]a(?:s)?|bater[ií]a(?:s)?|filtro(?:s)?|llanta(?:s)?|neum[aá]tico(?:s)?|rin(?:es)?|birlo(?:s)?|plumilla(?:s)?|escobilla(?:s)?|fusible(?:s)?|foco(?:s)?|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|cremallera(?:s)?|rack(?:\s+and)?\s+pinion|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera|carroceria)\b/.test(lowerText) || SPR_EXPLICIT_PART_PATTERN.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText) || (catalogContextText !== messageText && isSprLikelyPieceFollowUp(messageText)));
@@ -3107,6 +3132,11 @@ Incluye:
         // A question that is not an FAQ or a catalog request is recorded in
         // the CRM, but it must not trigger the piece/vehicle prompt again.
         botReply = '';
+      } else if (isSprIncompleteRequest) {
+        // Do not combine a fragment such as "Horquilla" with an older
+        // Mazda/model turn. Require the complete vehicle request in one
+        // customer message before searching the catalog.
+        botReply = sprMissingRequestReply;
       } else if (shouldRouteSprCatalogToAdvisor({
         isSprAutopartesTenant,
         asksCatalogProduct,
@@ -4238,6 +4268,8 @@ module.exports = {
   isSprNonCatalogQuestion,
   isSprNonAutomotiveProductRequest,
   buildSprNonAutomotiveProductReply,
+  isSprIncompleteSingleMessageRequest,
+  buildSprCompleteRequestPrompt,
   buildSprCatalogFallbackReply,
   buildSprCatalogReply,
   businessMinutesSince,
