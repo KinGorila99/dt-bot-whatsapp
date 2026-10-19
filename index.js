@@ -748,6 +748,19 @@ function buildSprAfterHoursVisitReply() {
   return '📅 *Te agendamos para el día siguiente.* Como el horario de atención es de *9:00 a. m. a 6:00 p. m.*, la entrega quedaría para mañana entre *12:00 y 1:00 p. m.*.';
 }
 
+function isSprCatalogIntent(value) {
+  const query = canonicalizeSprPartSynonyms(value);
+  return SPR_CATALOG_CONTEXT_PATTERN.test(query)
+    || /\b(?:catalogo|catalog|producto|productos|refaccion|refacciones|pieza|piezas|cotiza|cotizacion|precio|precios|disponible|disponibilidad|stock|compatibilidad|aplicacion|marca|modelo|ano|version|vehiculo|motor|pedido|comprar|compra|envio|envios|garantia)\b/.test(query);
+}
+
+function isSprNonCatalogQuestion(value) {
+  const raw = String(value || '');
+  const query = normalizeBotText(raw);
+  if (!query || !/[?¿]/.test(raw) || isFriendlyGreetingText(query) || isCourtesyText(query)) return false;
+  return !isSprCatalogIntent(query);
+}
+
 
 /**
  * Apply a consistent WhatsApp visual style to every automated reply.
@@ -2973,7 +2986,15 @@ Incluye:
       const sprFaqReply = isSprAutopartesTenant
         ? buildSprFaqReply(messageText, true)
         : '';
-      const catalogQueryText = catalogContextText || messageText;
+      // Do not carry an old piece/vehicle context into an operational FAQ or
+      // an unrelated question. That stale context was making the next turn
+      // look like a missing-piece request and created a repetitive loop.
+      const isSprNonCatalogQuestionTurn = isSprAutopartesTenant
+        && !sprFaqReply
+        && isSprNonCatalogQuestion(messageText);
+      const catalogQueryText = (sprFaqReply || isSprNonCatalogQuestionTurn || isSprHoursQuestion)
+        ? messageText
+        : (catalogContextText || messageText);
       // Normalize colloquial spellings before every stage of the lookup. The
       // same canonical query must reach matching, strict vehicle filters and
       // the final reply; otherwise “facia”, “amort” or “retrovisor” could
@@ -3074,6 +3095,10 @@ Incluye:
         botReply = `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo.\n\nPara buscar correctamente en el catálogo, escríbeme *solo estos cuatro datos* en un mismo mensaje:\n🔧 Pieza\n🚗 Marca\n🚙 Modelo\n📅 Año\n\nEjemplo: *faro derecho Nissan Versa 2017*.`;
       } else if (sprFaqReply) {
         botReply = sprFaqReply;
+      } else if (isSprNonCatalogQuestionTurn) {
+        // A question that is not an FAQ or a catalog request is recorded in
+        // the CRM, but it must not trigger the piece/vehicle prompt again.
+        botReply = '';
       } else if (shouldRouteSprCatalogToAdvisor({
         isSprAutopartesTenant,
         asksCatalogProduct,
@@ -4201,6 +4226,8 @@ module.exports = {
   isSprAfterHoursVisitIntent,
   isSprAfterHoursWindow,
   buildSprAfterHoursVisitReply,
+  isSprCatalogIntent,
+  isSprNonCatalogQuestion,
   buildSprCatalogFallbackReply,
   buildSprCatalogReply,
   businessMinutesSince,
