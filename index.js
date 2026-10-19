@@ -285,7 +285,7 @@ function zonedPartsToUtc(parts, timeZone = SPR_ALERT_TIMEZONE) {
 
 function isSprBusinessWindow(date = new Date(), timeZone = SPR_ALERT_TIMEZONE) {
   const parts = getZonedDateParts(date, timeZone);
-  return parts.weekday >= 1 && parts.weekday <= 6 && parts.hour >= 9 && parts.hour < 19;
+  return parts.weekday >= 1 && parts.weekday <= 6 && parts.hour >= 9 && parts.hour < 18;
 }
 
 function businessMinutesSince(startDate, endDate = new Date(), timeZone = SPR_ALERT_TIMEZONE) {
@@ -309,7 +309,7 @@ function businessMinutesSince(startDate, endDate = new Date(), timeZone = SPR_AL
     const weekday = cursorDate.getUTCDay();
     if (weekday >= 1 && weekday <= 6) {
       const workStart = zonedPartsToUtc({ ...dayParts, hour: 9, minute: 0, second: 0 }, timeZone).getTime();
-      const workEnd = zonedPartsToUtc({ ...dayParts, hour: 19, minute: 0, second: 0 }, timeZone).getTime();
+      const workEnd = zonedPartsToUtc({ ...dayParts, hour: 18, minute: 0, second: 0 }, timeZone).getTime();
       const overlapStart = Math.max(startMs, workStart);
       const overlapEnd = Math.min(endMs, workEnd);
       if (overlapEnd > overlapStart) totalMinutes += (overlapEnd - overlapStart) / 60000;
@@ -353,7 +353,7 @@ async function checkSprInactivityAlert(now = new Date()) {
       'SPR Autopartes no ha recibido mensajes de clientes durante más de 3 horas hábiles.',
       `Último mensaje de cliente: ${state.last_customer_message_at || 'no registrado; se tomó el arranque del servidor como referencia'}`,
       `Tiempo hábil transcurrido: ${Math.floor(quietBusinessMinutes / 60)} h ${Math.floor(quietBusinessMinutes % 60)} min`,
-      `Horario considerado: lunes a sábado, 09:00–19:00 (${SPR_ALERT_TIMEZONE})`,
+      `Horario considerado: lunes a sábado, 09:00–18:00 (${SPR_ALERT_TIMEZONE})`,
       `Revisión generada: ${nowIso}`
     ].join('\n')
   });
@@ -712,12 +712,40 @@ function buildSprFaqReply(value, isSprAutopartesTenant) {
     return `📍 *Estamos ubicados en Querétaro, México.*\n🗺️ Ubicación: ${SPR_STORE_MAP_URL}`;
   }
   if (/\b(horario|horarios|hora|horas|abren|cierran|abierto|abiertos|atienden|atencion)\b/.test(query)) {
-    return 'Atendemos de *Lunes a Sábado* de *9:00 am* a *7:30 pm*. ✅\nNuestro canal de WhatsApp y redes sociales recibe consultas las *24 horas*. 🕑';
+    return 'Atendemos de *Lunes a Sábado* de *9:00 am* a *6:00 pm*. ✅\nNuestro canal de WhatsApp y redes sociales recibe consultas las *24 horas*. 🕑';
   }
   if (/\b(envio|envios|enviamos|mandan|mandamos|entrega|entregan|cobertura|nacional|foraneo|foraneos|foranea|foraneas|otro estado|todo mexico)\b/.test(query)) {
     return '🚚 Sí, realizamos envíos a toda la República Mexicana.';
   }
   return '';
+}
+
+function isSprTenantIdentity(companyId, tenantDisplayName = '', botSettings = {}) {
+  const identity = `${companyId || ''} ${tenantDisplayName || ''} ${botSettings?.bot_name || ''} ${botSettings?.business_name || ''} ${botSettings?.business_description || ''}`;
+  return String(companyId || '').trim() === SPR_COMPANY_ID
+    || /\bspr\s*(?:bot|autopartes|engine)\b/i.test(identity);
+}
+
+function isSprAfterHoursVisitIntent(value) {
+  const query = normalizeBotText(value);
+  if (!query) return false;
+  const visitVerb = /\b(?:paso|pasamos|pasar|voy|vamos|vengo|venir|llego|llegamos|recoger|recogere|recogemos|recogida|visito|visitar|caigo)\b/.test(query);
+  const afterHoursPhrase = /\b(?:despues\s+(?:(?:de|del)\s+)?(?:horario|cerrar|las?\s+6|las?\s+7|las?\s+8|las?\s+9)|mas\s+tarde|en\s+la\s+noche|fuera\s+de\s+horario|cuando\s+cierren|ya\s+cerraron|despues\s+de\s+que\s+cierren)\b/.test(query);
+  return visitVerb && afterHoursPhrase;
+}
+
+function getSprMexicoLocalMinutes(date = new Date()) {
+  const parts = getZonedDateParts(date, SPR_ALERT_TIMEZONE);
+  return parts.hour * 60 + parts.minute;
+}
+
+function isSprAfterHoursWindow(date = new Date()) {
+  const minutes = getSprMexicoLocalMinutes(date);
+  return minutes > (18 * 60) && minutes < (24 * 60);
+}
+
+function buildSprAfterHoursVisitReply() {
+  return '📅 *Te agendamos para el día siguiente.* Como el horario de atención es de *9:00 a. m. a 6:00 p. m.*, la entrega quedaría para mañana entre *12:00 y 1:00 p. m.*.';
 }
 
 
@@ -1888,24 +1916,11 @@ function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult
 function checkWorkingHours(workingHours) {
   if (!workingHours || !workingHours.enabled) return true;
   try {
-    const now = new Date();
     const tz = workingHours.timezone || 'America/Mexico_City';
-    const formatter = new Intl.DateTimeFormat('en-US', {
-      timeZone: tz,
-      hour: 'numeric',
-      minute: 'numeric',
-      hour12: false,
-      weekday: 'numeric'
-    });
-    const parts = formatter.formatToParts(now);
-    let dayOfWeek = now.getDay();
-    let currentHour = now.getHours();
-    let currentMinute = now.getMinutes();
-
-    parts.forEach(p => {
-      if (p.type === 'hour') currentHour = parseInt(p.value, 10);
-      if (p.type === 'minute') currentMinute = parseInt(p.value, 10);
-    });
+    const parts = getZonedDateParts(new Date(), tz);
+    const dayOfWeek = parts.weekday;
+    const currentHour = parts.hour;
+    const currentMinute = parts.minute;
 
     const allowedDays = workingHours.days || [1, 2, 3, 4, 5, 6];
     if (!allowedDays.includes(dayOfWeek)) return false;
@@ -2780,6 +2795,24 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const tenantDisplayName = String(
       tenantCompany?.nombre || botSettings?.business_name || botSettings?.business_description || 'nuestro negocio'
     ).trim();
+    const isSprTenantForHours = isSprTenantIdentity(companyId, tenantDisplayName, botSettings);
+    // SPR's operational schedule is fixed by the business: Monday through
+    // Saturday, 09:00–18:00 in Querétaro. Normalize old settings such as
+    // 19:30 so the stored configuration cannot keep the previous schedule
+    // active after a deploy.
+    if (isSprTenantForHours) {
+      botSettings = {
+        ...botSettings,
+        working_hours: {
+          ...(botSettings?.working_hours || {}),
+          enabled: true,
+          open_time: '09:00',
+          close_time: '18:00',
+          days: [1, 2, 3, 4, 5, 6],
+          timezone: 'America/Mexico_City'
+        }
+      };
+    }
 
     // Check for Human Handoff Intent
     const lowerText = normalizeBotText(messageText);
@@ -2794,6 +2827,11 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const isShopifySuspensionIntro = /^hola vengo de spr autopartes y necesito asesoria para suspension marca modelo y ano$/.test(lowerText);
     const isShopifyPartsIntro = /^hola vengo de spr autopartes y me gustaria consultar sobre algunas piezas$/.test(lowerText);
     const isShopifyPrefillIntro = isShopifySuspensionIntro || isShopifyPartsIntro;
+    const isSprHoursQuestion = isSprTenantForHours
+      && /\b(horario|horarios|hora|horas|abren|cierran|abierto|abiertos|atienden|atencion)\b/.test(lowerText);
+    const shouldScheduleSprAfterHoursVisit = isSprTenantForHours
+      && isSprAfterHoursVisitIntent(messageText)
+      && isSprAfterHoursWindow();
 
     let botReply = '';
 
@@ -2836,9 +2874,11 @@ app.post('/webhook/whatsapp', async (req, res) => {
       try {
         await db.doc(`followups/${taskId}`).set(taskData);
       } catch (e) {}
-    } else if (botSettings?.working_hours && !checkWorkingHours(botSettings.working_hours) && !isFriendlyGreeting && !isCourtesyMessage && !isShopifyPrefillIntro) {
+    } else if (botSettings?.working_hours && !checkWorkingHours(botSettings.working_hours) && !isFriendlyGreeting && !isCourtesyMessage && !isShopifyPrefillIntro && !isSprHoursQuestion) {
       // Out of hours
-      botReply = botSettings.out_of_hours_message || `¡Hola! Gracias por comunicarte. En este momento nos encontramos fuera de horario de atención comercial, pero ya registramos tu consulta y un asesor te responderá a primera hora.`;
+      botReply = shouldScheduleSprAfterHoursVisit
+        ? buildSprAfterHoursVisitReply()
+        : botSettings.out_of_hours_message || `¡Hola! Gracias por comunicarte. En este momento nos encontramos fuera de horario de atención comercial, pero ya registramos tu consulta y un asesor te responderá a primera hora.`;
     } else {
       // Query Knowledge Base for match
       const kbItems = await getTenantKnowledgeBase(db, companyId);
@@ -4157,6 +4197,10 @@ module.exports = {
   buildSprAdvisorReviewReply,
   isSprStoreLocationQuestion,
   buildSprFaqReply,
+  isSprTenantIdentity,
+  isSprAfterHoursVisitIntent,
+  isSprAfterHoursWindow,
+  buildSprAfterHoursVisitReply,
   buildSprCatalogFallbackReply,
   buildSprCatalogReply,
   businessMinutesSince,
