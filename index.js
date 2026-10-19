@@ -761,6 +761,17 @@ function isSprNonCatalogQuestion(value) {
   return !isSprCatalogIntent(query);
 }
 
+function isSprNonAutomotiveProductRequest(value) {
+  const query = normalizeBotText(value);
+  const purchaseIntent = /\b(?:busco|buscando|necesito|ocupo|quiero|tienen|venden|manejan|consiguen|cotizar|cotizacion|precio|disponible|hay|pieza|producto)\b/.test(query);
+  if (!purchaseIntent) return false;
+  return /\b(?:licuadora|refrigerador|refrigeradora|estufa|microondas|lavadora|secadora|cafetera|mueble|sillon|sofa|mesa|silla|cama|colchon|ropa|camisa|pantalon|zapato|tenis|bolsa|comida|alimento|bebida|medicina|cosmetico|juguete|telefono|celular|computadora|laptop|impresora|televisor|television|monitor|audifono|camara|cargador|plomeria|electricidad|ferreteria|herramienta|materiales?\s+de\s+construccion|pintura|madera|jardin|mascota|perro|gato|bicicleta|motocicleta|moto|avion|barco|maquinaria\s+agricola)\b/.test(query);
+}
+
+function buildSprNonAutomotiveProductReply() {
+  return '❌ Disculpa, en *SPR Autopartes* manejamos únicamente refacciones para automóviles. No manejamos ese producto.';
+}
+
 
 /**
  * Apply a consistent WhatsApp visual style to every automated reply.
@@ -2985,7 +2996,9 @@ Incluye:
       const isSprNonCatalogQuestionTurn = isSprAutopartesTenant
         && !sprFaqReply
         && isSprNonCatalogQuestion(messageText);
-      const catalogQueryText = (sprFaqReply || isSprNonCatalogQuestionTurn || isSprHoursQuestion)
+      const isSprNonAutomotiveRequest = isSprAutopartesTenant
+        && isSprNonAutomotiveProductRequest(messageText);
+      const catalogQueryText = (sprFaqReply || isSprNonCatalogQuestionTurn || isSprHoursQuestion || isSprNonAutomotiveRequest)
         ? messageText
         : (catalogContextText || messageText);
       // Normalize colloquial spellings before every stage of the lookup. The
@@ -3086,6 +3099,8 @@ Incluye:
 
       if (isShopifyPrefillIntro) {
         botReply = `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo.\n\nPara buscar correctamente en el catálogo, escríbeme *solo estos cuatro datos* en un mismo mensaje:\n🔧 Pieza\n🚗 Marca\n🚙 Modelo\n📅 Año\n\nEjemplo: *faro derecho Nissan Versa 2017*.`;
+      } else if (isSprNonAutomotiveRequest) {
+        botReply = buildSprNonAutomotiveProductReply();
       } else if (sprFaqReply) {
         botReply = sprFaqReply;
       } else if (isSprNonCatalogQuestionTurn) {
@@ -4221,6 +4236,8 @@ module.exports = {
   buildSprAfterHoursVisitReply,
   isSprCatalogIntent,
   isSprNonCatalogQuestion,
+  isSprNonAutomotiveProductRequest,
+  buildSprNonAutomotiveProductReply,
   buildSprCatalogFallbackReply,
   buildSprCatalogReply,
   businessMinutesSince,
