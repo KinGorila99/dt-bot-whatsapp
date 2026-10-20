@@ -598,18 +598,8 @@ function hasSprSalesPrompt(value) {
   return /(?:catalogo|encontre|encontramos|opciones relacionadas|precio|disponibilidad|compatibilidad|aplicacion|pieza correcta|confirmar|quieres que revisemos|quieres comprar|deseas comprar|hacer el pedido|agregar al carrito)/.test(normalized);
 }
 
-function extractSprProductLinksFromBotMessage(value) {
-  const text = String(value || '');
-  const links = text.match(/https?:\/\/(?:www\.)?sprautopartes\.mx\/products\/[^\s)>]+/gi) || [];
-  return [...new Set(links.map(link => link.replace(/[.,;:]+$/, '')))];
-}
-
-function buildSprSalesContinuationReply(source = '') {
-  const productLinks = extractSprProductLinksFromBotMessage(source);
-  const linkText = productLinks.length
-    ? productLinks.map(link => `🔗 ${link}`).join('\n')
-    : '🔗 https://www.sprautopartes.mx/';
-  return `✅ Perfecto. Puedes proseguir con la compra en el enlace donde encontraste la pieza:\n${linkText}\n\nSelecciona la pieza, agrégala al carrito, captura tus datos de envío y completa el pedido.`;
+function buildSprSalesContinuationReply() {
+  return '✅ Perfecto. Puedes realizar tu compra directamente desde la página de SPR Autopartes, utilizando el enlace donde encontraste el producto.';
 }
 
 // Customers often type collision parts phonetically or with one missing
@@ -3202,7 +3192,7 @@ Incluye:
         // the four fields in one message until they arrive together.
         botReply = sprMissingRequestReply;
       } else if (isSprPurchaseConfirmation) {
-        botReply = buildSprSalesContinuationReply(previousBotMessage);
+        botReply = buildSprSalesContinuationReply();
       } else if (isSprNonAutomotiveRequest) {
         botReply = buildSprNonAutomotiveProductReply();
       } else if (isSprImageIssue) {
@@ -3286,7 +3276,7 @@ Incluye:
         // Continue only when the previous bot message clearly asked for a
         // catalog/compatibility/purchase confirmation. Otherwise remain
         // silent; a bare "correcto" does not provide a new sales action.
-        botReply = hasPendingSalesPrompt ? buildSprSalesContinuationReply(previousBotMessage) : '';
+        botReply = hasPendingSalesPrompt ? buildSprSalesContinuationReply() : '';
       } else if (isFriendlyGreeting) {
         const greetingPrefix = lowerText.includes('buenos dias')
           ? '☀️ ¡Muy buenos días!'
@@ -4372,7 +4362,6 @@ module.exports = {
   buildSprNonAutomotiveProductReply,
   isSprSalesConfirmation,
   hasSprSalesPrompt,
-  extractSprProductLinksFromBotMessage,
   buildSprSalesContinuationReply,
   isSprCatalogImageIssue,
   buildSprCatalogImageUnavailableReply,
