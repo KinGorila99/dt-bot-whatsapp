@@ -590,7 +590,7 @@ function buildSprVehicleConfirmationReply(details) {
 // the generic safe-fallback question.
 function isSprSalesConfirmation(value) {
   const normalized = normalizeBotText(value);
-  return /^(?:correcto|correcta|es correcto|es correcta|si|si es|exacto|exacta|asi es|confirmo|confirmado|confirmada|de acuerdo|esta bien|bien|ok|okay|va|perfecto|listo|recibido|esa es|ese es)$/.test(normalized);
+  return /^(?:correcto|correcta|es correcto|es correcta|si|si es|si esa|si esa es|si esa es la pieza|si es esa|si es la pieza|exacto|exacta|asi es|confirmo|confirmado|confirmada|de acuerdo|esta bien|bien|ok|okay|va|perfecto|listo|recibido|esa|esa misma|esa es|esa es la pieza|ese|ese mismo|ese es|ese es la pieza|es la pieza|la quiero|quiero esa|quiero esa pieza|me interesa esa|esa me sirve|esa mero|esa mero es)$/.test(normalized);
 }
 
 function hasSprSalesPrompt(value) {
@@ -598,8 +598,18 @@ function hasSprSalesPrompt(value) {
   return /(?:catalogo|encontre|encontramos|opciones relacionadas|precio|disponibilidad|compatibilidad|aplicacion|pieza correcta|confirmar|quieres que revisemos|quieres comprar|deseas comprar|hacer el pedido|agregar al carrito)/.test(normalized);
 }
 
-function buildSprSalesContinuationReply() {
-  return `✅ Perfecto. Para continuar con tu compra entra a https://www.sprautopartes.mx/ y busca la pieza confirmada. Selecciónala, agrégala al carrito, captura tus datos de envío y completa el pedido. Si quieres validar otra vez la aplicación, compártenos marca, modelo y año.`;
+function extractSprProductLinksFromBotMessage(value) {
+  const text = String(value || '');
+  const links = text.match(/https?:\/\/(?:www\.)?sprautopartes\.mx\/products\/[^\s)>]+/gi) || [];
+  return [...new Set(links.map(link => link.replace(/[.,;:]+$/, '')))];
+}
+
+function buildSprSalesContinuationReply(source = '') {
+  const productLinks = extractSprProductLinksFromBotMessage(source);
+  const linkText = productLinks.length
+    ? productLinks.map(link => `🔗 ${link}`).join('\n')
+    : '🔗 https://www.sprautopartes.mx/';
+  return `✅ Perfecto. Puedes proseguir con la compra en el enlace donde encontraste la pieza:\n${linkText}\n\nSelecciona la pieza, agrégala al carrito, captura tus datos de envío y completa el pedido.`;
 }
 
 // Customers often type collision parts phonetically or with one missing
@@ -800,7 +810,7 @@ function buildSprSingleMessageRequiredReply() {
 
 function isSprIncompleteSingleMessageRequest(value) {
   const query = canonicalizeSprPartSynonyms(value);
-  if (!query || isFriendlyGreetingText(query) || isCourtesyText(query)) return false;
+  if (!query || isFriendlyGreetingText(query) || isCourtesyText(query) || isSprSalesConfirmation(query)) return false;
   const hasPart = hasSprExplicitPartRequest(query);
   const hasMake = [...SPR_VEHICLE_MAKES].some(make => new RegExp(`\\b${escapeSprRegex(make)}\\b`, 'i').test(query));
   const hasModel = hasSprVehicleReference(query);
@@ -3030,6 +3040,9 @@ Incluye:
         || /spr\s*(bot|autopartes|engine)/i.test(botIdentityForCatalog)
         || /spr autopartes/i.test(botIdentityForCatalog);
       const hasPendingSalesPrompt = isSprAutopartesTenant && hasSprSalesPrompt(previousBotMessage);
+      const isSprPurchaseConfirmation = isSprAutopartesTenant
+        && isSalesConfirmation
+        && hasPendingSalesPrompt;
       const publicBusinessName = isSprAutopartesTenant ? 'SPR Autopartes' : tenantDisplayName;
       const publicBotName = String(
         botSettings?.bot_name || (isSprAutopartesTenant ? 'SPR BOT' : 'asistente virtual')
@@ -3062,7 +3075,7 @@ Incluye:
           !isSprCompleteSingleMessage && (isSprIncompleteRequest || sprSingleMessageLockActive)
         );
       }
-      const catalogQueryText = (sprFaqReply || isSprNonCatalogQuestionTurn || isSprHoursQuestion || isSprNonAutomotiveRequest || isSprImageIssue || isSprIncompleteRequest || sprSingleMessageLockActive)
+      const catalogQueryText = (sprFaqReply || isSprNonCatalogQuestionTurn || isSprHoursQuestion || isSprNonAutomotiveRequest || isSprImageIssue || isSprIncompleteRequest || sprSingleMessageLockActive || isSprPurchaseConfirmation)
         ? messageText
         : (catalogContextText || messageText);
       // Normalize colloquial spellings before every stage of the lookup. The
@@ -3094,6 +3107,7 @@ Incluye:
         : buildSprMissingRequestReply(sprMissingRequestFields, catalogQueryText);
       const asksCatalogProduct = !isShopifyPrefillIntro
         && !isSprImageIssue
+        && !isSprPurchaseConfirmation
         && !vehicleOnlyCatalogContext
         && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|anticongelante|refrigerante|coolant|lubricante|aditivo|liquido(?:s)?|buj[ií]a(?:s)?|bater[ií]a(?:s)?|filtro(?:s)?|llanta(?:s)?|neum[aá]tico(?:s)?|rin(?:es)?|birlo(?:s)?|plumilla(?:s)?|escobilla(?:s)?|fusible(?:s)?|foco(?:s)?|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|cremallera(?:s)?|rack(?:\s+and)?\s+pinion|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera|carroceria)\b/.test(lowerText) || SPR_EXPLICIT_PART_PATTERN.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText) || (catalogContextText !== messageText && isSprLikelyPieceFollowUp(messageText)));
       let sprCatalogReply = ''; let sprCatalogMatched = false;
@@ -3170,6 +3184,8 @@ Incluye:
         // Once a customer starts a split catalog request, keep asking only for
         // the four fields in one message until they arrive together.
         botReply = sprMissingRequestReply;
+      } else if (isSprPurchaseConfirmation) {
+        botReply = buildSprSalesContinuationReply(previousBotMessage);
       } else if (isSprNonAutomotiveRequest) {
         botReply = buildSprNonAutomotiveProductReply();
       } else if (isSprImageIssue) {
@@ -3253,7 +3269,7 @@ Incluye:
         // Continue only when the previous bot message clearly asked for a
         // catalog/compatibility/purchase confirmation. Otherwise remain
         // silent; a bare "correcto" does not provide a new sales action.
-        botReply = hasPendingSalesPrompt ? buildSprSalesContinuationReply() : '';
+        botReply = hasPendingSalesPrompt ? buildSprSalesContinuationReply(previousBotMessage) : '';
       } else if (isFriendlyGreeting) {
         const greetingPrefix = lowerText.includes('buenos dias')
           ? '☀️ ¡Muy buenos días!'
@@ -4337,6 +4353,10 @@ module.exports = {
   isSprNonCatalogQuestion,
   isSprNonAutomotiveProductRequest,
   buildSprNonAutomotiveProductReply,
+  isSprSalesConfirmation,
+  hasSprSalesPrompt,
+  extractSprProductLinksFromBotMessage,
+  buildSprSalesContinuationReply,
   isSprCatalogImageIssue,
   buildSprCatalogImageUnavailableReply,
   isSprCompleteSingleMessageRequest,
