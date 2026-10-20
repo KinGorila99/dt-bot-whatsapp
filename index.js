@@ -137,9 +137,8 @@ function mergeTenantSafeBotSettings(tenant, settings) {
     }
   };
 }
-// Auto-reactivate the bot after an advisor has been idle.
-// Keep bot silent for five minutes after the last advisor message.
-const HUMAN_HANDOFF_IDLE_MINUTES = 5;
+// An advisor handoff remains paused until an authorized user reactivates
+// the conversation manually from the CRM. There is no timed auto-reactivation.
 
 function timestampMs(value) {
   if (!value) return 0;
@@ -485,13 +484,8 @@ async function migrateConversationMessages(dbInstance, legacyId, canonicalId) {
     console.warn(`Could not merge legacy conversation ${legacyId}:`, error.message);
   }
 }
-function shouldAutoReactivateBot(conversation, now = Date.now()) {
-  if (!conversation || conversation.status === 'closed') return false;
-  if (conversation.auto_reactivate_enabled === false) return false;
-  if (conversation.human_handoff !== true && conversation.bot_enabled !== false) return false;
-  const handoffStartedMs = timestampMs(conversation.last_agent_message_at || conversation.human_handoff_started_at);
-  if (!handoffStartedMs) return false;
-  return now - handoffStartedMs >= HUMAN_HANDOFF_IDLE_MINUTES * 60 * 1000;
+function shouldAutoReactivateBot() {
+  return false;
 }
 
 
@@ -2732,34 +2726,9 @@ app.post('/webhook/whatsapp', async (req, res) => {
       console.log('🤖 [Owner Pause Removed] Conversation [' + convId + '] resumed for the reactivated SPR bot.');
     }
 
-    // A human reply pauses the current turn, not the whole conversation. For
-    // SPR, a new piece, greeting, or concrete question explicitly starts a
-    // fresh automated turn. This prevents every advisor send from leaving the
-    // customer silently paused while preserving acknowledgements such as
-    // "gracias" with the human advisor.
-    if (companyId === SPR_COMPANY_ID && !botPausedByOwner
-      && (convData.human_handoff === true || convData.bot_enabled === false)      && (!convData.last_agent_message_at || shouldAutoReactivateBot(convData))
-      && isSprNewRequestOrQuestion(messageText)) {
-      convData.human_handoff = false;
-      convData.bot_enabled = true;
-      convData.status = 'active';
-      convData.auto_reactivate_enabled = true;
-      convData.human_handoff_started_at = null;
-      convData.needs_human_review = false;
-      convData.review_requested_at = null;
-      convData.handoff_reason = null;
-      convData.auto_reactivated_at = timestamp;
-      convData.auto_reactivation_reason = 'customer_new_request';
-      convData.assigned_user_id = null;
-      convData.assigned_user_name = null;
-      // A prior catalog review belongs to the previous customer turn. A new
-      // piece or concrete question must start a clean automated turn instead
-      // of remaining silently blocked by the stale review marker.
-      convData.catalog_review_required = false;
-      convData.catalog_review_reason = null;
-      convData.catalog_review_query = null;
-      console.log('🤖 [New Customer Request] Conversation [' + convId + '] resumed for a new piece or FAQ question.');
-    }
+    // A human reply pauses the conversation until an authorized user
+    // reactivates it manually from the CRM. Customer messages are stored
+    // for the advisor but never override this manual pause.
 
     // 4. Save Inbound Message
     const inMsgId = `msg_${Date.now()}_in_${Math.random().toString(36).substring(2, 6)}`;
@@ -2800,19 +2769,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
     }
 
     // 5. DT Bot Core Engine Evaluation
-    // Resume only when the customer writes again after the advisor idle window.
-    const autoReactivated = shouldAutoReactivateBot(convData);
-    if (autoReactivated) {
-      convData.human_handoff = false;
-      convData.bot_enabled = true;
-      convData.status = 'active';
-      convData.auto_reactivated_at = new Date().toISOString();
-      convData.auto_reactivation_reason = 'advisor_idle_timeout';
-      convData.human_handoff_started_at = null;
-      convData.assigned_user_id = null;
-      convData.assigned_user_name = null;
-      console.log('🤖 [Auto Reactivation] Conversation [' + convId + '] resumed after ' + HUMAN_HANDOFF_IDLE_MINUTES + ' minutes without advisor activity.');
-    }
+    // A conversation paused by an advisor remains silent until manual
+    // reactivation from the CRM.
 
     // If human handoff is still active, keep the bot silent.
     if (convData.human_handoff === true || convData.bot_enabled === false) {
@@ -3848,7 +3806,7 @@ app.post('/api/send-message', authenticateUser, async (req, res) => {
           updated_at: agentTimestamp,
           human_handoff: true,
           bot_enabled: false,
-          auto_reactivate_enabled: true,
+          auto_reactivate_enabled: false,
           human_handoff_started_at: agentTimestamp,
           last_agent_message_at: agentTimestamp
         }, { merge: true });
@@ -4140,7 +4098,7 @@ app.post('/api/send-media', authenticateUser, async (req, res) => {
         updated_at: createdAt,
         human_handoff: true,
         bot_enabled: false,
-        auto_reactivate_enabled: true,
+        auto_reactivate_enabled: false,
         human_handoff_started_at: createdAt,
         last_agent_message_at: createdAt
       }, { merge: true });
