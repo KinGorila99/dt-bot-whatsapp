@@ -784,6 +784,20 @@ function buildSprCatalogImageUnavailableReply() {
   return '📷 La imagen de referencia no se muestra en el enlace. No tengo la facultad de enviar fotos aparte desde este chat, así que te redirijo con un asesor para que te comparta la imagen y confirme la pieza. 👨‍💼';
 }
 
+function isSprCompleteSingleMessageRequest(value) {
+  const query = canonicalizeSprPartSynonyms(value);
+  if (!query || isFriendlyGreetingText(query) || isCourtesyText(query)) return false;
+  const hasPart = hasSprExplicitPartRequest(query);
+  const hasMake = [...SPR_VEHICLE_MAKES].some(make => new RegExp(`\\b${escapeSprRegex(make)}\\b`, 'i').test(query));
+  const hasModel = hasSprVehicleReference(query);
+  const hasYear = /\b(?:19|20)\d{2}\b|\b(?:0\d|[1-9]\d)\b/.test(query);
+  return hasPart && hasMake && hasModel && hasYear;
+}
+
+function buildSprSingleMessageRequiredReply() {
+  return 'POR FAVOR, ESCRIBA SU SOLICITUD EN *UN SOLO MENSAJE*: PIEZA, MARCA, MODELO Y AÑO.';
+}
+
 function isSprIncompleteSingleMessageRequest(value) {
   const query = canonicalizeSprPartSynonyms(value);
   if (!query || isFriendlyGreetingText(query) || isCourtesyText(query)) return false;
@@ -798,7 +812,7 @@ function isSprIncompleteSingleMessageRequest(value) {
     && !hasYear;
   const hasCatalogClue = hasPart || hasMake || hasModel || hasYear
     || (isSprLikelyPieceFollowUp(query) && !refinementOnly);
-  return hasCatalogClue && !(hasPart && hasMake && hasModel && hasYear);
+  return hasCatalogClue && !isSprCompleteSingleMessageRequest(query);
 }
 
 
@@ -2867,7 +2881,10 @@ app.post('/webhook/whatsapp', async (req, res) => {
     // Check for Human Handoff Intent
     const lowerText = normalizeBotText(messageText);
     const humanKeywords = ['asesor', 'humano', 'persona', 'agente', 'ejecutivo', 'hablar con alguien', 'representante', 'ayuda humana', 'transferir'];
-    const wantsHuman = humanKeywords.some(kw => lowerText.includes(kw));
+    const singleMessageLockActiveBeforeTurn = isSprTenantForHours
+      && convData.spr_requires_complete_single_message === true;
+    const wantsHuman = !singleMessageLockActiveBeforeTurn
+      && humanKeywords.some(kw => lowerText.includes(kw));
     // Greetings and courtesy messages must be answered before business-hours rules.
     // A greeting such as “Hola, buenos días” is still a greeting, not a request
     // for schedules or a catalog search.
@@ -2924,7 +2941,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
       try {
         await db.doc(`followups/${taskId}`).set(taskData);
       } catch (e) {}
-    } else if (botSettings?.working_hours && !checkWorkingHours(botSettings.working_hours) && !isFriendlyGreeting && !isCourtesyMessage && !isShopifyPrefillIntro && !isSprHoursQuestion) {
+    } else if (botSettings?.working_hours && !checkWorkingHours(botSettings.working_hours) && !isFriendlyGreeting && !isCourtesyMessage && !isShopifyPrefillIntro && !isSprHoursQuestion && !singleMessageLockActiveBeforeTurn) {
       // Out of hours
       botReply = shouldScheduleSprAfterHoursVisit
         ? buildSprAfterHoursVisitReply()
@@ -3033,9 +3050,19 @@ Incluye:
         && isSprNonAutomotiveProductRequest(messageText);
       const isSprImageIssue = isSprAutopartesTenant
         && isSprCatalogImageIssue(messageText);
+      const isSprCompleteSingleMessage = isSprAutopartesTenant
+        && isSprCompleteSingleMessageRequest(messageText);
+      const sprSingleMessageLockActive = isSprAutopartesTenant
+        && convData.spr_requires_complete_single_message === true;
       const isSprIncompleteRequest = isSprAutopartesTenant
-        && isSprIncompleteSingleMessageRequest(messageText);
-      const catalogQueryText = (sprFaqReply || isSprNonCatalogQuestionTurn || isSprHoursQuestion || isSprNonAutomotiveRequest || isSprImageIssue || isSprIncompleteRequest)
+        && !isSprCompleteSingleMessage
+        && (isSprIncompleteSingleMessageRequest(messageText) || sprSingleMessageLockActive);
+      if (isSprAutopartesTenant) {
+        convData.spr_requires_complete_single_message = Boolean(
+          !isSprCompleteSingleMessage && (isSprIncompleteRequest || sprSingleMessageLockActive)
+        );
+      }
+      const catalogQueryText = (sprFaqReply || isSprNonCatalogQuestionTurn || isSprHoursQuestion || isSprNonAutomotiveRequest || isSprImageIssue || isSprIncompleteRequest || sprSingleMessageLockActive)
         ? messageText
         : (catalogContextText || messageText);
       // Normalize colloquial spellings before every stage of the lookup. The
@@ -3063,7 +3090,7 @@ Incluye:
         ? getSprMissingRequestFields(catalogQueryText)
         : [];
       const sprMissingRequestReply = isSprIncompleteRequest
-        ? buildSprCompleteRequestPrompt(messageText)
+        ? buildSprSingleMessageRequiredReply()
         : buildSprMissingRequestReply(sprMissingRequestFields, catalogQueryText);
       const asksCatalogProduct = !isShopifyPrefillIntro
         && !isSprImageIssue
@@ -3137,8 +3164,12 @@ Incluye:
         }
       }
 
-      if (isShopifyPrefillIntro) {
+      if (isShopifyPrefillIntro && !isSprIncompleteRequest) {
         botReply = `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo.\n\nPara buscar correctamente en el catálogo, escríbeme *solo estos cuatro datos* en un mismo mensaje:\n🔧 Pieza\n🚗 Marca\n🚙 Modelo\n📅 Año\n\nEjemplo: *faro derecho Nissan Versa 2017*.`;
+      } else if (isSprIncompleteRequest) {
+        // Once a customer starts a split catalog request, keep asking only for
+        // the four fields in one message until they arrive together.
+        botReply = sprMissingRequestReply;
       } else if (isSprNonAutomotiveRequest) {
         botReply = buildSprNonAutomotiveProductReply();
       } else if (isSprImageIssue) {
@@ -3175,11 +3206,6 @@ Incluye:
         // A question that is not an FAQ or a catalog request is recorded in
         // the CRM, but it must not trigger the piece/vehicle prompt again.
         botReply = '';
-      } else if (isSprIncompleteRequest) {
-        // Do not combine a fragment such as "Horquilla" with an older
-        // Mazda/model turn. Require the complete vehicle request in one
-        // customer message before searching the catalog.
-        botReply = sprMissingRequestReply;
       } else if (shouldRouteSprCatalogToAdvisor({
         isSprAutopartesTenant,
         asksCatalogProduct,
@@ -4313,6 +4339,8 @@ module.exports = {
   buildSprNonAutomotiveProductReply,
   isSprCatalogImageIssue,
   buildSprCatalogImageUnavailableReply,
+  isSprCompleteSingleMessageRequest,
+  buildSprSingleMessageRequiredReply,
   isSprIncompleteSingleMessageRequest,
   buildSprCompleteRequestPrompt,
   buildSprCatalogFallbackReply,
