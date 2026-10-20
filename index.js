@@ -2893,8 +2893,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const humanKeywords = ['asesor', 'humano', 'persona', 'agente', 'ejecutivo', 'hablar con alguien', 'representante', 'ayuda humana', 'transferir'];
     const singleMessageLockActiveBeforeTurn = isSprTenantForHours
       && convData.spr_requires_complete_single_message === true;
-    const wantsHuman = !singleMessageLockActiveBeforeTurn
-      && humanKeywords.some(kw => lowerText.includes(kw));
+    const wantsHuman = humanKeywords.some(kw => lowerText.includes(kw));
     // Greetings and courtesy messages must be answered before business-hours rules.
     // A greeting such as “Hola, buenos días” is still a greeting, not a request
     // for schedules or a catalog search.
@@ -2951,7 +2950,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
       try {
         await db.doc(`followups/${taskId}`).set(taskData);
       } catch (e) {}
-    } else if (botSettings?.working_hours && !checkWorkingHours(botSettings.working_hours) && !isFriendlyGreeting && !isCourtesyMessage && !isShopifyPrefillIntro && !isSprHoursQuestion && !singleMessageLockActiveBeforeTurn) {
+    } else if (botSettings?.working_hours && !checkWorkingHours(botSettings.working_hours) && !isFriendlyGreeting && !isCourtesyMessage && !isShopifyPrefillIntro && !isSprHoursQuestion) {
       // Out of hours
       botReply = shouldScheduleSprAfterHoursVisit
         ? buildSprAfterHoursVisitReply()
@@ -3067,12 +3066,30 @@ Incluye:
         && isSprCompleteSingleMessageRequest(messageText);
       const sprSingleMessageLockActive = isSprAutopartesTenant
         && convData.spr_requires_complete_single_message === true;
+      const currentSprCatalogTopic = isSprAutopartesTenant && (
+        isSprCatalogIntent(messageText)
+        || isSprLikelyPieceFollowUp(messageText)
+        || isSprIncompleteSingleMessageRequest(messageText)
+        || isSprCompleteSingleMessage
+      );
+      const isSprTopicChange = Boolean(
+        sprFaqReply
+        || isSprNonCatalogQuestionTurn
+        || isSprNonAutomotiveRequest
+        || isSprImageIssue
+        || isSalesConfirmation
+        || isFriendlyGreeting
+        || isCourtesyMessage
+      );
+      const sprLockedPieceTurn = sprSingleMessageLockActive
+        && currentSprCatalogTopic
+        && !isSprTopicChange;
       const isSprIncompleteRequest = isSprAutopartesTenant
         && !isSprCompleteSingleMessage
-        && (isSprIncompleteSingleMessageRequest(messageText) || sprSingleMessageLockActive);
+        && (isSprIncompleteSingleMessageRequest(messageText) || sprLockedPieceTurn);
       if (isSprAutopartesTenant) {
         convData.spr_requires_complete_single_message = Boolean(
-          !isSprCompleteSingleMessage && (isSprIncompleteRequest || sprSingleMessageLockActive)
+          !isSprCompleteSingleMessage && (isSprIncompleteRequest || sprLockedPieceTurn)
         );
       }
       const catalogQueryText = (sprFaqReply || isSprNonCatalogQuestionTurn || isSprHoursQuestion || isSprNonAutomotiveRequest || isSprImageIssue || isSprIncompleteRequest || sprSingleMessageLockActive || isSprPurchaseConfirmation)
