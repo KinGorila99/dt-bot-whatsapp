@@ -1931,6 +1931,20 @@ Ejemplo: *faro derecho Nissan Versa 2017*.
 También puedes describir la pieza con tus propias palabras; tomaré los términos equivalentes y las variantes del catálogo.`;
 }
 
+// A motor request with a recognizable vehicle and year is already specific
+// enough to report a model-level engine miss. Do not send it back through the
+// generic four-field prompt; this rule intentionally applies to motors only.
+function isSprEngineCatalogRequest(value) {
+  const query = normalizeSprCatalogText(value);
+  const hasEngineTerm = /\b(?:motor(?:es)?|engine(?:s)?)\b/.test(query);
+  const hasYear = /\b(?:19|20)\d{2}\b|\b(?:0\d|[1-9]\d)\b/.test(query);
+  return Boolean(hasEngineTerm && hasYear && hasSprVehicleReference(query));
+}
+
+function buildSprEngineUnavailableReply() {
+  return 'Por el momento no contamos con existencias para ese modelo en específico.';
+}
+
 function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult = null) {
   const safeMatches = Array.isArray(matches) ? matches : [];
   // A concrete catalog match always wins. Do not let a word such as
@@ -3163,9 +3177,17 @@ Incluye:
           console.warn('⚠️ SPR live catalog lookup failed:', catalogError.message);
         }
       }
+      const isSprEngineRequestWithoutMatch = isSprAutopartesTenant
+        && isSprEngineCatalogRequest(catalogQueryText)
+        && !sprCatalogMatched;
 
       if (isShopifyPrefillIntro && !isSprIncompleteRequest) {
         botReply = `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo.\n\nPara buscar correctamente en el catálogo, escríbeme *solo estos cuatro datos* en un mismo mensaje:\n🔧 Pieza\n🚗 Marca\n🚙 Modelo\n📅 Año\n\nEjemplo: *faro derecho Nissan Versa 2017*.`;
+      } else if (isSprEngineRequestWithoutMatch) {
+        // Engines get a concise model-level availability response even when
+        // the single-message guard would otherwise ask for the same fields.
+        convData.spr_requires_complete_single_message = false;
+        botReply = buildSprEngineUnavailableReply();
       } else if (isSprIncompleteRequest) {
         // Once a customer starts a split catalog request, keep asking only for
         // the four fields in one message until they arrive together.
@@ -4351,6 +4373,8 @@ module.exports = {
   isSprIncompleteSingleMessageRequest,
   buildSprCompleteRequestPrompt,
   buildSprCatalogFallbackReply,
+  isSprEngineCatalogRequest,
+  buildSprEngineUnavailableReply,
   buildSprCatalogReply,
   businessMinutesSince,
   isSprBusinessWindow,

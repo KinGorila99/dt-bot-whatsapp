@@ -21,6 +21,8 @@ const {
   buildSprAdvisorReviewReply,
   isSprStoreAvailabilityRequest,
   buildSprStoreAvailabilityHandoffReply,
+  isSprEngineCatalogRequest,
+  buildSprEngineUnavailableReply,
   getSprMissingRequestFields,
   buildSprMissingRequestReply,
   buildSprCatalogContext,
@@ -71,6 +73,19 @@ for (const [text, expected, label] of [
 const storeHandoffReply = buildSprStoreAvailabilityHandoffReply();
 if (!/existencias en tienda/i.test(storeHandoffReply) || !/asesor/i.test(storeHandoffReply)) {
   failures.push({ storeHandoffReply });
+}
+
+for (const [text, expected, label] of [
+  ['motor Range Rover 2011 V8 supercargado', true, 'engine model miss'],
+  ['motor Honda Civic 2014', true, 'engine request with make'],
+  ['motor', false, 'generic engine request still needs vehicle'],
+  ['cabeza Nissan Sentra 2018', false, 'non-engine part keeps normal flow']
+]) {
+  const actual = isSprEngineCatalogRequest(text);
+  if (actual !== expected) failures.push({ text, expected, actual, label });
+}
+if (!/^Por el momento no contamos con existencias para ese modelo en específico\.$/.test(buildSprEngineUnavailableReply())) {
+  failures.push({ engineUnavailableReply: buildSprEngineUnavailableReply() });
 }
 
 for (const conversationalTurn of ['HOLA', 'Buenos días', 'Gracias, te agradezco']) {
