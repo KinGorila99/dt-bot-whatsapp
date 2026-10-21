@@ -36,6 +36,19 @@ const requests = [
 
 const contextualCases = [
   {
+    request: 'Espejo derecha, Nissan, kicks advance, 2024',
+    item: {
+      id: 'kicks-espejo-derecho-comma-request',
+      title: 'ESPEJO DERECHO ELÉCTRICO 3 PINES NISSAN KICKS 2017-2024 TYG',
+      handle: 'espejo-derecho-electrico-nissan-kicks-2017-2024',
+      tags: 'ESPEJO NISSAN KICKS 2017-2024',
+      description: '',
+      vendor: 'TYG', productType: 'ESPEJO', discountEligible: false,
+      regularPrice: 1392, offerPrice: 1392, available: true
+    },
+    queryMustContain: 'espejo derecha nissan kicks 2024'
+  },
+  {
     request: 'El espejo del lado del piloto, lado izquierdo, es manual. FRONTIER 2024 NISSAN',
     item: {
       id: 'frontier-espejo-manual',

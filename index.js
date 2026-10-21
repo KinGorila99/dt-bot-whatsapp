@@ -642,7 +642,12 @@ const SPR_PART_SYNONYM_REPLACERS = SPR_PART_SYNONYM_GROUPS.map(group => {
 });
 
 function canonicalizeSprPartSynonyms(value) {
-  let normalized = normalizeBotText(value);
+  // WhatsApp customers often use commas to send the four required fields in
+  // one message (for example: "Espejo derecha, Nissan, Kicks Advance, 2024").
+  // Treat those separators as whitespace before the catalog matcher runs so
+  // Shopify search and the strict vehicle filters receive the same query as a
+  // space-separated request.
+  let normalized = normalizeBotText(String(value || '').replace(/[,;|]+/g, ' '));
   for (const replacer of SPR_PART_SYNONYM_REPLACERS) {
     normalized = normalized.replace(replacer.pattern, ` ${replacer.canonical} `);
   }
@@ -897,8 +902,8 @@ const SPR_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_CATALOG_TTL_MS
 // Shopify product titles usually omit trim/package words that customers include
 // in natural language (for example, "GL" or "Mind"). Keep the vehicle model,
 // year and requested part strict while treating these descriptors as optional.
-const SPR_OPTIONAL_VEHICLE_WORDS = new Set(['gl', 'gls', 'gle', 'glx', 'lt', 'ls', 'le', 'lx', 'ex', 'se', 'sv', 'sr', 'slt', 'xlt', 'xl', 'xle', 'xse', 'mind', 'mild', 'sport', 'touring', 'limited', 'premium', 'plus', 'classic', 'sedan', 'hatchback', 'hb', 'coupe', 'convertible']);
-const SPR_OPTIONAL_VEHICLE_WORDS_PATTERN = /\b(gl|gls|gle|glx|lt|ls|le|lx|ex|se|sv|sr|slt|xlt|xl|xle|xse|mind|mild|sport|touring|limited|premium|plus|classic|sedan|hatchback|hb|coupe|convertible)\b/gi;
+const SPR_OPTIONAL_VEHICLE_WORDS = new Set(['gl', 'gls', 'gle', 'glx', 'lt', 'ls', 'le', 'lx', 'ex', 'se', 'sv', 'sr', 'slt', 'xlt', 'xl', 'xle', 'xse', 'advance', 'mind', 'mild', 'sport', 'touring', 'limited', 'premium', 'plus', 'classic', 'sedan', 'hatchback', 'hb', 'coupe', 'convertible']);
+const SPR_OPTIONAL_VEHICLE_WORDS_PATTERN = /\b(gl|gls|gle|glx|lt|ls|le|lx|ex|se|sv|sr|slt|xlt|xl|xle|xse|advance|mind|mild|sport|touring|limited|premium|plus|classic|sedan|hatchback|hb|coupe|convertible)\b/gi;
 // La promoción de septiembre quedó desactivada: el bot debe mostrar únicamente
 // el precio normal de motores y cabezas de motor.
 const SPR_SEPTEMBER_DISCOUNT_PERCENT = 0;
