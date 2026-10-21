@@ -13,7 +13,7 @@ Module._load = function loadForEvaluation(request, parent, isMain) {
   }
   return originalLoad(request, parent, isMain);
 };
-const { normalizeBotText, canonicalizeSprPartSynonyms, buildSprCatalogSearchQueries, findSprEngineMatches, filterStrictSprVehicleMatches } = require('../index.js');
+const { normalizeBotText, canonicalizeSprPartSynonyms, buildSprCatalogSearchQueries, findSprEngineMatches, filterStrictSprVehicleMatches, isSprCompleteSingleMessageRequest } = require('../index.js');
 Module._load = originalLoad;
 
 const target = {
@@ -104,6 +104,27 @@ const contextualCases = [
 
 const failures = [];
 
+// Descriptive collision wording is valid even when the exact piece name is
+// not in the closed synonym list. It must reach the catalog search instead of
+// being rejected solely because the customer used a comma.
+const descriptivePieceRequest = 'Costado trasero izquierdo, Chevrolet Spark 2011';
+if (!isSprCompleteSingleMessageRequest(descriptivePieceRequest)) {
+  failures.push({ request: descriptivePieceRequest, reason: 'complete descriptive piece request was rejected' });
+}
+const descriptivePieceItem = {
+  id: 'spark-costado-door',
+  title: 'PUERTA TRASERA IZQUIERDA 5 PUERTAS CHEVROLET SPARK 2011-2017 TYG',
+  normalizedTitle: normalizeBotText('PUERTA TRASERA IZQUIERDA 5 PUERTAS CHEVROLET SPARK 2011-2017 TYG'),
+  vendor: 'TYG', productType: 'PUERTA', tags: 'CHEVROLET SPARK', description: '', regularPrice: 4952.25
+};
+const descriptivePieceMatches = filterStrictSprVehicleMatches(
+  findSprEngineMatches([descriptivePieceItem], canonicalizeSprPartSynonyms(descriptivePieceRequest)),
+  descriptivePieceRequest
+);
+if (descriptivePieceMatches.length !== 1 || descriptivePieceMatches[0].id !== descriptivePieceItem.id) {
+  failures.push({ request: descriptivePieceRequest, reason: 'descriptive piece was not matched', matches: descriptivePieceMatches.map(item => item.title) });
+}
+
 // A Polo fog-light/rejilla request must never be satisfied by a clutch that
 // only mentions Polo in a long compatibility list. This reproduces the bad
 // answer reported from the live SPR conversation.
@@ -153,7 +174,7 @@ for (const testCase of contextualCases) {
   }
 }
 
-const totalCases = requests.length + contextualCases.length + 1;
+const totalCases = requests.length + contextualCases.length + 2;
 console.log(`SPR catalog regressions: ${totalCases - failures.length}/${totalCases} passed`);
 if (failures.length) {
   console.error(JSON.stringify(failures, null, 2));

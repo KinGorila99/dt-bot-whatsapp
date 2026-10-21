@@ -801,7 +801,12 @@ function buildSprCatalogImageUnavailableReply() {
 function isSprCompleteSingleMessageRequest(value) {
   const query = canonicalizeSprPartSynonyms(value);
   if (!query || isFriendlyGreetingText(query) || isCourtesyText(query)) return false;
-  const hasPart = hasSprExplicitPartRequest(query);
+  // Catalog names are open-ended.  A customer may describe a collision piece
+  // that is not in our synonym list (for example, "costado trasero izquierdo")
+  // and still provide a complete vehicle request.  Treat that description as
+  // the piece once the vehicle make/model/year are present so it reaches the
+  // live catalog search instead of the one-message reminder.
+  const hasPart = hasSprExplicitPartRequest(query) || hasSprUnlistedPartRequest(query);
   const hasMake = [...SPR_VEHICLE_MAKES].some(make => new RegExp(`\\b${escapeSprRegex(make)}\\b`, 'i').test(query));
   // Keep the original message for vehicle detection. Canonicalizing the
   // text turns a displacement such as `2.5` into separate numeric tokens;
@@ -818,7 +823,7 @@ function buildSprSingleMessageRequiredReply() {
 function isSprIncompleteSingleMessageRequest(value) {
   const query = canonicalizeSprPartSynonyms(value);
   if (!query || isFriendlyGreetingText(query) || isCourtesyText(query) || isSprSalesConfirmation(query)) return false;
-  const hasPart = hasSprExplicitPartRequest(query);
+  const hasPart = hasSprExplicitPartRequest(query) || hasSprUnlistedPartRequest(query);
   const hasMake = [...SPR_VEHICLE_MAKES].some(make => new RegExp(`\\b${escapeSprRegex(make)}\\b`, 'i').test(query));
   const hasModel = hasSprVehicleReference(value);
   const hasYear = /\b(?:19|20)\d{2}\b|\b(?:0\d|[1-9]\d)\b/.test(query);
@@ -1350,6 +1355,7 @@ function filterStrictSprVehicleMatches(matches, query) {
     /\b(?:embrague|clutch)\b/, /\b(?:direccion|terminal|rotula)(?:es|s)?\b/
   ].filter(pattern => pattern.test(normalized));
   const qualifierPattern = /\b(remanufacturad[oa]s?|reconstruid[oa]s?|usad[oa]s?|nuev[oa]s?|complet[oa]s?|original(?:es)?|generico(?:s)?|generica(?:s)?)\b/g;
+  const descriptivePieceTokens = getSprDescriptivePieceTokens(normalized);
   const identityTokens = normalized
     .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
     .replace(SPR_OPTIONAL_VEHICLE_WORDS_PATTERN, ' ')
@@ -1358,7 +1364,8 @@ function filterStrictSprVehicleMatches(matches, query) {
     .replace(/\b(?:19|20)\d{2}\b/g, ' ')
     .split(/\s+/)
     .filter(token => (token.length >= 3 || (token.length >= 2 && /\d/.test(token))) && !['spr'].includes(token))
-    .filter(token => !isSprEngineSpecificationToken(token));
+    .filter(token => !isSprEngineSpecificationToken(token))
+    .filter(token => !descriptivePieceTokens.has(token));
   if (!identityTokens.length && !requestedYears.length) return matches;
 
   return matches.filter(item => {
@@ -1459,6 +1466,7 @@ function findSprExhaustiveMatches(items, query, skipExact = false) {
     .map(normalizeBotText).sort((a, b) => b.length - a.length);
   const partPattern = new RegExp(`\\b(?:${partWords.map(escapeSprRegex).join('|')})\\b`, 'gi');
   const hasEngineSpecifications = /\b(?:motor|4x[24]|\d+(?:\.\d+)?\s*v|\d+\s*cil)\b/.test(normalized);
+  const descriptivePieceTokens = getSprDescriptivePieceTokens(normalized);
   const coreTokens = normalized
     .replace(partPattern, ' ')
     .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
@@ -1468,6 +1476,7 @@ function findSprExhaustiveMatches(items, query, skipExact = false) {
     .replace(/\b(?:delantero|delantera|delanteros|delanteras|trasero|trasera|traseros|traseras|izquierdo|izquierda|izquierdos|izquierdas|derecho|derecha|derechos|derechas|lado|frente|atras|principal|niebla|antiniebla|piloto|copiloto|chofer|conductor|pasajero|manual|electrico|electrica|electricos|electricas|hatchback|sedan|sedán|cabina|sencilla|doble|con|sin|abs|fwd|birlo|birlos)\b/gi, ' ')
     .split(/\s+/)
     .filter(token => (token.length >= 3 || /\d/.test(token)) && !isSprEngineSpecificationToken(token))
+    .filter(token => !descriptivePieceTokens.has(token))
     .filter(token => !(hasEngineSpecifications && /^\d{1,2}$/.test(token)));
   const matchesYear = item => {
     if (!requestedYears.length) return true;
@@ -1737,6 +1746,48 @@ function isSprLikelyPieceFollowUp(value) {
     .replace(/\s+/g, ' ')
     .trim();
   return residual.split(' ').some(token => token.length >= 3);
+}
+
+// Use the same open-ended piece heuristic for complete-message validation and
+// missing-field calculation.  It requires a vehicle clue plus at least two
+// meaningful non-vehicle terms, so a bare "Nissan Versa 2020" remains a
+// vehicle-only request while descriptions such as "costado trasero izquierdo
+// Chevrolet Spark 2011" are sent to the catalog.
+function hasSprUnlistedPartRequest(value) {
+  const query = canonicalizeSprPartSynonyms(value);
+  if (!query || hasSprExplicitPartRequest(query)) return false;
+  const hasMake = [...SPR_VEHICLE_MAKES].some(make => new RegExp(`\\b${escapeSprRegex(make)}\\b`, 'i').test(query));
+  const hasYear = /\b(?:19|20)\d{2}\b/.test(query);
+  const hasModel = hasSprVehicleReference(query);
+  if (!hasMake && !hasModel && !hasYear) return false;
+  const unlistedPartResidual = query
+    .replace(/\b(?:19|20)\d{2}\b/g, ' ')
+    .replace(new RegExp(`\\b(?:${[...SPR_VEHICLE_MAKES].map(escapeSprRegex).join('|')})\\b`, 'gi'), ' ')
+    .replace(/\b(?:marca|modelo|ano|año|version|versi[oó]n|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|hatchback|sedan|sedán|cabina|sencilla|doble)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(token => token.length >= 3);
+  return unlistedPartResidual.length >= 2 && isSprLikelyPieceFollowUp(query);
+}
+
+function getSprDescriptivePieceTokens(value) {
+  const query = canonicalizeSprPartSynonyms(value);
+  if (!hasSprUnlistedPartRequest(query)) return new Set();
+  const tokens = query.split(/\s+/).filter(Boolean);
+  const makeIndex = tokens.findIndex(token => SPR_VEHICLE_MAKES.has(token));
+  if (makeIndex < 0) return new Set();
+  const yearIndex = tokens.findIndex((token, index) => index > makeIndex && /^(?:19|20)\d{2}$/.test(token));
+  const candidates = [
+    ...tokens.slice(0, makeIndex),
+    ...(yearIndex >= 0 ? tokens.slice(yearIndex + 1) : [])
+  ];
+  const orientationPattern = /^(?:delantero|delantera|delanteros|delanteras|trasero|trasera|traseros|traseras|izquierdo|izquierda|izquierdos|izquierdas|derecho|derecha|derechos|derechas|lateral|laterales|lado|frente|atras|principal|niebla|antiniebla)$/;
+  return new Set(candidates.filter(token => {
+    if (token.length < 3 || /^(?:19|20)\d{2}$/.test(token) || orientationPattern.test(token)) return false;
+    SPR_CATALOG_GENERIC_WORDS_PATTERN.lastIndex = 0;
+    return !SPR_CATALOG_GENERIC_WORDS_PATTERN.test(token);
+  }));
 }
 
 function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
@@ -3139,7 +3190,7 @@ Incluye:
         && !isSprImageIssue
         && !isSprPurchaseConfirmation
         && !vehicleOnlyCatalogContext
-        && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|anticongelante|refrigerante|coolant|lubricante|aditivo|liquido(?:s)?|buj[ií]a(?:s)?|bater[ií]a(?:s)?|filtro(?:s)?|llanta(?:s)?|neum[aá]tico(?:s)?|rin(?:es)?|birlo(?:s)?|plumilla(?:s)?|escobilla(?:s)?|fusible(?:s)?|foco(?:s)?|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|cremallera(?:s)?|rack(?:\s+and)?\s+pinion|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera|carroceria)\b/.test(lowerText) || SPR_EXPLICIT_PART_PATTERN.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText) || (catalogContextText !== messageText && isSprLikelyPieceFollowUp(messageText)));
+        && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|anticongelante|refrigerante|coolant|lubricante|aditivo|liquido(?:s)?|buj[ií]a(?:s)?|bater[ií]a(?:s)?|filtro(?:s)?|llanta(?:s)?|neum[aá]tico(?:s)?|rin(?:es)?|birlo(?:s)?|plumilla(?:s)?|escobilla(?:s)?|fusible(?:s)?|foco(?:s)?|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|cremallera(?:s)?|rack(?:\s+and)?\s+pinion|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera|carroceria)\b/.test(lowerText) || SPR_EXPLICIT_PART_PATTERN.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText) || isSprCompleteSingleMessage || (catalogContextText !== messageText && isSprLikelyPieceFollowUp(messageText)));
       let sprCatalogReply = ''; let sprCatalogMatched = false; let sprCatalogLookupSucceeded = false;
       if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
