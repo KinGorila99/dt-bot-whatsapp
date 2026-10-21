@@ -1637,6 +1637,7 @@ function buildSprCatalogSearchQueries(value) {
 // must come from the live SPR website on every cache refresh.
 async function searchSprCatalogExhaustively(catalogItems, query) {
   const merged = new Map();
+  let lookupSucceeded = false;
   for (const item of Array.isArray(catalogItems) ? catalogItems : []) {
     const key = item.id || item.url || item.handle || item.title;
     if (key) merged.set(String(key), item);
@@ -1645,6 +1646,7 @@ async function searchSprCatalogExhaustively(catalogItems, query) {
   const results = await Promise.allSettled(queries.map(searchQuery => searchSprCatalog(searchQuery)));
   for (const result of results) {
     if (result.status !== 'fulfilled') continue;
+    lookupSucceeded = true;
     for (const item of result.value || []) {
       const key = item.id || item.url || item.handle || item.title;
       if (key && !merged.has(String(key))) merged.set(String(key), item);
@@ -1653,7 +1655,7 @@ async function searchSprCatalogExhaustively(catalogItems, query) {
   const items = [...merged.values()];
   let matches = filterStrictSprVehicleMatches(findSprEngineMatches(items, query), query);
   if (!matches.length) matches = findSprExhaustiveMatches(items, query);
-  return { items, matches, queries };
+  return { items, matches, queries, lookupSucceeded };
 }
 
 // A short follow-up such as "delantero" or "izquierdo" is a refinement of
@@ -1800,9 +1802,9 @@ function isIncompleteSprCatalogRequest(value) {
   return /\b(precio|precios|cuanto|cuesta|costo|cotizacion|cotizar|cotiza|disponible|disponibilidad|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|lado|principal|niebla|antiniebla)\b/.test(query);
 }
 
-// A concrete SPR request that survives the complete catalog/search pass but
-// has no confirmed product must go to an advisor. It must not fall back to a
-// repeated request for the same vehicle fields.
+// A request that survives the catalog/search pass without a confirmed product
+// can still go to an advisor when it is not a complete four-field lookup. A
+// complete request is handled by the direct unavailable response above.
 function shouldRouteSprCatalogToAdvisor({
   isSprAutopartesTenant = false,
   asksCatalogProduct = false,
@@ -1954,6 +1956,15 @@ function isSprEngineCatalogRequest(value) {
 
 function buildSprEngineUnavailableReply() {
   return 'Por el momento no contamos con existencias para ese modelo en específico.';
+}
+
+// A complete piece/vehicle request that was checked against SPR's live page
+// and returned no match should end with a direct availability response. Keep
+// the existing engine wording while applying the same rule to every piece.
+function buildSprCatalogUnavailableReply(value) {
+  return isSprEngineCatalogRequest(value)
+    ? buildSprEngineUnavailableReply()
+    : 'Por el momento no contamos con esa pieza para ese modelo en específico.';
 }
 
 function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult = null) {
@@ -3124,7 +3135,7 @@ Incluye:
         && !isSprPurchaseConfirmation
         && !vehicleOnlyCatalogContext
         && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|anticongelante|refrigerante|coolant|lubricante|aditivo|liquido(?:s)?|buj[ií]a(?:s)?|bater[ií]a(?:s)?|filtro(?:s)?|llanta(?:s)?|neum[aá]tico(?:s)?|rin(?:es)?|birlo(?:s)?|plumilla(?:s)?|escobilla(?:s)?|fusible(?:s)?|foco(?:s)?|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|cremallera(?:s)?|rack(?:\s+and)?\s+pinion|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera|carroceria)\b/.test(lowerText) || SPR_EXPLICIT_PART_PATTERN.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText) || (catalogContextText !== messageText && isSprLikelyPieceFollowUp(messageText)));
-      let sprCatalogReply = ''; let sprCatalogMatched = false;
+      let sprCatalogReply = ''; let sprCatalogMatched = false; let sprCatalogLookupSucceeded = false;
       if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
           let catalogItems = [];
@@ -3141,6 +3152,7 @@ Incluye:
           try {
             const officialQuery = buildSprFocusedSearchQuery(catalogQueryText);
             officialSearchItems = await searchSprCatalog(officialQuery);
+            sprCatalogLookupSucceeded = true;
             const officialStrictMatches = filterStrictSprVehicleMatches(
               findSprEngineMatches(officialSearchItems, catalogLowerText),
               catalogLowerText
@@ -3174,6 +3186,7 @@ Incluye:
             );
             catalogItems = exhaustiveSearch.items;
             sprMatches = exhaustiveSearch.matches;
+            sprCatalogLookupSucceeded = sprCatalogLookupSucceeded || exhaustiveSearch.lookupSucceeded;
           }
           // A strict miss must not end the conversation. Run one final ranked pass
           // over all official results so
@@ -3193,13 +3206,24 @@ Incluye:
       }
       const isSprEngineRequestWithoutMatch = isSprAutopartesTenant
         && isSprEngineCatalogRequest(catalogQueryText)
-        && !sprCatalogMatched;
+        && !sprCatalogMatched
+        && sprCatalogLookupSucceeded;
+      const isSprCompleteCatalogRequestWithoutMatch = isSprCompleteSingleMessage
+        && !sprCatalogMatched
+        && sprCatalogLookupSucceeded;
 
       if (isShopifyPrefillIntro && !isSprIncompleteRequest) {
         botReply = `👋 ¡Hola! Gracias por escribir a *SPR Autopartes*. Soy *SPR BOT* y con gusto te ayudo.\n\nPara buscar correctamente en el catálogo, escríbeme *solo estos cuatro datos* en un mismo mensaje:\n🔧 Pieza\n🚗 Marca\n🚙 Modelo\n📅 Año\n\nEjemplo: *faro derecho Nissan Versa 2017*.`;
+      } else if (isSprCompleteCatalogRequestWithoutMatch) {
+        // Once the complete request has been checked against the official
+        // catalog, a miss means the requested piece is unavailable for that
+        // vehicle. Do not repeat the four-field prompt or route it elsewhere.
+        convData.spr_requires_complete_single_message = false;
+        botReply = buildSprCatalogUnavailableReply(messageText);
       } else if (isSprEngineRequestWithoutMatch) {
-        // Engines get a concise model-level availability response even when
-        // the single-message guard would otherwise ask for the same fields.
+        // Keep the concise engine response for legacy engine requests that
+        // are recognized as model-specific but do not pass the full request
+        // detector.
         convData.spr_requires_complete_single_message = false;
         botReply = buildSprEngineUnavailableReply();
       } else if (isSprIncompleteRequest) {
@@ -4389,6 +4413,7 @@ module.exports = {
   buildSprCatalogFallbackReply,
   isSprEngineCatalogRequest,
   buildSprEngineUnavailableReply,
+  buildSprCatalogUnavailableReply,
   buildSprCatalogReply,
   businessMinutesSince,
   isSprBusinessWindow,
