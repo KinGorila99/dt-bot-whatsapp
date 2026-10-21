@@ -721,7 +721,7 @@ function buildSprFaqReply(value, isSprAutopartesTenant) {
     return `📍 *Estamos ubicados en Querétaro, México.*\n🗺️ Ubicación: ${SPR_STORE_MAP_URL}`;
   }
   if (/\b(horario|horarios|hora|horas|abren|cierran|abierto|abiertos|atienden|atencion)\b/.test(query)) {
-    return 'Atendemos de *Lunes a Sábado* de *9:00 am* a *6:00 pm*. ✅\nNuestro canal de WhatsApp y redes sociales recibe consultas las *24 horas*. 🕑';
+    return '🤖 Nuestro bot atiende consultas las *24 horas, los 7 días de la semana*. 🕑\nLa atención y entrega en tienda son de *Lunes a Sábado* de *9:00 am* a *6:00 pm*. ✅';
   }
   if (/\b(envio|envios|enviamos|mandan|mandamos|entrega|entregan|cobertura|nacional|foraneo|foraneos|foranea|foraneas|otro estado|todo mexico)\b/.test(query)) {
     return '🚚 Sí, realizamos envíos a toda la República Mexicana.';
@@ -2847,16 +2847,15 @@ app.post('/webhook/whatsapp', async (req, res) => {
       tenantCompany?.nombre || botSettings?.business_name || botSettings?.business_description || 'nuestro negocio'
     ).trim();
     const isSprTenantForHours = isSprTenantIdentity(companyId, tenantDisplayName, botSettings);
-    // SPR's operational schedule is fixed by the business: Monday through
-    // Saturday, 09:00–18:00 in Querétaro. Normalize old settings such as
-    // 19:30 so the stored configuration cannot keep the previous schedule
-    // active after a deploy.
+    // SPR's bot is available 24/7. Keep the physical store hours available for
+    // FAQ and delivery scheduling, but never use them to block an automated
+    // WhatsApp reply.
     if (isSprTenantForHours) {
       botSettings = {
         ...botSettings,
         working_hours: {
           ...(botSettings?.working_hours || {}),
-          enabled: true,
+          enabled: false,
           open_time: '09:00',
           close_time: '18:00',
           days: [1, 2, 3, 4, 5, 6],
@@ -2933,6 +2932,10 @@ app.post('/webhook/whatsapp', async (req, res) => {
       try {
         await db.doc(`followups/${taskId}`).set(taskData);
       } catch (e) {}
+    } else if (shouldScheduleSprAfterHoursVisit) {
+      // The bot remains available after hours, but a requested physical visit
+      // is still scheduled for the next delivery window.
+      botReply = buildSprAfterHoursVisitReply();
     } else if (botSettings?.working_hours && !checkWorkingHours(botSettings.working_hours) && !isFriendlyGreeting && !isCourtesyMessage && !isShopifyPrefillIntro && !isSprHoursQuestion) {
       // Out of hours
       botReply = shouldScheduleSprAfterHoursVisit

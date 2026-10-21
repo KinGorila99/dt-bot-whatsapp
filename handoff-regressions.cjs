@@ -15,6 +15,7 @@ Module._load = function loadForEvaluation(request, parent, isMain) {
   return originalLoad(request, parent, isMain);
 };
 const {
+  checkWorkingHours,
   isFriendlyGreetingText,
   isCourtesyText,
   isSprNewRequestOrQuestion,
@@ -23,6 +24,7 @@ const {
   buildSprStoreAvailabilityHandoffReply,
   isSprEngineCatalogRequest,
   buildSprEngineUnavailableReply,
+  buildSprFaqReply,
   getSprMissingRequestFields,
   buildSprMissingRequestReply,
   buildSprCatalogContext,
@@ -86,6 +88,9 @@ for (const [text, expected, label] of [
 }
 if (!/^Por el momento no contamos con existencias para ese modelo en específico\.$/.test(buildSprEngineUnavailableReply())) {
   failures.push({ engineUnavailableReply: buildSprEngineUnavailableReply() });
+}
+if (!checkWorkingHours({ enabled: false }) || !/24 horas, los 7 días/i.test(buildSprFaqReply('¿Cuál es su horario?', true))) {
+  failures.push({ alwaysOnBot: true });
 }
 
 for (const conversationalTurn of ['HOLA', 'Buenos días', 'Gracias, te agradezco']) {
