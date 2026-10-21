@@ -1669,7 +1669,11 @@ const SPR_CATALOG_GENERIC_WORDS_PATTERN = /\b(estoy|buscando|quiero|busco|necesi
 const SPR_VEHICLE_MAKES = new Set(['nissan', 'ford', 'chevrolet', 'chevy', 'volkswagen', 'vw', 'toyota', 'honda', 'kia', 'hyundai', 'dodge', 'chrysler', 'jeep', 'mazda', 'mitsubishi', 'suzuki', 'seat', 'renault', 'peugeot', 'fiat', 'ram', 'gmc', 'volvo', 'audi', 'bmw', 'mercedes', 'mercedesbenz', 'isuzu', 'subaru', 'lincoln', 'cadillac', 'buick', 'acura', 'infiniti', 'lexus', 'porsche', 'mg', 'byd']);
 
 function hasSprVehicleReference(value) {
-  const normalized = normalizeBotText(value)
+  // Remove decimal engine displacements before tokenizing. After text
+  // normalization, `2.5` becomes `2 5`; removing it first prevents a
+  // displacement from being mistaken for a numeric vehicle model.
+  const sourceWithoutDisplacement = String(value || '').replace(/\b\d+(?:[.,]\d+)\b/g, ' ');
+  const normalized = normalizeBotText(sourceWithoutDisplacement)
     .replace(/\b(?:19|20)\d{2}\b/g, ' ')
     .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
     .replace(/\b(?:remanufacturad[oa]s?|reconstruid[oa]s?|usad[oa]s?|nuev[oa]s?|complet[oa]s?|original(?:es)?|generico(?:s)?|generica(?:s)?)\b/g, ' ');
@@ -1945,7 +1949,7 @@ function isSprEngineCatalogRequest(value) {
   const query = normalizeSprCatalogText(value);
   const hasEngineTerm = /\b(?:motor(?:es)?|engine(?:s)?)\b/.test(query);
   const hasYear = /\b(?:19|20)\d{2}\b|\b(?:0\d|[1-9]\d)\b/.test(query);
-  return Boolean(hasEngineTerm && hasYear && hasSprVehicleReference(query));
+  return Boolean(hasEngineTerm && hasYear && hasSprVehicleReference(value));
 }
 
 function buildSprEngineUnavailableReply() {
