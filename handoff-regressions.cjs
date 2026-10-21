@@ -5,6 +5,7 @@ Module._load = function loadForEvaluation(request, parent, isMain) {
   if (request === 'dotenv') return { config() {} };
   if (request === 'cors') return () => (req, res, next) => next && next();
   if (request === 'axios') return { get: async () => ({ data: {} }), post: async () => ({ data: {} }) };
+  if (request === 'form-data') return class FormData { append() {} };
   if (request === 'firebase-admin') return { apps: [], initializeApp() {}, credential: { cert() { return {}; } }, firestore() { return null; }, auth() { return null; } };
   if (request === 'express') {
     const express = () => ({ use() {}, get() {}, post() {}, listen() {} });
@@ -18,6 +19,8 @@ const {
   isCourtesyText,
   isSprNewRequestOrQuestion,
   buildSprAdvisorReviewReply,
+  isSprStoreAvailabilityRequest,
+  buildSprStoreAvailabilityHandoffReply,
   getSprMissingRequestFields,
   buildSprMissingRequestReply,
   buildSprCatalogContext,
@@ -53,6 +56,21 @@ for (const [text, expected, label] of cases) {
 const advisorReply = buildSprAdvisorReviewReply('Cliente');
 if (!/asesor/i.test(advisorReply) || !/pausadas/i.test(advisorReply) || /no tenemos/i.test(advisorReply)) {
   failures.push({ advisorReply });
+}
+
+for (const [text, expected, label] of [
+  ['Hay en tienda?', true, 'store availability question'],
+  ['Sí, hay en tienda', true, 'affirmative store availability question'],
+  ['¿Tienen existencia en tienda?', true, 'store stock question'],
+  ['¿Cuál es la ubicación de la tienda?', false, 'store location is not inventory'],
+  ['¿Tienen amortiguador Nissan Versa 2015?', false, 'catalog request is not store inventory']
+]) {
+  const actual = isSprStoreAvailabilityRequest(text);
+  if (actual !== expected) failures.push({ text, expected, actual, label });
+}
+const storeHandoffReply = buildSprStoreAvailabilityHandoffReply();
+if (!/existencias en tienda/i.test(storeHandoffReply) || !/asesor/i.test(storeHandoffReply)) {
+  failures.push({ storeHandoffReply });
 }
 
 for (const conversationalTurn of ['HOLA', 'Buenos días', 'Gracias, te agradezco']) {

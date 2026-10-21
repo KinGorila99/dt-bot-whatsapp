@@ -699,6 +699,21 @@ function isSprStoreLocationQuestion(value) {
     && !/\b(local|sucursal|negocio|tienda|oficina|empresa)\b/.test(query));
 }
 
+// Inventory questions that explicitly refer to the physical store must go to
+// an advisor. The bot cannot verify the live counter inventory from the
+// catalog, and these questions must also bypass the single-message
+// piece/make/model/year guard.
+function isSprStoreAvailabilityRequest(value) {
+  const query = normalizeBotText(value);
+  if (!query || !/\btienda\b/.test(query)) return false;
+  return /\b(?:hay|h[aá]y|tienen|tiene|existe|existen|queda|quedan|disponible|disponibilidad|existencia|stock|inventario)\b/.test(query)
+    || /\bsi\s+hay\b/.test(query);
+}
+
+function buildSprStoreAvailabilityHandoffReply() {
+  return '👨‍💼 Para confirmar las existencias en tienda te paso directamente con un asesor. Él revisará el inventario y te responderá por este medio.';
+}
+
 function buildSprFaqReply(value, isSprAutopartesTenant) {
   if (!isSprAutopartesTenant) return '';
   const query = normalizeBotText(value);
@@ -2842,6 +2857,8 @@ app.post('/webhook/whatsapp', async (req, res) => {
     const singleMessageLockActiveBeforeTurn = isSprTenantForHours
       && convData.spr_requires_complete_single_message === true;
     const wantsHuman = humanKeywords.some(kw => lowerText.includes(kw));
+    const wantsSprStoreAvailabilityAdvisor = isSprTenantForHours
+      && isSprStoreAvailabilityRequest(messageText);
     // Greetings and courtesy messages must be answered before business-hours rules.
     // A greeting such as “Hola, buenos días” is still a greeting, not a request
     // for schedules or a catalog search.
@@ -2871,13 +2888,15 @@ app.post('/webhook/whatsapp', async (req, res) => {
       convData.review_requested_at = timestamp;
       botReply = '';
       console.log(`⏸️ [Bot Paused by Owner] Company [${companyId}] — inbound recorded without automatic reply.`);
-    } else if (wantsHuman) {
+    } else if (wantsHuman || wantsSprStoreAvailabilityAdvisor) {
       convData.human_handoff = true;
       convData.bot_enabled = false;
       convData.status = 'pending';
       convData.auto_reactivate_enabled = true;
       convData.human_handoff_started_at = convData.human_handoff_started_at || timestamp;
-      botReply = `Entendido, ${customerName}. He pausado las respuestas automáticas y transferí tu conversación a un asesor comercial. En un momento te responderá directamente aquí.`;
+      botReply = wantsSprStoreAvailabilityAdvisor
+        ? buildSprStoreAvailabilityHandoffReply()
+        : `Entendido, ${customerName}. He pausado las respuestas automáticas y transferí tu conversación a un asesor comercial. En un momento te responderá directamente aquí.`;
 
       // Urgent Task in CRM
       const taskId = createUniqueId('task');
@@ -2892,7 +2911,9 @@ app.post('/webhook/whatsapp', async (req, res) => {
         prioridad: 'Urgente',
         completada: false,
         fecha_creacion: timestamp,
-        nota: `El cliente solicitó asesor humano en WhatsApp. Mensaje: "${messageText}"`
+        nota: wantsSprStoreAvailabilityAdvisor
+          ? `El cliente preguntó por existencias en tienda. Confirmar inventario directamente y responder por WhatsApp. Mensaje: "${messageText}"`
+          : `El cliente solicitó asesor humano en WhatsApp. Mensaje: "${messageText}"`
       };
 
       try {
@@ -4309,6 +4330,8 @@ module.exports = {
   isSprNewRequestOrQuestion,
   buildSprAdvisorReviewReply,
   isSprStoreLocationQuestion,
+  isSprStoreAvailabilityRequest,
+  buildSprStoreAvailabilityHandoffReply,
   buildSprFaqReply,
   isSprTenantIdentity,
   isSprAfterHoursVisitIntent,
