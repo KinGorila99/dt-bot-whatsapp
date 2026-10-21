@@ -798,7 +798,10 @@ function isSprCompleteSingleMessageRequest(value) {
   if (!query || isFriendlyGreetingText(query) || isCourtesyText(query)) return false;
   const hasPart = hasSprExplicitPartRequest(query);
   const hasMake = [...SPR_VEHICLE_MAKES].some(make => new RegExp(`\\b${escapeSprRegex(make)}\\b`, 'i').test(query));
-  const hasModel = hasSprVehicleReference(query);
+  // Keep the original message for vehicle detection. Canonicalizing the
+  // text turns a displacement such as `2.5` into separate numeric tokens;
+  // using the raw message lets `Mazda 6` remain a valid model reference.
+  const hasModel = hasSprVehicleReference(value);
   const hasYear = /\b(?:19|20)\d{2}\b|\b(?:0\d|[1-9]\d)\b/.test(query);
   return hasPart && hasMake && hasModel && hasYear;
 }
@@ -812,7 +815,7 @@ function isSprIncompleteSingleMessageRequest(value) {
   if (!query || isFriendlyGreetingText(query) || isCourtesyText(query) || isSprSalesConfirmation(query)) return false;
   const hasPart = hasSprExplicitPartRequest(query);
   const hasMake = [...SPR_VEHICLE_MAKES].some(make => new RegExp(`\\b${escapeSprRegex(make)}\\b`, 'i').test(query));
-  const hasModel = hasSprVehicleReference(query);
+  const hasModel = hasSprVehicleReference(value);
   const hasYear = /\b(?:19|20)\d{2}\b|\b(?:0\d|[1-9]\d)\b/.test(query);
   const refinementOnly = SPR_CATALOG_REFINEMENT_PATTERN.test(query)
     && !hasPart
@@ -1670,7 +1673,11 @@ function hasSprVehicleReference(value) {
     .replace(/\b(?:19|20)\d{2}\b/g, ' ')
     .replace(SPR_CATALOG_GENERIC_WORDS_PATTERN, ' ')
     .replace(/\b(?:remanufacturad[oa]s?|reconstruid[oa]s?|usad[oa]s?|nuev[oa]s?|complet[oa]s?|original(?:es)?|generico(?:s)?|generica(?:s)?)\b/g, ' ');
-  const vehicleTokens = normalized.split(/\s+/).filter(token => token.length >= 2);
+  // Numeric model names are common (`Mazda 6`, `BMW 3`, etc.). Keep one- or
+  // two-digit tokens when a make is present instead of treating the request
+  // as a vehicle with no model. This is especially important for engine
+  // requests, which often also include a displacement such as `2.5`.
+  const vehicleTokens = normalized.split(/\s+/).filter(token => token.length >= 2 || /^\d{1,2}$/.test(token));
   if (!vehicleTokens.length || vehicleTokens.every(token => SPR_VEHICLE_MAKES.has(token))) return false;
   return true;
 }
