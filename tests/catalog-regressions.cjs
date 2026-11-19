@@ -155,6 +155,27 @@ if (poloFogKitMatches.length !== 1 || poloFogKitMatches[0].id !== 'polo-fog-reji
   });
 }
 
+// The live catalog contains this product, but Shopify's fuzzy suggest endpoint
+// ranked unrelated Corolla body parts above it. Keep the reported false
+// negative as a permanent regression: a concrete Maza Corolla request must
+// remain a catalog match when the full product list is available.
+const corollaMazaRequest = 'Maza Toyota Corolla 2022';
+const corollaMazaItem = {
+  id: 'corolla-maza-delantera-2022',
+  title: 'MAZA DELANTERA AMBOS LADOS CON ABS 5 BIRLOS FWD TOYOTA COROLLA 2020-2022 PRIUS 2016-2022 FAG',
+  normalizedTitle: normalizeBotText('MAZA DELANTERA AMBOS LADOS CON ABS 5 BIRLOS FWD TOYOTA COROLLA 2020-2022 PRIUS 2016-2022 FAG'),
+  vendor: 'FAG', productType: 'MAZA', tags: '', description: '', regularPrice: 2227, offerPrice: 2227,
+  discountEligible: false, available: true, url: 'https://sprautopartes.mx/products/maza-delantera-con-abs-5-birlos-toyota-corolla-2020-2022-prius-2016-2022-fag-713140610'
+};
+const corollaMazaQuery = canonicalizeSprPartSynonyms(corollaMazaRequest);
+const corollaMazaMatches = filterStrictSprVehicleMatches(
+  findSprEngineMatches([corollaMazaItem], corollaMazaQuery),
+  corollaMazaQuery
+);
+if (corollaMazaMatches.length !== 1 || corollaMazaMatches[0].id !== corollaMazaItem.id) {
+  failures.push({ request: corollaMazaRequest, matches: corollaMazaMatches.map(item => item.title) });
+}
+
 for (const request of requests) {
   const normalized = canonicalizeSprPartSynonyms(request);
   const matches = filterStrictSprVehicleMatches(findSprEngineMatches([target], normalized), normalized);

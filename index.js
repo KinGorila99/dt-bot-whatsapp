@@ -903,7 +903,14 @@ function formatWhatsAppReply(value) {
 
 
 const SPR_ENGINE_COLLECTION_URL = process.env.SPR_FULL_CATALOG_URL || process.env.SPR_ENGINE_COLLECTION_URL || 'https://sprautopartes.mx/products.json?limit=250';
-const SPR_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_CATALOG_TTL_MS || 60000));
+// Keep the live catalog cached long enough to avoid downloading every product
+// for every inbound WhatsApp message, while still refreshing several times per
+// day. The official search endpoint is used as a fresh supplement on each
+// lookup; this cache supplies the complete catalog for reliable matching.
+const SPR_CATALOG_TTL_MS = Math.max(30000, Number(process.env.SPR_CATALOG_TTL_MS || 900000));
+const SPR_CATALOG_PAGE_SIZE = Math.min(250, Math.max(1, Number(process.env.SPR_CATALOG_PAGE_SIZE || 250)));
+const SPR_CATALOG_MAX_PAGES = Math.max(1, Number(process.env.SPR_CATALOG_MAX_PAGES || 250));
+const SPR_CATALOG_FETCH_CONCURRENCY = Math.max(1, Math.min(12, Number(process.env.SPR_CATALOG_FETCH_CONCURRENCY || 8)));
 // Shopify product titles usually omit trim/package words that customers include
 // in natural language (for example, "GL" or "Mind"). Keep the vehicle model,
 // year and requested part strict while treating these descriptors as optional.
@@ -1072,22 +1079,101 @@ function normalizeSprProduct(product) {
 
 const SPR_OFFICIAL_SEARCH_URL = 'https://sprautopartes.mx/search/suggest.json';
 
+function buildSprCatalogPageUrl(baseUrl, page) {
+  const raw = String(baseUrl || '').trim();
+  const url = new URL(raw);
+  url.searchParams.set('limit', String(SPR_CATALOG_PAGE_SIZE));
+  url.searchParams.set('page', String(page));
+  return url.toString();
+}
+
+function getSprCatalogProductKey(product) {
+  return String(product?.id || product?.handle || product?.url || product?.title || '').trim();
+}
+
 async function getSprEngineCatalog() {
   const now = Date.now();
   if (sprCatalogCache.items.length > 0 && now - sprCatalogCache.fetchedAt < SPR_CATALOG_TTL_MS) return sprCatalogCache.items;
   if (sprCatalogFetchPromise) return sprCatalogFetchPromise;
   sprCatalogFetchPromise = (async () => {
-    const response = await axios.get(SPR_ENGINE_COLLECTION_URL, {
-      timeout: 9000,
+    const requestConfig = {
+      timeout: 12000,
       headers: { 'User-Agent': 'DT Bot Core / SPR official catalog' }
-    });
-    const products = Array.isArray(response.data?.products) ? response.data.products : [];
-    if (!products.length) throw new Error('SPR official catalog returned no products');
-    const items = products.map(normalizeSprProduct).filter(item => item.title && item.regularPrice > 0);
-    sprCatalogSource = 'official_shopify_catalog';
+    };
+    const fetchCatalogPage = async page => {
+      let lastError = null;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          return await axios.get(buildSprCatalogPageUrl(SPR_ENGINE_COLLECTION_URL, page), requestConfig);
+        } catch (error) {
+          lastError = error;
+          if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 250 * attempt));
+        }
+      }
+      throw lastError || new Error(`SPR catalog page ${page} failed`);
+    };
+    const firstResponse = await fetchCatalogPage(1);
+    const firstProducts = Array.isArray(firstResponse.data?.products) ? firstResponse.data.products : [];
+    if (!firstProducts.length) throw new Error('SPR official catalog returned no products');
+
+    // Shopify's public products.json endpoint is paginated at 250 products.
+    // Fetch every page in bounded batches and stop on a short/empty page or on
+    // an endpoint that ignores pagination (duplicate product IDs).
+    const allProducts = [];
+    const seenProductKeys = new Set();
+    const appendProducts = products => {
+      let newProducts = 0;
+      for (const product of Array.isArray(products) ? products : []) {
+        const key = getSprCatalogProductKey(product);
+        if (!key || seenProductKeys.has(key)) continue;
+        seenProductKeys.add(key);
+        allProducts.push(product);
+        newProducts += 1;
+      }
+      return newProducts;
+    };
+    appendProducts(firstProducts);
+
+    let nextPage = 2;
+    let shouldContinue = firstProducts.length >= SPR_CATALOG_PAGE_SIZE;
+    while (shouldContinue && nextPage <= SPR_CATALOG_MAX_PAGES) {
+      const pages = Array.from({ length: SPR_CATALOG_FETCH_CONCURRENCY }, (_, offset) => nextPage + offset)
+        .filter(page => page <= SPR_CATALOG_MAX_PAGES);
+      const responses = await Promise.allSettled(pages.map(fetchCatalogPage));
+      let sawShortPage = false;
+      let sawNewProduct = false;
+      for (let index = 0; index < responses.length; index += 1) {
+        const result = responses[index];
+        if (result.status !== 'fulfilled') {
+          throw new Error(`SPR catalog page ${pages[index]} failed after retries: ${result.reason?.message || result.reason}`);
+        }
+        const products = Array.isArray(result.value.data?.products) ? result.value.data.products : [];
+        if (products.length < SPR_CATALOG_PAGE_SIZE) sawShortPage = true;
+        if (appendProducts(products) > 0) sawNewProduct = true;
+      }
+      nextPage += pages.length;
+      // A short page is the normal end-of-catalog signal. If every returned
+      // page is a duplicate, the server likely ignored `page`; stop to avoid a
+      // repeated download loop while retaining the first page as a fallback.
+      shouldContinue = !sawShortPage && sawNewProduct && pages.length > 0;
+    }
+
+    const items = allProducts.map(normalizeSprProduct).filter(item => item.title && item.regularPrice > 0);
+    if (!items.length) throw new Error('SPR official catalog returned no usable products');
+    sprCatalogSource = `official_shopify_catalog:${items.length}`;
     sprCatalogCache = { fetchedAt: Date.now(), items };
     return items;
-  })().finally(() => {
+  })().catch(error => {
+    // A transient page failure must never replace a known-good full catalog
+    // with a partial one. Keep serving the previous snapshot while the next
+    // lookup retries the refresh; on a cold start the caller can fall back to
+    // the official suggest endpoint.
+    if (sprCatalogCache.items.length > 0) {
+      console.warn('⚠️ SPR catalog refresh failed; serving the previous complete snapshot:', error.message);
+      return sprCatalogCache.items;
+    }
+    throw error;
+  }).finally(() => {
     sprCatalogFetchPromise = null;
   });
   return sprCatalogFetchPromise;
@@ -2882,7 +2968,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
     // If human handoff is still active, keep the bot silent.
     if (convData.human_handoff === true || convData.bot_enabled === false) {
       console.log(`🛑 Conversation [${convId}] is assigned to a human advisor. Bot will NOT reply.`);
-      
+
       try {
         await db.doc(`conversations/${convId}`).set(convData, { merge: true });
         await db.doc(`webhook_events/event_${messageId}`).set({
@@ -3194,40 +3280,39 @@ Incluye:
       let sprCatalogReply = ''; let sprCatalogMatched = false; let sprCatalogLookupSucceeded = false;
       if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
+          // Load the complete official catalog first. The Shopify suggest
+          // endpoint is useful for newly indexed products, but it is fuzzy and
+          // can rank an unrelated product above an exact match (the source of
+          // the false "no contamos" response for Maza Corolla 2022).
           let catalogItems = [];
           try {
-            catalogItems = [];
+            catalogItems = await getSprEngineCatalog();
           } catch (catalogLoadError) {
-            console.warn('⚠️ SPR collection load failed; continuing with official search:', catalogLoadError.message);
+            console.warn('⚠️ SPR full catalog load failed; continuing with official search:', catalogLoadError.message);
           }
-                    let sprMatches = [];
+          let sprMatches = [];
           let officialSearchItems = [];
-          // Always consult SPR's live search first. This keeps prices, links and
-          // newly published products current for every piece request instead of
-          // trusting a potentially stale collection response.
+          // Always consult SPR's live search as a supplement. Items are merged
+          // by product identity so current prices/links from the official site
+          // are retained without throwing away the full catalog.
           try {
             const officialQuery = buildSprFocusedSearchQuery(catalogQueryText);
             officialSearchItems = await searchSprCatalog(officialQuery);
             sprCatalogLookupSucceeded = true;
-            const officialStrictMatches = filterStrictSprVehicleMatches(
-              findSprEngineMatches(officialSearchItems, catalogLowerText),
-              catalogLowerText
-            );
-            const officialMatches = officialStrictMatches.length
-              ? officialStrictMatches
-              : findSprExhaustiveMatches(officialSearchItems, catalogQueryText);
-            if (officialMatches.length || isGenericSprCatalogRequest(catalogLowerText)) {
-              catalogItems = officialSearchItems;
-              sprMatches = officialMatches;
-            }
           } catch (officialSearchError) {
-            console.warn('⚠️ SPR official search failed; no local catalog fallback was used:', officialSearchError.message);
+            console.warn('⚠️ SPR official search failed; using the full catalog:', officialSearchError.message);
           }
 
-          // Continue only with official results and bounded official-query variants.
-          // No local export or collection fallback is consulted.
-          
-          catalogItems = officialSearchItems;
+          const mergedCatalog = new Map();
+          for (const item of [...catalogItems, ...officialSearchItems]) {
+            const key = String(item?.id || item?.url || item?.handle || item?.title || '').trim();
+            if (key && !mergedCatalog.has(key)) mergedCatalog.set(key, item);
+          }
+          catalogItems = [...mergedCatalog.values()];
+
+          // Run the same strict vehicle/part filters over the complete catalog
+          // before any broad recovery pass. This prevents a fuzzy suggestion
+          // from replacing an exact vehicle-compatible product.
           if (!sprMatches.length) {
             sprMatches = findSprEngineMatches(catalogItems, catalogLowerText);
             sprMatches = filterStrictSprVehicleMatches(sprMatches, catalogLowerText);
@@ -4429,6 +4514,7 @@ module.exports = {
   canonicalizeSprPartSynonyms,
   buildSprFocusedSearchQuery,
   buildSprCatalogSearchQueries,
+  getSprEngineCatalog,
   findSprEngineMatches,
   filterStrictSprVehicleMatches,
   findSprExhaustiveMatches,
