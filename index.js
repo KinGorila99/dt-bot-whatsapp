@@ -1238,7 +1238,9 @@ function findSprStrictMatches(items, lowerText) {
     { key: 'motor', pattern: /\bmotor(?:es)?\b/ },
     { key: 'cabeza', pattern: /\b(cabeza(?:s)?|culata(?:s)?)\b/ },
     { key: 'amortiguador', pattern: /\bamortiguador(?:es)?\b/ },
-    { key: 'suspension', pattern: /\b(suspension|bieleta)\b/ },
+    { key: 'suspension', pattern: /\b(suspension|bieleta|horquilla)\b/ },
+    { key: 'flecha', pattern: /\bflecha\b/ },
+    { key: 'mangueta', pattern: /\bmangueta\b/ },
     { key: 'balero', pattern: /\b(balero|maza|homocin[eé]tica)\b/ },
     { key: 'freno', pattern: /\b(freno(?:s)?|balata(?:s)?|pastilla(?:s)?)\b/ },
     { key: 'aceite', pattern: /\b(aceite(?:s)?|lubricante(?:s)?|motul|valvoline|pentosin)\b/ },
@@ -1263,6 +1265,9 @@ function findSprStrictMatches(items, lowerText) {
     { key: 'cabeza', pattern: /\b(cabeza(?:s)?|culata(?:s)?)\b/ },
     { key: 'amortiguador', pattern: /\bamortiguador(?:es)?\b/ },
     { key: 'bieleta', pattern: /\bbieleta(?:s)?\b/ },
+    { key: 'horquilla', pattern: /\bhorquilla(?:s)?\b/ },
+    { key: 'flecha', pattern: /\bflecha(?:s)?\b/ },
+    { key: 'mangueta', pattern: /\bmangueta(?:s)?\b/ },
     { key: 'balero', pattern: /\b(balero(?:s)?|maza(?:s)?|homocin[eé]tica(?:s)?)\b/ },
     { key: 'calavera', pattern: /\bcalavera(?:s)?\b/ },
     { key: 'stop', pattern: /\bstop\b/ },
@@ -1433,7 +1438,8 @@ function filterStrictSprVehicleMatches(matches, query) {
     // The dedicated motor matcher handles motor-only requests, so do not make
     // that specification a second hard part requirement here.
     /\b(?:cabeza|culata)(?:s)?\b/, /\bamortiguador(?:es)?\b/,
-    /\bbieleta(?:s)?\b/, /\b(?:balero|maza|homocinetica)(?:s)?\b/,
+    /\bbieleta(?:s)?\b/, /\bhorquilla(?:s)?\b/, /\bflecha(?:s)?\b/, /\bmangueta(?:s)?\b/,
+    /\b(?:balero|maza|homocinetica)(?:s)?\b/,
     /\bcalavera(?:s)?\b/, /\bstop\b/, /\bfaro(?:s)?\b/, /\brejilla(?:s)?\b/,
     /\bespejo(?:s)?\b/, /\bfascia(?:s)?\b/, /\bguia(?:s)?\b/, /\bmoldura(?:s)?\b/,
     /\bdefensa(?:s)?\b/, /\bcofre\b/, /\bcajuela\b/, /\bsalpicadera(?:s)?\b/,
@@ -1496,6 +1502,16 @@ function sprTokenMatches(haystack, token) {
   if (normalizedHaystack.includes(normalizedToken)) return true;
   // Catalog titles often use Mitsubishi PU while customers say L200.
   if (normalizedToken === 'l200' && /\b(?:pu|l200)\b/.test(normalizedHaystack)) return true;
+  // Current SPR titles use abbreviated vehicle names in several families:
+  // TS-III for Tsuru and Vento/Polo/etc. without repeating Volkswagen.
+  if (normalizedToken === 'tsuru' && /\bts[\s-]*iii\b/.test(normalizedHaystack)) return true;
+  const omittedMakeModels = {
+    volkswagen: /\b(?:vento|polo|ibiza|jetta|golf|virtus|t-cross|taigun)\b/,
+    nissan: /\b(?:versa|kicks|march|sentra|frontier|np300|note|ts[\s-]*iii|tsuru)\b/,
+    chevrolet: /\b(?:spark|beat|tornado|aveo|chevy|corsa|trax|tahoe|suburban)\b/,
+    toyota: /\b(?:avanza|yaris|corolla|hilux|prius|tacoma|rav4)\b/
+  };
+  if (omittedMakeModels[normalizedToken]?.test(normalizedHaystack)) return true;
   if (normalizedToken.length < 5 || /\d/.test(normalizedToken)) return false;
   return normalizedHaystack.split(/\s+/).some(word => {
     if (word.length < 5 || Math.abs(word.length - normalizedToken.length) > 1) return false;
@@ -1523,6 +1539,7 @@ function findSprExhaustiveMatches(items, query, skipExact = false) {
   const partRules = [
     ['motor', /\b(?:motor|engine(?:\s+series)?)\b/], ['cabeza', /\b(?:cabeza|culata)\b/],
     ['amortiguador', /\bamortiguador\b/], ['bieleta', /\bbieleta\b/],
+    ['horquilla', /\bhorquilla\b/], ['flecha', /\bflecha\b/], ['mangueta', /\bmangueta\b/],
     ['balero', /\b(?:balero|maza|junta homocinetica)\b/], ['faro', /\bfaro\b/],
     ['rejilla', /\brejilla\b/],
     ['calavera', /\b(?:calavera|stop)\b/], ['espejo', /\bespejo\b/],
