@@ -9,7 +9,8 @@
     "test:faq": "node tests/faq-eval-1000.cjs",
     "test:faq:1000": "node tests/faq-eval-1000.cjs",
     "test:catalog:full": "node tests/catalog-eval-full.cjs",
-    "test:catalog:regressions": "node tests/catalog-regressions.cjs"
+    "test:catalog:regressions": "node tests/catalog-regressions.cjs",
+    "test:gemini-audio": "node tests/gemini-audio.cjs"
   },
   "dependencies": {
     "axios": "^1.7.9",

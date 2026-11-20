@@ -19,6 +19,14 @@ const MEDIA_BODY_LIMIT = process.env.MEDIA_BODY_LIMIT || '12mb';
 const SERVER_STARTED_AT = new Date().toISOString();
 const RESEND_API_URL = 'https://api.resend.com/emails';
 const RESEND_API_KEY = String(process.env.RESEND_API_KEY || '').trim();
+// Audio transcription is deliberately optional. The bot must keep receiving
+// and answering text messages when Gemini has not been configured yet.
+const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || '').trim();
+const GEMINI_AUDIO_MODEL = String(process.env.GEMINI_AUDIO_MODEL || 'gemini-2.5-flash').trim();
+const GEMINI_AUDIO_TIMEOUT_RAW = Number(process.env.GEMINI_AUDIO_TIMEOUT_MS || 30000);
+const GEMINI_AUDIO_MAX_BYTES_RAW = Number(process.env.GEMINI_AUDIO_MAX_BYTES || 20000000);
+const GEMINI_AUDIO_TIMEOUT_MS = Number.isFinite(GEMINI_AUDIO_TIMEOUT_RAW) ? Math.max(10000, GEMINI_AUDIO_TIMEOUT_RAW) : 30000;
+const GEMINI_AUDIO_MAX_BYTES = Number.isFinite(GEMINI_AUDIO_MAX_BYTES_RAW) ? Math.max(1000000, GEMINI_AUDIO_MAX_BYTES_RAW) : 20000000;
 const ALERT_EMAIL_TO = String(process.env.ALERT_EMAIL_TO || '')
   .split(',')
   .map(value => value.trim())
@@ -2574,6 +2582,101 @@ function extractInboundMedia(message) {
   };
 }
 
+function normalizeGeminiAudioMimeType(mimeType) {
+  const normalized = String(mimeType || '').trim().toLowerCase();
+  if (!normalized) return 'audio/ogg';
+  return normalized.split(';', 1)[0].trim() || 'audio/ogg';
+}
+
+function extractGeminiGeneratedText(responseData) {
+  const parts = responseData?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return '';
+  return parts
+    .map(part => (typeof part?.text === 'string' ? part.text : ''))
+    .join('')
+    .trim();
+}
+
+async function fetchWhatsAppMediaBuffer(mediaId, accessToken, mimeType = null) {
+  const normalizedMediaId = String(mediaId || '').trim();
+  const normalizedToken = String(accessToken || '').trim();
+  if (!normalizedMediaId || !normalizedToken) throw new Error('WhatsApp media credentials are missing');
+
+  const metaResponse = await axios.get(
+    `https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(normalizedMediaId)}`,
+    { headers: { Authorization: `Bearer ${normalizedToken}` }, timeout: 10000 }
+  );
+  const mediaUrl = metaResponse.data?.url;
+  if (!mediaUrl) throw new Error('WhatsApp media URL is not available');
+
+  const declaredSize = Number(metaResponse.data?.file_size || 0);
+  if (declaredSize > GEMINI_AUDIO_MAX_BYTES) {
+    const error = new Error('WhatsApp audio exceeds the transcription size limit');
+    error.code = 'AUDIO_TOO_LARGE';
+    throw error;
+  }
+
+  const mediaResponse = await axios.get(mediaUrl, {
+    headers: { Authorization: `Bearer ${normalizedToken}` },
+    responseType: 'arraybuffer',
+    timeout: 20000,
+    maxContentLength: GEMINI_AUDIO_MAX_BYTES,
+    maxBodyLength: GEMINI_AUDIO_MAX_BYTES
+  });
+  const buffer = Buffer.from(mediaResponse.data || '');
+  if (buffer.length > GEMINI_AUDIO_MAX_BYTES) {
+    const error = new Error('WhatsApp audio exceeds the transcription size limit');
+    error.code = 'AUDIO_TOO_LARGE';
+    throw error;
+  }
+  return {
+    buffer,
+    mimeType: normalizeGeminiAudioMimeType(
+      mimeType || mediaResponse.headers?.['content-type'] || metaResponse.data?.mime_type
+    )
+  };
+}
+
+async function transcribeWhatsAppAudioWithGemini({ mediaId, accessToken, mimeType }) {
+  if (!GEMINI_API_KEY) return { text: '', status: 'not_configured' };
+
+  const media = await fetchWhatsAppMediaBuffer(mediaId, accessToken, mimeType);
+  if (!media.buffer.length) return { text: '', status: 'empty_audio' };
+
+  const prompt = [
+    'Transcribe exactly the spoken words in this WhatsApp voice note.',
+    'Return only the transcript in the original language; do not answer, summarize, invent, or add labels.',
+    'Preserve product names, brands, model names, years, numbers, acronyms, and automotive terms exactly as heard.',
+    'If there is no intelligible speech, return an empty string.'
+  ].join(' ');
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_AUDIO_MODEL)}:generateContent`;
+
+  const response = await axios.post(
+    endpoint,
+    {
+      contents: [{
+        parts: [
+          { text: prompt },
+          { inline_data: { mime_type: media.mimeType, data: media.buffer.toString('base64') } }
+        ]
+      }],
+      generationConfig: {
+        temperature: 0,
+        maxOutputTokens: 512
+      }
+    },
+    {
+      headers: { 'x-goog-api-key': GEMINI_API_KEY },
+      timeout: GEMINI_AUDIO_TIMEOUT_MS,
+      maxContentLength: 2 * 1024 * 1024,
+      maxBodyLength: Math.ceil(GEMINI_AUDIO_MAX_BYTES * 1.5)
+    }
+  );
+
+  const text = extractGeminiGeneratedText(response.data).slice(0, 5000);
+  return { text, status: text ? 'completed' : 'empty_transcript' };
+}
+
 /**
  * 1. HEALTH & DIAGNOSTIC STATUS ENDPOINTS
  */
@@ -2609,7 +2712,9 @@ app.get('/api/status', (req, res) => {
     signature_verification: !!META_APP_SECRET ? 'enforced' : 'optional',
     database: db ? 'firebase_admin_authenticated' : 'uninitialized',
     spr_bot_active: SPR_BOT_ACTIVE,
-    spr_bot_pause_control: 'SPR_BOT_ACTIVE=false'
+    spr_bot_pause_control: 'SPR_BOT_ACTIVE=false',
+    gemini_audio_transcription: GEMINI_API_KEY ? 'configured' : 'not_configured',
+    gemini_audio_model: GEMINI_AUDIO_MODEL
   });
 });
 
@@ -2904,6 +3009,39 @@ app.post('/webhook/whatsapp', async (req, res) => {
       return;
     }
 
+    // Keep audio handling tenant-scoped: Meta media can only be downloaded
+    // with the access token belonging to the verified phone number above.
+    // Transcription is best-effort so a Gemini outage never blocks CRM storage
+    // or the existing text-message flow.
+    let audioTranscript = '';
+    let audioTranscriptionStatus = '';
+    if (inboundMedia?.media_type === 'audio') {
+      if (GEMINI_API_KEY) {
+        try {
+          const transcription = await transcribeWhatsAppAudioWithGemini({
+            mediaId: inboundMedia.media_id,
+            accessToken,
+            mimeType: inboundMedia.media_mime_type
+          });
+          audioTranscript = transcription.text;
+          audioTranscriptionStatus = transcription.status;
+        } catch (audioError) {
+          audioTranscriptionStatus = audioError.code === 'AUDIO_TOO_LARGE' ? 'too_large' : 'error';
+          console.warn(`⚠️ [Gemini Audio] Transcription failed (${audioTranscriptionStatus}):`, audioError.response?.data?.error?.message || audioError.message);
+        }
+      } else {
+        audioTranscriptionStatus = 'not_configured';
+      }
+
+      if (audioTranscript) {
+        messageText = audioTranscript;
+        inboundMedia.media_transcript = audioTranscript;
+        inboundMedia.media_transcription_status = 'completed';
+      } else {
+        inboundMedia.media_transcription_status = audioTranscriptionStatus || 'empty_transcript';
+      }
+    }
+
     console.log(`📥 [WhatsApp Inbound] Company: ${companyId} | Phone ID: ${phoneNumberId} | Message received.`);
 
     // Mark inbound webhook reception verified on real customer message (separate from outbound verification)
@@ -3179,6 +3317,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
     // Check for Human Handoff Intent
     const lowerText = normalizeBotText(messageText);
+    const isAudioWithoutTranscript = inboundMedia?.media_type === 'audio' && !audioTranscript;
     const humanKeywords = ['asesor', 'humano', 'persona', 'agente', 'ejecutivo', 'hablar con alguien', 'representante', 'ayuda humana', 'transferir'];
     const singleMessageLockActiveBeforeTurn = isSprTenantForHours
       && convData.spr_requires_complete_single_message === true;
@@ -3249,6 +3388,11 @@ app.post('/webhook/whatsapp', async (req, res) => {
       // The bot remains available after hours, but a requested physical visit
       // is still scheduled for the next delivery window.
       botReply = buildSprAfterHoursVisitReply();
+    } else if (isAudioWithoutTranscript) {
+      // Never route an unreadable voice note directly to an advisor or claim
+      // that the requested piece is unavailable. Ask for a retry while keeping
+      // the original audio available in the CRM for manual review.
+      botReply = '🎙️ Recibí tu audio, pero no pude transcribirlo. ¿Puedes enviarlo de nuevo o escribir tu consulta, por favor?';
     } else if (botSettings?.working_hours && !checkWorkingHours(botSettings.working_hours) && !isFriendlyGreeting && !isCourtesyMessage && !isShopifyPrefillIntro && !isSprHoursQuestion) {
       // Out of hours
       botReply = shouldScheduleSprAfterHoursVisit
@@ -4658,6 +4802,10 @@ module.exports = {
   MASTER_VERIFY_TOKEN,
   normalizeWhatsAppPhone,
   normalizeBotText,
+  extractInboundMedia,
+  extractGeminiGeneratedText,
+  normalizeGeminiAudioMimeType,
+  transcribeWhatsAppAudioWithGemini,
   isFriendlyGreetingText,
   isCourtesyText,
   canonicalizeSprPartSynonyms,
