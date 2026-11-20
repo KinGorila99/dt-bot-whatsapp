@@ -176,6 +176,43 @@ if (corollaMazaMatches.length !== 1 || corollaMazaMatches[0].id !== corollaMazaI
   failures.push({ request: corollaMazaRequest, matches: corollaMazaMatches.map(item => item.title) });
 }
 
+// Negative feature wording is common in collision titles. "Sin faro de
+// niebla" must not turn the excluded lamp into a second requested part.
+const grilleNoFogRequest = 'Rejilla derecha sin faro de niebla Chevrolet Aveo 2018';
+const grilleNoFogItem = {
+  id: 'aveo-grille-no-fog',
+  title: 'REJILLA DERECHO SIN FARO DE NIEBLA CHEVROLET AVEO 2018 2023 346 TYG PCAE18R',
+  normalizedTitle: normalizeBotText('REJILLA DERECHO SIN FARO DE NIEBLA CHEVROLET AVEO 2018 2023 346 TYG PCAE18R'),
+  vendor: 'TYG', productType: 'REJILLA', tags: '', description: '', regularPrice: 100,
+  offerPrice: 100, discountEligible: false, available: true
+};
+const grilleNoFogMatches = filterStrictSprVehicleMatches(
+  findSprEngineMatches([grilleNoFogItem], grilleNoFogRequest),
+  grilleNoFogRequest
+);
+if (grilleNoFogMatches.length !== 1 || grilleNoFogMatches[0].id !== grilleNoFogItem.id) {
+  failures.push({ request: grilleNoFogRequest, matches: grilleNoFogMatches.map(item => item.title) });
+}
+
+// Long Shopify titles can contain several fitments, engine notes and supplier
+// codes. The relaxed pass must still keep the requested part and vehicle tied
+// together instead of rejecting the real product for the extra descriptors.
+const noisyFitmentRequest = 'Amortiguador VW Crafter Mercedes Sprinter 2010';
+const noisyFitmentItem = {
+  id: 'crafter-sprinter-shock',
+  title: 'AMORTIGUADOR EXCEL G TRAS VW CRAFTER 50 TODAS 10 11 MERCEDES SPRINTER 415 515 VAN CHASIS PASAJERO 07 11 ALL SWB MWB LWB KYB 349044',
+  normalizedTitle: normalizeBotText('AMORTIGUADOR EXCEL G TRAS VW CRAFTER 50 TODAS 10 11 MERCEDES SPRINTER 415 515 VAN CHASIS PASAJERO 07 11 ALL SWB MWB LWB KYB 349044'),
+  vendor: 'KYB', productType: 'AMORTIGUADOR', tags: '', description: '', regularPrice: 100,
+  offerPrice: 100, discountEligible: false, available: true
+};
+const noisyFitmentMatches = filterStrictSprVehicleMatches(
+  findSprEngineMatches([noisyFitmentItem], noisyFitmentRequest),
+  noisyFitmentRequest
+);
+if (noisyFitmentMatches.length !== 1 || noisyFitmentMatches[0].id !== noisyFitmentItem.id) {
+  failures.push({ request: noisyFitmentRequest, matches: noisyFitmentMatches.map(item => item.title) });
+}
+
 for (const request of requests) {
   const normalized = canonicalizeSprPartSynonyms(request);
   const matches = filterStrictSprVehicleMatches(findSprEngineMatches([target], normalized), normalized);
@@ -195,7 +232,7 @@ for (const testCase of contextualCases) {
   }
 }
 
-const totalCases = requests.length + contextualCases.length + 2;
+const totalCases = requests.length + contextualCases.length + 4;
 console.log(`SPR catalog regressions: ${totalCases - failures.length}/${totalCases} passed`);
 if (failures.length) {
   console.error(JSON.stringify(failures, null, 2));

@@ -111,7 +111,7 @@ async function main() {
     passed,
     failed: urls.length - passed,
     accuracy: urls.length ? Number((passed / urls.length * 100).toFixed(4)) : 0,
-    failures: failures.slice(0, 10)
+    failures: failures.slice(0, 500)
   }, null, 2));
   if (failures.length || passed !== urls.length) process.exitCode = 1;
 }
