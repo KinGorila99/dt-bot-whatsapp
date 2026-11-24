@@ -507,6 +507,16 @@ function normalizeBotText(value) {
     .trim();
 }
 
+// "asesoría" is a normal request for help, not an explicit request to speak
+// with a human. Keep the human-handoff matcher word-based so it does not
+// mistake Shopify/website prefill messages such as "necesito asesoría para
+// suspensión" for a transfer request.
+const SPR_HUMAN_INTENT_PATTERN = /\b(?:asesor(?:a|es|as)?|humano|persona|agente|ejecutivo|representante)\b|\b(?:hablar con alguien|ayuda humana|transferir)\b/;
+
+function isExplicitHumanHandoffRequest(value) {
+  return SPR_HUMAN_INTENT_PATTERN.test(normalizeBotText(value));
+}
+
 // Keep greeting and courtesy detection reusable by the offline evaluator and
 // by the webhook. These messages must never fall through to catalog matching.
 function isFriendlyGreetingText(value) {
@@ -3318,10 +3328,9 @@ app.post('/webhook/whatsapp', async (req, res) => {
     // Check for Human Handoff Intent
     const lowerText = normalizeBotText(messageText);
     const isAudioWithoutTranscript = inboundMedia?.media_type === 'audio' && !audioTranscript;
-    const humanKeywords = ['asesor', 'humano', 'persona', 'agente', 'ejecutivo', 'hablar con alguien', 'representante', 'ayuda humana', 'transferir'];
     const singleMessageLockActiveBeforeTurn = isSprTenantForHours
       && convData.spr_requires_complete_single_message === true;
-    const wantsHuman = humanKeywords.some(kw => lowerText.includes(kw));
+    const wantsHuman = isExplicitHumanHandoffRequest(lowerText);
     const wantsSprStoreAvailabilityAdvisor = isSprTenantForHours
       && isSprStoreAvailabilityRequest(messageText);
     // Greetings and courtesy messages must be answered before business-hours rules.
@@ -4802,6 +4811,7 @@ module.exports = {
   MASTER_VERIFY_TOKEN,
   normalizeWhatsAppPhone,
   normalizeBotText,
+  isExplicitHumanHandoffRequest,
   extractInboundMedia,
   extractGeminiGeneratedText,
   normalizeGeminiAudioMimeType,

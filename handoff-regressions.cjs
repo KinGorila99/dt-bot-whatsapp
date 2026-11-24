@@ -16,6 +16,7 @@ Module._load = function loadForEvaluation(request, parent, isMain) {
 };
 const {
   checkWorkingHours,
+  isExplicitHumanHandoffRequest,
   isFriendlyGreetingText,
   isCourtesyText,
   isSprNewRequestOrQuestion,
@@ -48,6 +49,17 @@ const cases = [
   ['El asesor ya me atendió', false, 'advisor update does not resume']
 ];
 const failures = [];
+
+for (const [text, expected, label] of [
+  ['Hola vengo de SPR Autopartes y necesito asesoría para suspensión. Marca, modelo y año:', false, 'Shopify suspension prefill stays automated'],
+  ['Hola vengo de SPR Autopartes y necesito asesoría para suspensión. Marca, modelo y año: JAC Sei 2 2023, busco tolva derecha delantera', false, 'Complete Shopify suspension request stays automated'],
+  ['Quiero hablar con un asesor', true, 'Explicit human request still transfers'],
+  ['Necesito un asesor humano', true, 'Explicit human request with human keyword transfers']
+]) {
+  const actual = isExplicitHumanHandoffRequest(text);
+  if (actual !== expected) failures.push({ text, expected, actual, label });
+}
+
 for (const [text, expected, label] of cases) {
   const actual = label === 'greeting'
     ? isFriendlyGreetingText(text)
