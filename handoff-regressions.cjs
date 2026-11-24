@@ -24,6 +24,7 @@ const {
   isSprStoreAvailabilityRequest,
   buildSprStoreAvailabilityHandoffReply,
   isSprEngineCatalogRequest,
+  isSprSearchableCatalogRequest,
   buildSprEngineUnavailableReply,
   isSprCompleteSingleMessageRequest,
   isSprIncompleteSingleMessageRequest,
@@ -63,14 +64,23 @@ for (const [text, expected, label] of [
   if (actual !== expected) failures.push({ text, expected, actual, label });
 }
 
-const partialMakeRequest = 'marco radiador inferior aveo 2026';
-if (!isSprCompleteSingleMessageRequest(partialMakeRequest)
-  || isSprIncompleteSingleMessageRequest(partialMakeRequest)) {
-  failures.push({
-    partialMakeRequest,
-    complete: isSprCompleteSingleMessageRequest(partialMakeRequest),
-    incomplete: isSprIncompleteSingleMessageRequest(partialMakeRequest)
-  });
+for (const request of [
+  'marco radiador inferior aveo 2026',
+  'maza corolla 2022',
+  'base de amortiguador jetta 2019',
+  'faro derecho nissan versa 2017',
+  'costado trasero izquierdo chevrolet spark 2011'
+]) {
+  if (!isSprSearchableCatalogRequest(request)
+    || !isSprCompleteSingleMessageRequest(request)
+    || isSprIncompleteSingleMessageRequest(request)) {
+    failures.push({
+      request,
+      searchable: isSprSearchableCatalogRequest(request),
+      complete: isSprCompleteSingleMessageRequest(request),
+      incomplete: isSprIncompleteSingleMessageRequest(request)
+    });
+  }
 }
 
 for (const [text, expected, label] of cases) {

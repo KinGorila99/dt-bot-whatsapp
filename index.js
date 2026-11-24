@@ -836,25 +836,26 @@ function buildSprCatalogImageUnavailableReply() {
   return '📷 La imagen de referencia no se muestra en el enlace. No tengo la facultad de enviar fotos aparte desde este chat, así que te redirijo con un asesor para que te comparta la imagen y confirme la pieza. 👨‍💼';
 }
 
-function isSprCompleteSingleMessageRequest(value) {
+// A catalog lookup is actionable as soon as the customer names a piece,
+// identifies a model and gives a year. The make is useful context, but it is
+// not mandatory: many customers write only a well-known model (for example,
+// "Aveo", "Sentra" or "Jetta"). Keep this as one shared rule so every part,
+// synonym and open-ended piece description follows the same path instead of
+// falling back to the generic four-field prompt.
+function isSprSearchableCatalogRequest(value) {
   const query = canonicalizeSprPartSynonyms(value);
   if (!query || isFriendlyGreetingText(query) || isCourtesyText(query)) return false;
-  // Catalog names are open-ended.  A customer may describe a collision piece
-  // that is not in our synonym list (for example, "costado trasero izquierdo")
-  // and still provide a complete vehicle request.  Treat that description as
-  // the piece once the vehicle make/model/year are present so it reaches the
-  // live catalog search instead of the one-message reminder.
   const hasPart = hasSprExplicitPartRequest(query) || hasSprUnlistedPartRequest(query);
   // Keep the original message for vehicle detection. Canonicalizing the
   // text turns a displacement such as `2.5` into separate numeric tokens;
   // using the raw message lets `Mazda 6` remain a valid model reference.
   const hasModel = hasSprVehicleReference(value);
   const hasYear = /\b(?:19|20)\d{2}\b|\b(?:0\d|[1-9]\d)\b/.test(query);
-  // A make is helpful but is not always written by the customer. Common
-  // models such as Aveo, Sentra or Jetta identify the vehicle family well
-  // enough for the catalog search to try first. Requiring the make here
-  // caused a valid piece/model/year request to loop on the generic prompt.
   return hasPart && hasModel && hasYear;
+}
+
+function isSprCompleteSingleMessageRequest(value) {
+  return isSprSearchableCatalogRequest(value);
 }
 
 function buildSprSingleMessageRequiredReply() {
@@ -4860,6 +4861,7 @@ module.exports = {
   isSprCatalogImageIssue,
   buildSprCatalogImageUnavailableReply,
   isSprCompleteSingleMessageRequest,
+  isSprSearchableCatalogRequest,
   buildSprSingleMessageRequiredReply,
   isSprIncompleteSingleMessageRequest,
   buildSprCompleteRequestPrompt,
