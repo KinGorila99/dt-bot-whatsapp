@@ -34,6 +34,7 @@ const {
   buildSprCatalogContext,
   isSprLikelyPieceFollowUp,
   buildSprCatalogReply,
+  extractSprCatalogPreferences,
   buildSprCatalogFallbackReply,
   findSprCatalogRecoveryMatches,
   findSprEngineMatches,
@@ -82,6 +83,11 @@ for (const request of [
     });
   }
 }
+
+const preference = extractSprCatalogPreferences('tienes en marca saefty o algo economico');
+if (preference.brands.join('|') !== 'safety' || !preference.budget) failures.push({ preference });
+const preferenceContext = buildSprCatalogContext(['tienes en marca saefty o algo economico'], 'amortiguadores traseros Chevrolet Optra 2007');
+if (!/marca safety economico/.test(preferenceContext)) failures.push({ preferenceContext });
 
 for (const [text, expected, label] of cases) {
   const actual = label === 'greeting'

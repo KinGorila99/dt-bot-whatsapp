@@ -1274,7 +1274,7 @@ async function searchSprCatalog(query) {
 
 function findSprStrictMatches(items, lowerText) {
   const normalizedQuery = stripSprExcludedFogFeature(normalizeSprCatalogText(lowerText));
-  const stopWords = new Set(['quiero', 'quieres', 'busco', 'buscando', 'necesito', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'engine', 'series', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo', 'producto', 'productos', 'catalogo', 'catalog', 'refaccion', 'refacciones', 'pieza', 'piezas', 'stock', 'completo', 'completa', 'todo', 'toda', 'todos', 'todas', 'ver', 'muestrame', 'muéstrame', 'informacion', 'información', 'que', 'qué', 'delantero', 'delantera', 'trasero', 'trasera', 'izquierdo', 'izquierda', 'derecho', 'derecha', 'lado', 'principal', 'niebla', 'antiniebla', 'no', 'sin', 'quiero']);
+  const stopWords = new Set(['quiero', 'quieres', 'busco', 'buscando', 'necesito', 'dame', 'tienes', 'tienen', 'hay', 'para', 'una', 'uno', 'precio', 'precios', 'cuanto', 'cuesta', 'costo', 'cotizacion', 'cotizar', 'comprar', 'compra', 'nuevo', 'nueva', 'disponible', 'disponibilidad', 'por', 'favor', 'me', 'interesa', 'motor', 'motores', 'cabeza', 'cabezas', 'culata', 'engine', 'series', 'de', 'el', 'la', 'los', 'las', 'un', 'y', 'o', 'mi', 'auto', 'carro', 'vehiculo', 'vehículo', 'producto', 'productos', 'catalogo', 'catalog', 'refaccion', 'refacciones', 'pieza', 'piezas', 'stock', 'marca', 'fabricante', 'en', 'algo', 'economico', 'economica', 'barato', 'barata', 'accesible', 'mejor', 'menor', 'bajo', 'completo', 'completa', 'todo', 'toda', 'todos', 'todas', 'ver', 'muestrame', 'muéstrame', 'informacion', 'información', 'que', 'qué', 'delantero', 'delantera', 'trasero', 'trasera', 'izquierdo', 'izquierda', 'derecho', 'derecha', 'lado', 'principal', 'niebla', 'antiniebla', 'no', 'sin', 'quiero']);
   const tokens = normalizedQuery.split(' ').filter(token => token.length >= 3 && !stopWords.has(token));
   const categoryRules = [
     { key: 'motor', pattern: /\bmotor(?:es)?\b/ },
@@ -1940,6 +1940,48 @@ const SPR_CATALOG_REFINEMENT_PATTERN = /\b(delantero|delantera|delanteros|delant
 // before searching so the bot cannot return an unrelated make or model.
 const SPR_CATALOG_GENERIC_WORDS_PATTERN = /\b(estoy|buscando|quiero|busco|necesito|ocupo|requiero|deseo|interesa|interesado|interesada|gustaria|dame|tienes|tienen|hay|para|una|uno|un|el|la|los|las|mi|mis|que|qué|por|favor|de|precio|precios|cuanto|cu[aá]nto|cuesta|costo|cotizacion|cotizaci[oó]n|cotizar|comprar|compra|nuevo|nueva|disponible|disponibilidad|stock|catalogo|cat[aá]logo|producto|productos|pieza|piezas|refaccion|refacciones|motor|motores|cabeza|cabezas|culata|engine|series|amortiguador|amortiguadores|suspension|bieleta|bieletas|balero|baleros|maza|mazas|homocinetica|homocineticas|freno|frenos|balata|balatas|pastilla|pastillas|aceite|lubricante|lubricantes|direccion|terminal|terminales|rotula|rotulas|radiador|radiadores|bomba|bombas|turbo|turbos|embrague|clutch|soporte|soportes|faro|faros|niebla|antiniebla|principal|calavera|calaveras|lampara|lamparas|luz|luces|espejo|espejos|guia|guias|fascia|fascias|moldura|molduras|parrilla|parrillas|defensa|defensas|cofre|cajuela|puerta|puertas|manija|manijas|bisagra|bisagras|tolva|tolvas|rejilla|rejillas|salpicadera|salpicaderas|carroceria|delantero|delantera|delanteros|delanteras|trasero|trasera|traseros|traseras|izquierdo|izquierda|izquierdos|izquierdas|derecho|derecha|derechos|derechas|lateral|laterales|lado|frente|atras|modelo|ano|version|auto|carro|vehiculo|vehiculos|coche|camioneta|camion|camiones|completo|completa|todo|toda|todos|todas|no|sin|evitar|ningun|ninguna)\b/gi;
 const SPR_VEHICLE_MAKES = new Set(['nissan', 'ford', 'chevrolet', 'chevy', 'volkswagen', 'vw', 'toyota', 'honda', 'kia', 'hyundai', 'dodge', 'chrysler', 'jeep', 'mazda', 'mitsubishi', 'suzuki', 'seat', 'renault', 'peugeot', 'fiat', 'ram', 'gmc', 'volvo', 'audi', 'bmw', 'mercedes', 'mercedesbenz', 'isuzu', 'subaru', 'lincoln', 'cadillac', 'buick', 'acura', 'infiniti', 'lexus', 'porsche', 'mg', 'byd']);
+const SPR_CATALOG_BUDGET_PATTERN = /\b(?:economico|economica|barato|barata|accesible|mejor\s+precio|menor\s+precio|mas\s+barato|bajo\s+costo)\b/;
+const SPR_BRAND_ALIASES = new Map([['saefty', 'safety'], ['safeti', 'safety'], ['safaty', 'safety']]);
+
+function extractSprCatalogPreferences(value) {
+  const normalized = normalizeBotText(value);
+  const brands = [];
+  const brandPattern = /\b(?:marca|fabricante)\s+([a-z0-9][a-z0-9-]*)/g;
+  for (const match of normalized.matchAll(brandPattern)) {
+    const candidate = String(match[1] || '').trim();
+    if (!candidate || SPR_VEHICLE_MAKES.has(candidate)) continue;
+    const canonical = SPR_BRAND_ALIASES.get(candidate) || candidate;
+    if (canonical.length >= 2 && !brands.includes(canonical)) brands.push(canonical);
+  }
+  return { brands, budget: SPR_CATALOG_BUDGET_PATTERN.test(normalized) };
+}
+
+function buildSprCatalogPreferenceSuffix(preferences) {
+  const value = preferences && typeof preferences === 'object' ? preferences : {};
+  return [
+    ...(Array.isArray(value.brands) ? value.brands.flatMap(brand => ['marca', brand]) : []),
+    value.budget ? 'economico' : ''
+  ].filter(Boolean).join(' ');
+}
+
+function stripSprCatalogPreferenceTerms(value) {
+  let normalized = normalizeSprCatalogText(value);
+  const preferences = extractSprCatalogPreferences(normalized);
+  for (const brand of preferences.brands) {
+    const aliases = [brand, ...[...SPR_BRAND_ALIASES.entries()].filter(([, canonical]) => canonical === brand).map(([alias]) => alias)];
+    const pattern = aliases.map(escapeSprRegex).join('|');
+    normalized = normalized.replace(new RegExp('\\b(?:marca|fabricante)\\s+(?:' + pattern + ')\\b', 'gi'), ' ');
+  }
+  normalized = normalized.replace(SPR_CATALOG_BUDGET_PATTERN, ' ');
+  return normalized.replace(/\s+/g, ' ').trim();
+}
+
+function prioritizeSprCatalogMatches(matches, query) {
+  const preferences = extractSprCatalogPreferences(query);
+  if (!preferences.budget || !Array.isArray(matches) || matches.length < 2) return matches;
+  return matches.slice().sort((a, b) => Number(a?.regularPrice || a?.offerPrice || 0) - Number(b?.regularPrice || b?.offerPrice || 0));
+}
+
 
 function hasSprVehicleReference(value) {
   // Remove decimal engine displacements before tokenizing. After text
@@ -2078,28 +2120,35 @@ function buildSprCatalogContext(previousCustomerMessages, currentMessage) {
     || isSprLikelyPieceFollowUp(currentNormalized);
   const currentCanUsePreviousVehicle = currentHasCatalogTerm
     && !currentHasVehicle;
+  const previousPreference = [...previous].reverse()
+    .map(value => extractSprCatalogPreferences(value))
+    .find(preference => preference.brands.length || preference.budget) || null;
+  const preferenceSuffix = buildSprCatalogPreferenceSuffix(previousPreference);
+  const addPreference = value => preferenceSuffix && currentHasCatalogTerm
+    ? value + ' ' + preferenceSuffix
+    : value;
 
-  if (latestVehicleContext && currentCanUsePreviousVehicle) return latestVehicleContext + ' ' + current; // Keep the latest vehicle profile for subsequent pieces.
+  if (latestVehicleContext && currentCanUsePreviousVehicle) return addPreference(latestVehicleContext + ' ' + current); // Keep the latest vehicle profile for subsequent pieces.
   // (for example: "faro de Versa 2017" -> "quiero el faro principal").
   if (previousCatalogMessage && currentCanUsePreviousVehicle) {
-    return previousCatalogMessage + ' ' + current;
+    return addPreference(previousCatalogMessage + ' ' + current);
   }
 
   // The first turn may contain only a model/year (for example, "Sentra
   // 2018"), followed by the actual piece. Preserve that vehicle context so
   // "faro derecho" becomes a searchable request instead of a dead end.
   if (previousVehicleMessage && currentCanUsePreviousVehicle) {
-    return previousVehicleMessage + ' ' + current;
+    return addPreference(previousVehicleMessage + ' ' + current);
   }
 
   if (previousStructuredVehicleContext && currentCanUsePreviousVehicle) {
-    return previousStructuredVehicleContext + ' ' + current;
+    return addPreference(previousStructuredVehicleContext + ' ' + current);
   }
 
   if (previous.length && isFollowUpRefinement && SPR_CATALOG_CONTEXT_PATTERN.test(previousNormalized)) {
-    return previous.slice(-4).join(' ') + ' ' + current;
+    return addPreference(previous.slice(-4).join(' ') + ' ' + current);
   }
-  return current;
+  return addPreference(current);
 }
 
 function isGenericSprCatalogRequest(lowerText) {
@@ -2280,13 +2329,16 @@ function buildSprCatalogUnavailableReply(value) {
     : 'Por el momento no contamos con esa pieza para ese modelo en específico.';
 }
 
-function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult = null) {
+function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult = null, preferenceNote = '') {
   const safeMatches = Array.isArray(matches) ? matches : [];
   // A concrete catalog match always wins. Do not let a word such as
   // "delantera", "precio" or "disponible" send a valid request back to the
   // data-capture prompt after the matcher already found products.
   if (safeMatches.length) {
     const lines = ['🛠️ *Catálogo de SPR Autopartes*', '', 'Encontré estas opciones relacionadas:'];
+    const preferences = extractSprCatalogPreferences(lowerText);
+    if (preferenceNote) lines.push('', 'ℹ️ ' + preferenceNote);
+    if (preferences.budget) lines.push('', '💰 Ordené primero las opciones de menor precio para que puedas comparar.');
     for (const item of safeMatches) {
       lines.push('', '🛒 *' + item.title + '*');
       if (item.hasSeptemberOffer) {
@@ -3583,7 +3635,7 @@ Incluye:
         && !isSprPurchaseConfirmation
         && !vehicleOnlyCatalogContext
         && (/\b(motor(?:es)?|cabeza(?:s)?|culata|engine series|cabeza de motor|amortiguador(?:es)?|suspensi[oó]n|freno(?:s)?|balatas|pastillas|aceite|anticongelante|refrigerante|coolant|lubricante|aditivo|liquido(?:s)?|buj[ií]a(?:s)?|bater[ií]a(?:s)?|filtro(?:s)?|llanta(?:s)?|neum[aá]tico(?:s)?|rin(?:es)?|birlo(?:s)?|plumilla(?:s)?|escobilla(?:s)?|fusible(?:s)?|foco(?:s)?|refacci[oó]n(?:es)?|pieza(?:s)?|caja de direcci[oó]n|direcci[oó]n|cremallera(?:s)?|rack(?:\s+and)?\s+pinion|radiador|bomba|turbo|embrague|clutch|soporte|terminal|r[oó]tula|productos?|cat[aá]logo|precio|cotiza(?:r|ci[oó]n)?|disponible|stock|delantero|delantera|trasero|trasera|izquierdo|izquierda|derecho|derecha|faro(?:s)?|calavera(?:s)?|lampara(?:s)?|luz|luces|espejo(?:s)?|gu[ií]a(?:s)?|fascia(?:s)?|moldura(?:s)?|parrilla(?:s)?|defensa(?:s)?|cofre|cajuela|puerta(?:s)?|manija(?:s)?|bisagra(?:s)?|tolva(?:s)?|rejilla(?:s)?|salpicadera|carroceria)\b/.test(lowerText) || SPR_EXPLICIT_PART_PATTERN.test(lowerText) || catalogLowerText !== lowerText || isUnlistedSprProductRequest(catalogLowerText) || isSprCompleteSingleMessage || (catalogContextText !== messageText && isSprLikelyPieceFollowUp(messageText)));
-      let sprCatalogReply = ''; let sprCatalogMatched = false; let sprCatalogLookupSucceeded = false;
+      let sprCatalogReply = ''; let sprCatalogMatched = false; let sprCatalogLookupSucceeded = false; let sprCatalogPreferenceNote = '';
       if (isSprAutopartesTenant && asksCatalogProduct) {
         try {
           // Load the complete official catalog first. The Shopify suggest
@@ -3643,10 +3695,32 @@ Incluye:
           if (!sprMatches.length && !isGenericSprCatalogRequest(catalogLowerText)) {
             sprMatches = findSprCatalogRecoveryMatches(catalogItems, catalogQueryText);
           }
+          // First honor an explicitly requested product brand. If that brand
+          // has no compatible result, reopen the search without the preference
+          // and show alternatives instead of closing the conversation.
+          const requestedPreferences = extractSprCatalogPreferences(catalogQueryText);
+          if (!sprMatches.length && (requestedPreferences.brands.length || requestedPreferences.budget)) {
+            const fallbackQuery = stripSprCatalogPreferenceTerms(catalogQueryText);
+            const fallbackLower = normalizeSprCatalogText(fallbackQuery);
+            if (fallbackLower && fallbackLower !== catalogLowerText) {
+              sprMatches = findSprEngineMatches(catalogItems, fallbackLower);
+              sprMatches = filterStrictSprVehicleMatches(sprMatches, fallbackLower);
+              if (!sprMatches.length && !isGenericSprCatalogRequest(fallbackLower)) {
+                sprMatches = findSprExhaustiveMatches(catalogItems, fallbackQuery);
+              }
+              if (!sprMatches.length && !isGenericSprCatalogRequest(fallbackLower)) {
+                sprMatches = findSprCatalogRecoveryMatches(catalogItems, fallbackQuery);
+              }
+              if (sprMatches.length && requestedPreferences.brands.length) {
+                sprCatalogPreferenceNote = 'No encontré esa marca compatible con el vehículo; te muestro alternativas compatibles para que puedas comparar.';
+              }
+            }
+          }
+          sprMatches = prioritizeSprCatalogMatches(sprMatches, catalogQueryText);
           sprCatalogMatched = sprMatches.length > 0; const aldoStockResult = isAldoStockCategoryQuery(catalogQueryText)
             ? await searchAldoStock(catalogQueryText)
             : null;
-          sprCatalogReply = buildSprCatalogReply(sprMatches, catalogLowerText, catalogItems, aldoStockResult);
+          sprCatalogReply = buildSprCatalogReply(sprMatches, catalogLowerText, catalogItems, aldoStockResult, sprCatalogPreferenceNote);
         } catch (catalogError) {
           console.warn('⚠️ SPR live catalog lookup failed:', catalogError.message);
         }
@@ -4870,6 +4944,8 @@ module.exports = {
   buildSprEngineUnavailableReply,
   buildSprCatalogUnavailableReply,
   buildSprCatalogReply,
+  extractSprCatalogPreferences,
+  buildSprCatalogContext,
   businessMinutesSince,
   isSprBusinessWindow,
   normalizeSprProduct,
