@@ -2357,7 +2357,6 @@ function buildSprCatalogReply(matches, lowerText, catalogItems = [], stockResult
       lines.push('🖼️ Foto y detalles: ' + (item.image || item.url));
       lines.push('🔗 ' + item.url);
     }
-    lines.push('', '¿Quieres que revisemos compatibilidad con tu vehículo o buscar otra pieza?');
     return lines.join('\n');
   }
   if (isGenericSprCatalogRequest(lowerText)) {
