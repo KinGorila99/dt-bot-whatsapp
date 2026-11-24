@@ -25,6 +25,8 @@ const {
   buildSprStoreAvailabilityHandoffReply,
   isSprEngineCatalogRequest,
   buildSprEngineUnavailableReply,
+  isSprCompleteSingleMessageRequest,
+  isSprIncompleteSingleMessageRequest,
   buildSprFaqReply,
   getSprMissingRequestFields,
   buildSprMissingRequestReply,
@@ -53,11 +55,22 @@ const failures = [];
 for (const [text, expected, label] of [
   ['Hola vengo de SPR Autopartes y necesito asesoría para suspensión. Marca, modelo y año:', false, 'Shopify suspension prefill stays automated'],
   ['Hola vengo de SPR Autopartes y necesito asesoría para suspensión. Marca, modelo y año: JAC Sei 2 2023, busco tolva derecha delantera', false, 'Complete Shopify suspension request stays automated'],
+  ['marco radiador inferior aveo 2026', false, 'Piece/model/year without make does not trigger the one-message loop'],
   ['Quiero hablar con un asesor', true, 'Explicit human request still transfers'],
   ['Necesito un asesor humano', true, 'Explicit human request with human keyword transfers']
 ]) {
   const actual = isExplicitHumanHandoffRequest(text);
   if (actual !== expected) failures.push({ text, expected, actual, label });
+}
+
+const partialMakeRequest = 'marco radiador inferior aveo 2026';
+if (!isSprCompleteSingleMessageRequest(partialMakeRequest)
+  || isSprIncompleteSingleMessageRequest(partialMakeRequest)) {
+  failures.push({
+    partialMakeRequest,
+    complete: isSprCompleteSingleMessageRequest(partialMakeRequest),
+    incomplete: isSprIncompleteSingleMessageRequest(partialMakeRequest)
+  });
 }
 
 for (const [text, expected, label] of cases) {

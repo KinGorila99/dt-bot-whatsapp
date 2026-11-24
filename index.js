@@ -845,13 +845,16 @@ function isSprCompleteSingleMessageRequest(value) {
   // the piece once the vehicle make/model/year are present so it reaches the
   // live catalog search instead of the one-message reminder.
   const hasPart = hasSprExplicitPartRequest(query) || hasSprUnlistedPartRequest(query);
-  const hasMake = [...SPR_VEHICLE_MAKES].some(make => new RegExp(`\\b${escapeSprRegex(make)}\\b`, 'i').test(query));
   // Keep the original message for vehicle detection. Canonicalizing the
   // text turns a displacement such as `2.5` into separate numeric tokens;
   // using the raw message lets `Mazda 6` remain a valid model reference.
   const hasModel = hasSprVehicleReference(value);
   const hasYear = /\b(?:19|20)\d{2}\b|\b(?:0\d|[1-9]\d)\b/.test(query);
-  return hasPart && hasMake && hasModel && hasYear;
+  // A make is helpful but is not always written by the customer. Common
+  // models such as Aveo, Sentra or Jetta identify the vehicle family well
+  // enough for the catalog search to try first. Requiring the make here
+  // caused a valid piece/model/year request to loop on the generic prompt.
+  return hasPart && hasModel && hasYear;
 }
 
 function buildSprSingleMessageRequiredReply() {
